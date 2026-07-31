@@ -1,0 +1,6 @@
+trading_mode: paper
+enabled: false
+broker: ibkr
+account_environment: paper
+allowed_instruments: [MNQ]
+note: Adapter disponibile dalla Milestone 5.

@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    environment:
+      TRADING_MODE: ${TRADING_MODE:-backtest}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/adaptive_bot.db}
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./data:/app/data
+    command: ["--help"]

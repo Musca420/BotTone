@@ -1,0 +1,6 @@
+trading_mode: paper
+enabled: false
+broker: alpaca
+account_environment: paper
+allowed_instruments: [QQQ]
+note: Adapter disponibile dalla Milestone 2.

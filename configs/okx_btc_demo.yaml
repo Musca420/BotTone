@@ -1,0 +1,6 @@
+trading_mode: paper
+enabled: false
+broker: okx
+account_environment: demo
+allowed_instruments: [BTC-USDT-SWAP]
+note: Adapter disponibile dalla Milestone 4.
