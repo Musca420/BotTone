@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from requests import HTTPError, Response
 from adaptive_bot.adapters.alpaca.broker import AlpacaPaperBroker
 from adaptive_bot.adapters.alpaca.mapping import candle_from_alpaca, order_from_alpaca
 from adaptive_bot.adapters.alpaca.market_data import AlpacaMarketData
+from adaptive_bot.adapters.alpaca.trade_updates import AlpacaTradeUpdates
 from adaptive_bot.domain.enums import OrderStatus, OrderType, Side
 from adaptive_bot.domain.models import OrderRequest
 from adaptive_bot.risk.kill_switch import KillSwitch
@@ -128,6 +130,40 @@ async def test_stream_disconnect_is_propagated() -> None:
     )
     with pytest.raises(ConnectionError, match="disconnected"):
         await anext(provider.stream("QQQ"))
+
+
+class FillUpdateStream:
+    def __init__(self) -> None:
+        self.handler: Any | None = None
+
+    def subscribe_trade_updates(self, handler: Any) -> None:
+        self.handler = handler
+
+    def run(self) -> None:
+        assert self.handler is not None
+        update = SimpleNamespace(
+            event=SimpleNamespace(value="partial_fill"),
+            order=_order(status="partially_filled"),
+            timestamp=datetime(2026, 1, 5, 15, 1, tzinfo=UTC),
+            price=500.25,
+            qty=1,
+        )
+        asyncio.run(self.handler(update))
+
+    def stop(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_trade_updates_emit_order_then_fill() -> None:
+    updates = AlpacaTradeUpdates("key", "secret", stream_factory=FillUpdateStream)
+    stream = updates.stream()
+    order = await anext(stream)
+    fill = await anext(stream)
+    await stream.aclose()
+    assert order.status is OrderStatus.PARTIALLY_FILLED
+    assert fill.quantity == Decimal("1")
+    assert fill.price == Decimal("500.25")
 
 
 @pytest.mark.asyncio

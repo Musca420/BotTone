@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from adaptive_bot.domain.enums import OrderStatus, OrderType, Side
-from adaptive_bot.domain.models import AccountSnapshot, Candle, Order, Position, Quote
+from adaptive_bot.domain.models import AccountSnapshot, Candle, Fill, Order, Position, Quote
 
 ORDER_STATUSES = {
     "new": OrderStatus.ACKNOWLEDGED,
@@ -84,6 +84,25 @@ def order_from_alpaca(order: Any, *, received_at: datetime | None = None) -> Ord
         limit_price=_optional_decimal(order.limit_price),
         stop_price=_optional_decimal(order.stop_price),
         protective=_value(order.type) == "stop",
+    )
+
+
+def fill_from_trade_update(update: Any, *, received_at: datetime | None = None) -> Fill:
+    exchange = _utc(update.timestamp)
+    received = _utc(received_at or datetime.now(UTC))
+    if update.price is None or update.qty is None:
+        raise ValueError("fill update requires price and quantity")
+    return Fill(
+        exchange_timestamp=exchange,
+        received_timestamp=max(exchange, received),
+        source="alpaca",
+        instrument=str(update.order.symbol),
+        client_order_id=str(update.order.client_order_id),
+        side=Side(_value(update.order.side)),
+        price=_decimal(update.price),
+        quantity=_decimal(update.qty),
+        commission=Decimal("0"),
+        slippage=Decimal("0"),
     )
 
 
