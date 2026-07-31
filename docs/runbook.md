@@ -6,6 +6,10 @@ Non riavviare alla cieca. Salvare log/database, leggere il kill switch, verifica
 ordini e posizioni. Resettare manualmente soltanto dopo avere rimosso la causa e registrato attore
 e motivazione.
 
+Per una sessione paper pulita: fermare il processo, controllare dal portale Alpaca Paper che non ci
+siano ordini o posizioni inattesi, eseguire `reconcile`, quindi riavviare `paper`. Non cancellare uno
+stop protettivo mentre esiste ancora una posizione.
+
 ## Ordine sconosciuto
 
 Bloccare nuove entry. Cercare il client order ID sul broker prima di qualsiasi retry. Se lo stato
@@ -17,6 +21,11 @@ Considerare il broker fonte autorevole, bloccare entry, cancellare ordini non pr
 verificare quantità, lato, average price e stop. Non correggere automaticamente senza audit.
 Per Alpaca Paper eseguire `uv run adaptive-bot reconcile --config configs/alpaca_qqq_paper.yaml`;
 un exit code `2` mantiene il sistema bloccato e richiede verifica manuale nel portale Alpaca.
+Dopo avere verificato quantità, lato, prezzo medio e stop, usare `--accept-broker-state` per
+registrare esplicitamente lo stato paper autorevole in SQLite. Il comando rifiuta posizioni senza
+stop protettivo.
+Un kill switch persistito può essere azzerato soltanto dopo riconciliazione riuscita, indicando
+responsabile e motivo: `reconcile ... --reset-kill-switch --actor NOME --reason "MOTIVO"`.
 
 ## API down o rate limiting
 

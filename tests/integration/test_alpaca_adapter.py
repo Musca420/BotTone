@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from adaptive_bot.adapters.alpaca.broker import AlpacaPaperBroker
 from adaptive_bot.adapters.alpaca.mapping import candle_from_alpaca, order_from_alpaca
 from adaptive_bot.adapters.alpaca.market_data import AlpacaMarketData
 from adaptive_bot.adapters.alpaca.trade_updates import AlpacaTradeUpdates
+from adaptive_bot.data.repository import SQLiteEventStore
 from adaptive_bot.domain.enums import OrderStatus, OrderType, Side
 from adaptive_bot.domain.models import OrderRequest
 from adaptive_bot.risk.kill_switch import KillSwitch
@@ -56,6 +58,8 @@ class FakeTradingClient:
         self.account = _account(account_id)
         self.submissions = 0
         self.last_request: Any | None = None
+        self.positions: list[Any] = []
+        self.close_all_calls: list[bool] = []
 
     def get_account(self) -> Any:
         return self.account
@@ -75,6 +79,11 @@ class FakeTradingClient:
         return self.existing
 
     def get_all_positions(self) -> list[Any]:
+        return self.positions
+
+    def close_all_positions(self, cancel_orders: bool) -> list[Any]:
+        self.close_all_calls.append(cancel_orders)
+        self.positions = []
         return []
 
 
@@ -84,6 +93,14 @@ class TimeoutAfterAcceptanceClient(FakeTradingClient):
         self.last_request = request
         self.existing = _order(str(request.client_order_id))
         raise TimeoutError("response lost")
+
+
+class RateLimitedClient(FakeTradingClient):
+    def get_order_by_client_id(self, client_id: str) -> Any:
+        del client_id
+        response = Response()
+        response.status_code = 429
+        raise APIError('{"code":429,"message":"rate limited"}', HTTPError(response=response))
 
 
 def test_alpaca_mapping_preserves_decimal_and_utc() -> None:
@@ -207,6 +224,16 @@ async def test_ambiguous_timeout_is_reconciled_without_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unknown_order_returns_none_and_429_is_not_hidden() -> None:
+    missing = AlpacaPaperBroker("key", "secret", ("paper-account",), client=FakeTradingClient())
+    assert await missing.get_order("unknown") is None
+    limited = AlpacaPaperBroker("key", "secret", ("paper-account",), client=RateLimitedClient())
+    with pytest.raises(APIError) as raised:
+        await limited.get_order("order-1")
+    assert raised.value.status_code == 429
+
+
+@pytest.mark.asyncio
 async def test_entry_is_submitted_as_atomic_bracket() -> None:
     client = FakeTradingClient()
     broker = AlpacaPaperBroker("key", "secret", ("paper-account",), client=client)
@@ -242,3 +269,62 @@ async def test_account_allowlist_and_clean_reconciliation() -> None:
     blocked = AlpacaPaperBroker("key", "secret", ("different-account",), client=FakeTradingClient())
     with pytest.raises(PermissionError, match="allowlisted"):
         await blocked.verify_account()
+
+
+@pytest.mark.asyncio
+async def test_flatten_uses_paper_endpoint_and_cancels_orders() -> None:
+    client = FakeTradingClient()
+    client.positions = [
+        SimpleNamespace(
+            symbol="QQQ",
+            qty="2",
+            side=SimpleNamespace(value="long"),
+            avg_entry_price="500",
+        )
+    ]
+    broker = AlpacaPaperBroker("key", "secret", ("paper-account",), client=client)
+    await broker.flatten_all()
+    assert client.close_all_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_manual_broker_position_triggers_reconciliation_kill_switch() -> None:
+    client = FakeTradingClient()
+    client.positions = [
+        SimpleNamespace(
+            symbol="QQQ",
+            qty="2",
+            side=SimpleNamespace(value="long"),
+            avg_entry_price="500",
+        )
+    ]
+    broker = AlpacaPaperBroker("key", "secret", ("paper-account",), client=client)
+    kill_switch = KillSwitch()
+    report = await reconcile_before_trading(
+        broker,
+        "QQQ",
+        None,
+        kill_switch,
+        datetime(2026, 1, 5, 15, 0, tzinfo=UTC),
+    )
+    assert not report.reconciled
+    assert kill_switch.active
+
+
+@pytest.mark.asyncio
+async def test_database_unavailable_is_not_silently_ignored(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteEventStore(tmp_path / "events.db")
+
+    def unavailable(*args: Any) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "_append_sync", unavailable)
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        await store.append(
+            "event-1",
+            "fill",
+            "{}",
+            datetime(2026, 1, 5, 15, 0, tzinfo=UTC),
+        )

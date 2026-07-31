@@ -29,5 +29,10 @@ aggrega le barre minute a 15 minuti e riusa il backtester senza inviare ordini.
 Il WebSocket account converte ogni trading update in aggiornamenti `Order` e, per fill o partial
 fill, in eventi `Fill` distinti destinati allo store e alla riconciliazione.
 
+Il runtime paper aggrega le barre minute soltanto dopo la chiusura del bucket, calcola indicatori e
+regime, interroga account/posizioni/ordini Alpaca e sottopone ogni entry al Risk Engine. Gli ingressi
+approvati usano bracket atomici; il kill switch impedisce nuove entry e richiede flatten paper per
+perdita oltre soglia o stop protettivo assente. I report paper usano lo stesso schema della dashboard.
+
 Gli ordini seguono una state machine esplicita. Il client order ID è un hash deterministico di
 strumento, azione, timestamp, correlation ID e scopo. Un retry restituisce l'ordine esistente.

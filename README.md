@@ -2,8 +2,8 @@
 
 Bot deterministico e fail-closed per mean reversion adaptive-range. La Milestone 1 supporta
 backtest QQQ a 15 minuti con broker simulato, senza leva e con massimo una posizione. La Milestone
-2 include ora dati, shadow mode, account, ordini bracket e riconciliazione Alpaca Paper; il loop di
-invio paper automatico resta intenzionalmente bloccato fino al completamento dei test di recovery.
+2 include dati, shadow mode e trading Alpaca Paper con denaro simulato, ordini bracket e
+riconciliazione fail-closed. La modalità live resta disabilitata.
 
 ## Rischi e limitazioni
 
@@ -107,8 +107,31 @@ uv run adaptive-bot shadow --config configs/alpaca_qqq_paper.yaml
 uv run adaptive-bot dashboard --report data/reports/shadow.json
 ```
 
-L'invio paper automatico resta bloccato finché trading update, partial fill, cancellazione
-concorrente e recovery non superano gli integration test. Le emergenze sono in `docs/runbook.md`.
+Per eseguire la strategia con il saldo fittizio dell'account Alpaca Paper:
+
+```powershell
+uv run adaptive-bot paper --config configs/alpaca_qqq_paper.yaml
+uv run adaptive-bot dashboard --report data/reports/paper.json
+```
+
+Il comando invia soltanto ordini all'endpoint paper. Ogni ingresso è un bracket atomico con target
+e stop; quantità e rischio sono ricalcolati sul saldo paper. Dati stale, spread eccessivo, account
+non autorizzato, posizione sconosciuta o stop mancante bloccano nuovi ingressi. In caso di stop
+mancante o perdita oltre soglia viene richiesta la chiusura paper cancellando prima gli ordini.
+
+Al riavvio, una posizione o un ordine non associabile allo stato locale blocca il processo invece
+di essere adottato automaticamente: verificare il portale Alpaca ed eseguire `reconcile`. Le
+procedure di emergenza sono in `docs/runbook.md`.
+
+Dopo una verifica manuale sul portale paper, lo stato broker può essere adottato esplicitamente:
+
+```powershell
+uv run adaptive-bot reconcile --config configs/alpaca_qqq_paper.yaml --accept-broker-state
+```
+
+Una posizione priva di stop protettivo non può essere adottata. Lo stato riconciliato è persistito
+in SQLite e viene verificato nuovamente prima di consentire nuovi ordini. Anche i riferimenti di
+equity giornaliera/settimanale e il kill switch sono persistenti: un riavvio non azzera i limiti.
 
 In caso di stop mancante, posizione sconosciuta, perdita oltre soglia, dati stale o divergenza:
 bloccare nuovi ordini, preservare/ripristinare la protezione, cancellare ordini non protettivi e

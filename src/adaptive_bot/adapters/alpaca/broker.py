@@ -7,8 +7,9 @@ from typing import Any
 
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetOrdersRequest,
     LimitOrderRequest,
     MarketOrderRequest,
     StopLossRequest,
@@ -33,11 +34,13 @@ class AlpacaPaperBroker:
         api_key: str,
         secret_key: str,
         allowed_accounts: tuple[str, ...],
+        allowed_instruments: tuple[str, ...] = ("QQQ",),
         *,
         client: Any | None = None,
     ) -> None:
         self._client = client or TradingClient(api_key, secret_key, paper=True)
         self._allowed_accounts = allowed_accounts
+        self._allowed_instruments = allowed_instruments
 
     async def verify_account(self) -> AccountSnapshot:
         account = account_from_alpaca(await asyncio.to_thread(self._client.get_account))
@@ -111,11 +114,37 @@ class AlpacaPaperBroker:
         now = datetime.now(UTC)
         return tuple(position_from_alpaca(value, received_at=now) for value in values)
 
+    async def get_open_orders(self, instrument: str) -> tuple[Order, ...]:
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            nested=True,
+            symbols=[instrument],
+        )
+        values = await asyncio.to_thread(self._client.get_orders, request)
+        flattened = []
+        for value in values:
+            flattened.append(value)
+            flattened.extend(getattr(value, "legs", None) or ())
+        return tuple(order_from_alpaca(value) for value in flattened)
+
     async def cancel_non_protective_orders(self) -> None:
         values = await asyncio.to_thread(self._client.get_orders)
         for value in values:
             if str(getattr(value.type, "value", value.type)) != "stop":
                 await asyncio.to_thread(self._client.cancel_order_by_id, value.id)
+
+    async def flatten_all(self) -> None:
+        positions = await self.get_positions()
+        if any(position.instrument not in self._allowed_instruments for position in positions):
+            raise PermissionError("cannot flatten a position outside the instrument allowlist")
+        if not positions:
+            return
+        try:
+            await asyncio.to_thread(self._client.close_all_positions, True)
+        except (TimeoutError, ConnectionError, RequestsTimeout, RequestsConnectionError):
+            if not await self.get_positions():
+                return
+            raise
 
     async def _get_raw_order(self, client_order_id: str) -> Any | None:
         try:

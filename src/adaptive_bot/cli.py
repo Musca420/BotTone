@@ -11,13 +11,17 @@ from pathlib import Path
 
 from adaptive_bot.adapters.alpaca.broker import AlpacaPaperBroker
 from adaptive_bot.adapters.alpaca.market_data import AlpacaMarketData
+from adaptive_bot.adapters.alpaca.trade_updates import AlpacaTradeUpdates
 from adaptive_bot.backtest.engine import BacktestEngine
 from adaptive_bot.config import alpaca_credentials, load_config
 from adaptive_bot.dashboard.server import serve_dashboard
-from adaptive_bot.data.repository import ParquetRepository
+from adaptive_bot.data.repository import ParquetRepository, SQLiteStateStore
 from adaptive_bot.data.validation import validate_candles
+from adaptive_bot.domain.enums import Side
+from adaptive_bot.domain.models import Position
 from adaptive_bot.risk.kill_switch import KillSwitch
 from adaptive_bot.services.market_data_service import download_history
+from adaptive_bot.services.paper_service import PaperRuntime, run_paper
 from adaptive_bot.services.recovery_service import reconcile_before_trading
 from adaptive_bot.services.trading_service import run_shadow
 
@@ -63,10 +67,18 @@ def _parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--port", type=int, default=8080)
     reconcile = commands.add_parser("reconcile")
     reconcile.add_argument("--config", type=Path, required=True)
+    reconcile.add_argument("--accept-broker-state", action="store_true")
+    reconcile.add_argument("--reset-kill-switch", action="store_true")
+    reconcile.add_argument("--actor")
+    reconcile.add_argument("--reason")
     shadow = commands.add_parser("shadow")
     shadow.add_argument("--config", type=Path, required=True)
     shadow.add_argument("--input", type=Path)
     shadow.add_argument("--output", type=Path, default=Path("data/reports/shadow.json"))
+    paper = commands.add_parser("paper")
+    paper.add_argument("--config", type=Path, required=True)
+    paper.add_argument("--input", type=Path)
+    paper.add_argument("--output", type=Path, default=Path("data/reports/paper.json"))
     commands.add_parser("live")
     return parser
 
@@ -109,16 +121,56 @@ async def _download(arguments: argparse.Namespace) -> int:
 async def _reconcile(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     key, secret = alpaca_credentials()
-    broker = AlpacaPaperBroker(key, secret, config.allowed_accounts)
+    broker = AlpacaPaperBroker(
+        key,
+        secret,
+        config.allowed_accounts,
+        config.allowed_instruments,
+    )
     account = await broker.verify_account()
+    state_store = SQLiteStateStore(_sqlite_path(config.database_url))
+    await asyncio.to_thread(state_store.initialize)
+    payload = await state_store.get("paper_position")
+    local_position = None if payload in {None, "null"} else Position.model_validate_json(payload)
     kill_switch = KillSwitch()
     report = await reconcile_before_trading(
         broker,
         config.instrument.symbol,
-        None,
+        local_position,
         kill_switch,
         datetime.now(UTC),
     )
+    if not report.reconciled and arguments.accept_broker_state:
+        broker_position = report.broker_position
+        if broker_position is not None:
+            orders = await broker.get_open_orders(config.instrument.symbol)
+            closing_side = Side.SELL if broker_position.side is Side.BUY else Side.BUY
+            protected = any(
+                order.protective
+                and order.side is closing_side
+                and order.quantity - order.filled_quantity >= broker_position.quantity
+                for order in orders
+            )
+            if not protected:
+                raise RuntimeError("cannot accept an unprotected broker position")
+        await state_store.set(
+            "paper_position",
+            "null" if broker_position is None else broker_position.model_dump_json(),
+        )
+        kill_switch = KillSwitch()
+        report = await reconcile_before_trading(
+            broker,
+            config.instrument.symbol,
+            broker_position,
+            kill_switch,
+            datetime.now(UTC),
+        )
+    reset = False
+    if report.reconciled and arguments.reset_kill_switch:
+        if not arguments.actor or not arguments.reason:
+            raise ValueError("kill-switch reset requires --actor and --reason")
+        await state_store.set("paper_kill_switch", "null")
+        reset = True
     print(
         json.dumps(
             {
@@ -126,6 +178,7 @@ async def _reconcile(arguments: argparse.Namespace) -> int:
                 "reconciled": report.reconciled,
                 "reason": report.reason,
                 "kill_switch": kill_switch.active,
+                "kill_switch_reset": reset,
             },
             indent=2,
         )
@@ -153,11 +206,47 @@ async def _shadow(arguments: argparse.Namespace) -> int:
     return 0
 
 
+async def _paper(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    alpaca = config.alpaca
+    if alpaca is None or not alpaca.paper_execution_enabled:
+        raise ValueError("Alpaca paper execution must be explicitly enabled in configuration")
+    key, secret = alpaca_credentials()
+    broker = AlpacaPaperBroker(
+        key,
+        secret,
+        config.allowed_accounts,
+        config.allowed_instruments,
+    )
+    market_data = AlpacaMarketData(
+        key,
+        secret,
+        feed=alpaca.feed,
+        adjustment=alpaca.adjustment,
+    )
+    runtime = PaperRuntime(
+        config,
+        broker,
+        arguments.input or config.backtest.input_path,
+        arguments.output,
+        state_store=SQLiteStateStore(_sqlite_path(config.database_url)),
+    )
+    await run_paper(runtime, market_data, AlpacaTradeUpdates(key, secret))
+    return 0
+
+
 def _utc_datetime(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("timestamp must include a timezone")
     return parsed.astimezone(UTC)
+
+
+def _sqlite_path(database_url: str) -> Path:
+    prefix = "sqlite:///"
+    if not database_url.startswith(prefix):
+        raise ValueError("paper mode currently requires a SQLite DATABASE_URL")
+    return Path(database_url.removeprefix(prefix))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_reconcile(arguments))
     if arguments.command == "shadow":
         return asyncio.run(_shadow(arguments))
+    if arguments.command == "paper":
+        return asyncio.run(_paper(arguments))
     if arguments.command == "live":
         acknowledged = (
             os.getenv("TRADING_MODE") == "live"

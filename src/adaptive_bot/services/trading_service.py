@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -66,7 +65,7 @@ async def run_shadow(
         completed = aggregator.add(event)
         if completed is None:
             continue
-        frame = _append(frame, completed)
+        frame = append_candle(frame, completed)
         # ponytail: replay is O(n²); replace with incremental runtime above sustained paper volume.
         result = await BacktestEngine(config).run(frame)
         result.write_json(output_path)
@@ -76,16 +75,16 @@ async def run_shadow(
     return completed_count
 
 
-def _append(frame: pd.DataFrame, candle: Candle) -> pd.DataFrame:
+def append_candle(frame: pd.DataFrame, candle: Candle) -> pd.DataFrame:
     row = pd.DataFrame(
         [
             {
                 "timestamp": candle.exchange_timestamp,
-                "open": Decimal(candle.open),
-                "high": Decimal(candle.high),
-                "low": Decimal(candle.low),
-                "close": Decimal(candle.close),
-                "volume": Decimal(candle.volume),
+                "open": float(candle.open),
+                "high": float(candle.high),
+                "low": float(candle.low),
+                "close": float(candle.close),
+                "volume": float(candle.volume),
             }
         ]
     )

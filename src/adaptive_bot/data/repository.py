@@ -57,6 +57,38 @@ class SQLiteEventStore:
         return row is not None
 
 
+class SQLiteStateStore:
+    def __init__(self, path: str | Path) -> None:
+        self.path = str(path)
+
+    def initialize(self) -> None:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+            )
+
+    async def get(self, key: str) -> str | None:
+        return await asyncio.to_thread(self._get_sync, key)
+
+    def _get_sync(self, key: str) -> str | None:
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute("SELECT payload FROM state WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row else None
+
+    async def set(self, key: str, payload: str) -> None:
+        await asyncio.to_thread(self._set_sync, key, payload)
+
+    def _set_sync(self, key: str, payload: str) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "INSERT INTO state VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET payload = excluded.payload",
+                (key, payload),
+            )
+
+
 class ParquetRepository:
     @staticmethod
     def read(path: str | Path) -> pd.DataFrame:

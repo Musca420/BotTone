@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Protocol
 
 from adaptive_bot.domain.models import AccountSnapshot, Order, OrderRequest, Position
@@ -17,3 +18,15 @@ class Broker(Protocol):
 
 class AccountProvider(Protocol):
     async def get_account(self) -> AccountSnapshot: ...
+
+
+class PaperBroker(Broker, AccountProvider, Protocol):
+    async def verify_account(self) -> AccountSnapshot: ...
+
+    async def get_open_orders(self, instrument: str) -> tuple[Order, ...]: ...
+
+    async def submit_bracket_entry(
+        self, request: OrderRequest, take_profit_price: Decimal
+    ) -> Order: ...
+
+    async def flatten_all(self) -> None: ...

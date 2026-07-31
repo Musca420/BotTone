@@ -70,6 +70,7 @@ class AlpacaConfig(ConfigModel):
     historical_days: int = Field(default=30, gt=0)
     stale_after_seconds: int = Field(default=90, gt=0)
     shadow: bool = True
+    paper_execution_enabled: bool = False
 
 
 class EnvironmentSettings(BaseSettings):

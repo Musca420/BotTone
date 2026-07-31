@@ -55,3 +55,4 @@ alpaca:
   historical_days: 30
   stale_after_seconds: 90
   shadow: true
+  paper_execution_enabled: true
