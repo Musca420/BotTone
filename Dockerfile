@@ -4,5 +4,5 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 RUN uv sync --frozen --no-dev
-ENTRYPOINT ["uv", "run", "--frozen", "adaptive-bot"]
+ENTRYPOINT ["/app/.venv/bin/adaptive-bot"]
 CMD ["--help"]
