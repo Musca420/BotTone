@@ -6,7 +6,8 @@ import pytest
 from adaptive_bot.adapters.simulated.broker import SimulatedBroker
 from adaptive_bot.domain.enums import OrderStatus, OrderType, Side
 from adaptive_bot.domain.exceptions import InvalidOrderTransition
-from adaptive_bot.domain.models import OrderRequest
+from adaptive_bot.domain.models import OrderRequest, Position
+from adaptive_bot.execution.reconciliation import reconcile_position
 from adaptive_bot.execution.state_machine import transition
 from tests.conftest import candle
 
@@ -30,6 +31,21 @@ def test_state_machine_rejects_invalid_transition() -> None:
     assert transition(OrderStatus.CREATED, OrderStatus.VALIDATED) is OrderStatus.VALIDATED
     with pytest.raises(InvalidOrderTransition):
         transition(OrderStatus.CREATED, OrderStatus.FILLED)
+
+
+def test_reconciliation_ignores_local_runtime_metadata() -> None:
+    local = Position(
+        instrument="QQQ",
+        quantity=Decimal("2"),
+        side=Side.BUY,
+        average_entry_price=Decimal("500"),
+        opened_at=datetime(2026, 1, 5, 15, 0, tzinfo=UTC),
+        bars_held=3,
+    )
+    broker = local.model_copy(
+        update={"opened_at": datetime(2026, 1, 5, 16, 0, tzinfo=UTC), "bars_held": 0}
+    )
+    assert reconcile_position(local, broker).reconciled
 
 
 @pytest.mark.asyncio

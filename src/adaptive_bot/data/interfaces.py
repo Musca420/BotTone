@@ -9,7 +9,7 @@ from adaptive_bot.domain.models import Instrument
 
 
 class MarketDataProvider(Protocol):
-    async def stream(self, instrument: str) -> AsyncIterator[MarketEvent]: ...
+    def stream(self, instrument: str) -> AsyncIterator[MarketEvent]: ...
 
     async def historical(
         self, instrument: str, start: datetime, end: datetime

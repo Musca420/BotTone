@@ -15,6 +15,8 @@ resta ambiguo, mantenere il kill switch e gestire manualmente l'esposizione.
 
 Considerare il broker fonte autorevole, bloccare entry, cancellare ordini non protettivi e
 verificare quantità, lato, average price e stop. Non correggere automaticamente senza audit.
+Per Alpaca Paper eseguire `uv run adaptive-bot reconcile --config configs/alpaca_qqq_paper.yaml`;
+un exit code `2` mantiene il sistema bloccato e richiede verifica manuale nel portale Alpaca.
 
 ## API down o rate limiting
 

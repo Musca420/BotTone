@@ -1,1 +1,1 @@
-"""Alpaca adapter reserved for Milestone 2."""
+"""Alpaca Paper market-data and execution adapters."""

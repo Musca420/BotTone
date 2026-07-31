@@ -1,8 +1,9 @@
 # Adaptive Range Trading Bot
 
 Bot deterministico e fail-closed per mean reversion adaptive-range. La Milestone 1 supporta
-backtest QQQ a 15 minuti con broker simulato, senza leva e con massimo una posizione. Alpaca
-Paper, shadow e paper operativo appartengono alla Milestone 2 e non sono ancora disponibili.
+backtest QQQ a 15 minuti con broker simulato, senza leva e con massimo una posizione. La Milestone
+2 include ora dati, shadow mode, account, ordini bracket e riconciliazione Alpaca Paper; il loop di
+invio paper automatico resta intenzionalmente bloccato fino al completamento dei test di recovery.
 
 ## Rischi e limitazioni
 
@@ -76,12 +77,38 @@ uv run adaptive-bot dashboard --report data/reports/backtest.json
 Aprire `http://127.0.0.1:8080`. Il server rifiuta bind non-loopback per non pubblicare telemetria
 operativa senza autenticazione.
 
-## Paper, recovery ed emergenze
+## Alpaca Paper e shadow mode
 
-Paper e shadow non sono operativi in questa milestone. Il simulated broker è asincrono e usa
-la stessa strategia broker-agnostic, ma non simula disponibilità o latenza delle API Alpaca.
-Prima di ogni futuro riavvio paper il sistema dovrà riconciliare ordini e posizioni; la procedura
-è descritta in `docs/runbook.md`.
+La configurazione `configs/alpaca_qqq_paper.yaml` accetta esclusivamente Alpaca Paper. Impostare
+le credenziali e l'account senza inserirli nei file versionati:
+
+```powershell
+$env:ALPACA_API_KEY="..."
+$env:ALPACA_API_SECRET="..."
+$env:ALPACA_ACCOUNT_ID="..."
+```
+
+Scaricare e validare i dati QQQ corretti per split:
+
+```powershell
+uv run adaptive-bot download-data --config configs/alpaca_qqq_paper.yaml
+```
+
+Prima di ogni sessione verificare account e posizioni:
+
+```powershell
+uv run adaptive-bot reconcile --config configs/alpaca_qqq_paper.yaml
+```
+
+Shadow mode riceve barre e quote ma non invia ordini. Il report è leggibile dalla dashboard:
+
+```powershell
+uv run adaptive-bot shadow --config configs/alpaca_qqq_paper.yaml
+uv run adaptive-bot dashboard --report data/reports/shadow.json
+```
+
+L'invio paper automatico resta bloccato finché trading update, partial fill, cancellazione
+concorrente e recovery non superano gli integration test. Le emergenze sono in `docs/runbook.md`.
 
 In caso di stop mancante, posizione sconosciuta, perdita oltre soglia, dati stale o divergenza:
 bloccare nuovi ordini, preservare/ripristinare la protezione, cancellare ordini non protettivi e

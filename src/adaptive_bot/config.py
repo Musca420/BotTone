@@ -62,6 +62,16 @@ class BacktestConfig(ConfigModel):
     minimum_quality_score: float = Field(default=1.0, ge=0, le=1)
 
 
+class AlpacaConfig(ConfigModel):
+    enabled: bool = False
+    paper: bool = True
+    feed: str = "iex"
+    adjustment: str = "all"
+    historical_days: int = Field(default=30, gt=0)
+    stale_after_seconds: int = Field(default=90, gt=0)
+    shadow: bool = True
+
+
 class EnvironmentSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -70,6 +80,7 @@ class EnvironmentSettings(BaseSettings):
     database_url: str | None = None
     alpaca_api_key: SecretStr | None = None
     alpaca_api_secret: SecretStr | None = None
+    alpaca_account_id: str | None = None
     okx_api_key: SecretStr | None = None
     okx_api_secret: SecretStr | None = None
     okx_api_passphrase: SecretStr | None = None
@@ -84,6 +95,7 @@ class AppConfig(ConfigModel):
     strategy: StrategyConfig
     risk: RiskConfig
     backtest: BacktestConfig
+    alpaca: AlpacaConfig | None = None
     allow_live_trading: str | None = None
     allowed_instruments: tuple[str, ...] = ("QQQ",)
     allowed_accounts: tuple[str, ...] = ("SIM-QQQ",)
@@ -92,10 +104,17 @@ class AppConfig(ConfigModel):
     def fail_closed(self) -> AppConfig:
         if self.instrument.symbol not in self.allowed_instruments:
             raise ValueError("instrument is not allowlisted")
+        if self.broker == "alpaca":
+            if self.alpaca is None or not self.alpaca.enabled:
+                raise ValueError("Alpaca adapter is disabled")
+            if not self.alpaca.paper:
+                raise LiveTradingDisabled("Alpaca live endpoint is disabled")
+            if self.trading_mode is not TradingMode.PAPER:
+                raise ValueError("Alpaca MVP requires paper trading mode")
         if self.trading_mode is TradingMode.LIVE:
             if self.allow_live_trading != "I_ACKNOWLEDGE_THE_RISK":
                 raise LiveTradingDisabled("live acknowledgement missing")
-            raise LiveTradingDisabled("live adapter is unavailable in Milestone 1")
+            raise LiveTradingDisabled("live adapter is unavailable")
         return self
 
 
@@ -111,12 +130,23 @@ def load_config(path: str | Path) -> AppConfig:
         raw["database_url"] = env.database_url
     if env.allow_live_trading is not None:
         raw["allow_live_trading"] = env.allow_live_trading
+    if env.alpaca_account_id is not None:
+        raw["allowed_accounts"] = [env.alpaca_account_id]
     return AppConfig.model_validate(raw)
+
+
+def alpaca_credentials() -> tuple[str, str]:
+    env = EnvironmentSettings()
+    if env.alpaca_api_key is None or env.alpaca_api_secret is None:
+        raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required")
+    return env.alpaca_api_key.get_secret_value(), env.alpaca_api_secret.get_secret_value()
 
 
 def redact_environment() -> dict[str, str]:
     return {
-        key: "***" if any(token in key for token in ("KEY", "SECRET", "PASSPHRASE")) else value
+        key: "***"
+        if any(token in key for token in ("KEY", "SECRET", "PASSPHRASE", "ACCOUNT"))
+        else value
         for key, value in os.environ.items()
         if key.startswith(("TRADING_", "ALPACA_", "OKX_", "IBKR_", "DATABASE_"))
     }

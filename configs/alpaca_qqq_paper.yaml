@@ -1,6 +1,57 @@
 trading_mode: paper
-enabled: false
 broker: alpaca
-account_environment: paper
+database_url: sqlite:///data/adaptive_bot.db
 allowed_instruments: [QQQ]
-note: Adapter disponibile dalla Milestone 2.
+allowed_accounts: [ALPACA_ACCOUNT_ID_REQUIRED]
+instrument:
+  symbol: QQQ
+  asset_class: equity
+  currency: USD
+  tick_size: "0.01"
+  lot_size: "1"
+  minimum_quantity: "1"
+  minimum_notional: "1"
+  point_value: "1"
+  shortable: false
+strategy:
+  timeframe_minutes: 15
+  atr_period: 14
+  adx_period: 14
+  ema_period: 50
+  atr_percentile_window: 100
+  range_multiplier: 2.0
+  entry_z: 1.5
+  stop_atr: 2.5
+  time_stop_bars: 8
+  confirmation_bars: 3
+  max_spread_bps: 5.0
+  partial_exit_enabled: false
+  short_enabled: false
+  no_entry_minutes_after_open: 15
+  flatten_minutes_before_close: 15
+risk:
+  risk_per_trade: "0.0025"
+  max_daily_loss: "0.01"
+  max_weekly_loss: "0.025"
+  max_strategy_drawdown: "0.08"
+  max_open_positions: 1
+  max_correlated_positions: 1
+  max_consecutive_losses: 3
+  cooldown_after_losses: 8
+  hard_notional_cap: "25000"
+backtest:
+  input_path: data/raw/qqq_15m.parquet
+  initial_equity: "100000"
+  spread_bps: "2"
+  slippage_bps: "1"
+  commission_per_unit: "0.005"
+  max_volume_participation: "0.10"
+  minimum_quality_score: 1.0
+alpaca:
+  enabled: true
+  paper: true
+  feed: iex
+  adjustment: all
+  historical_days: 30
+  stale_after_seconds: 90
+  shadow: true
