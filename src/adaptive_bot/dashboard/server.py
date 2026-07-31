@@ -11,8 +11,8 @@ from typing import Any
 
 MILESTONES = (
     {"name": "Milestone 1", "label": "Simulation core", "status": "complete"},
-    {"name": "Milestone 2", "label": "Alpaca Paper", "status": "next"},
-    {"name": "Milestone 3", "label": "Research & stress", "status": "planned"},
+    {"name": "Milestone 2", "label": "Alpaca Paper", "status": "complete"},
+    {"name": "Milestone 3", "label": "Research & stress", "status": "next"},
     {"name": "Milestone 4", "label": "OKX Demo", "status": "planned"},
     {"name": "Milestone 5", "label": "IBKR Paper", "status": "planned"},
 )
