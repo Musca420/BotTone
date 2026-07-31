@@ -5,6 +5,7 @@ import pytest
 
 from adaptive_bot.backtest.engine import BacktestEngine
 from adaptive_bot.config import load_config
+from adaptive_bot.dashboard.server import build_dashboard_payload, serve_dashboard
 from adaptive_bot.data.repository import ParquetRepository
 from adaptive_bot.data.validation import validate_candles
 
@@ -33,3 +34,24 @@ async def test_backtest_is_deterministic(rth_frame: pd.DataFrame) -> None:
     second = await BacktestEngine(config).run(rth_frame)
     assert first.model_dump() == second.model_dump()
     assert first.final_equity >= 0
+    assert len(first.telemetry) == len(rth_frame)
+    assert first.telemetry[-1].activity
+
+
+@pytest.mark.asyncio
+async def test_dashboard_payload_uses_backtest_telemetry(
+    rth_frame: pd.DataFrame, tmp_path: Path
+) -> None:
+    result = await BacktestEngine(load_config("configs/backtest.yaml")).run(rth_frame)
+    report = tmp_path / "report.json"
+    result.write_json(report)
+    payload = build_dashboard_payload(report)
+    assert payload["available"] is True
+    assert payload["summary"]["instrument"] == "QQQ"
+    assert payload["latest"]["activity"]
+
+
+def test_dashboard_missing_report_and_remote_bind_are_safe(tmp_path: Path) -> None:
+    assert build_dashboard_payload(tmp_path / "missing.json")["available"] is False
+    with pytest.raises(ValueError, match="loopback-only"):
+        serve_dashboard(tmp_path / "missing.json", host="0.0.0.0", port=0)

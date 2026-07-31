@@ -63,6 +63,19 @@ Il report JSON predefinito è `data/reports/backtest.json`: include PnL lordo/ne
 slippage, drawdown, equity curve, segnali e fill. Non è ancora il report HTML completo previsto
 per la Milestone 3 e non costituisce evidenza di live readiness.
 
+## Dashboard operativa
+
+La dashboard locale read-only mostra equity, drawdown, regime, ATR, ADX, VWAP, z-score, bande,
+decisioni, fill, kill switch e avanzamento del progetto. L'interfaccia è in inglese e rilegge il
+report ogni due secondi:
+
+```powershell
+uv run adaptive-bot dashboard --report data/reports/backtest.json
+```
+
+Aprire `http://127.0.0.1:8080`. Il server rifiuta bind non-loopback per non pubblicare telemetria
+operativa senza autenticazione.
+
 ## Paper, recovery ed emergenze
 
 Paper e shadow non sono operativi in questa milestone. Il simulated broker è asincrono e usa

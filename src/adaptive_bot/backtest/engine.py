@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pandas_market_calendars as mcal
@@ -40,7 +42,29 @@ class EquityPoint(ResultModel):
     equity: Decimal
 
 
+class TelemetryPoint(ResultModel):
+    timestamp: datetime
+    close: Decimal
+    center: Decimal | None
+    lower_band: Decimal | None
+    upper_band: Decimal | None
+    atr: float | None
+    adx: float | None
+    z_score: float | None
+    atr_percentile: float | None
+    ema_slope: float | None
+    spread_bps: float
+    regime: str
+    equity: Decimal
+    position_quantity: Decimal
+    activity: str
+
+
 class BacktestResult(ResultModel):
+    mode: str = "backtest"
+    instrument: str
+    timeframe_minutes: int
+    risk_per_trade: Decimal
     initial_equity: Decimal
     final_equity: Decimal
     gross_pnl: Decimal
@@ -50,6 +74,7 @@ class BacktestResult(ResultModel):
     max_drawdown: Decimal
     fills: tuple[Fill, ...]
     equity_curve: tuple[EquityPoint, ...]
+    telemetry: tuple[TelemetryPoint, ...]
     signals: int
     rejected_signals: int
     kill_switches: int
@@ -91,6 +116,7 @@ class BacktestEngine:
         initial = self.config.backtest.initial_equity
         risk_state = RiskState(initial, initial, initial)
         equity_curve: list[EquityPoint] = []
+        telemetry: list[TelemetryPoint] = []
         signal_count = 0
         rejected = 0
         last_session: str | None = None
@@ -151,6 +177,7 @@ class BacktestEngine:
                 cooldown_bars=cooldown,
                 last_z=previous_z,
             )
+            activity = "Indicators warming up — no trading decision"
             if self._usable(row):
                 snapshot = MarketSnapshot(
                     candle=candle,
@@ -166,10 +193,54 @@ class BacktestEngine:
                 signal = self.strategy.evaluate(snapshot, strategy_state, self.broker.position)
                 if signal is not None:
                     signal_count += 1
-                    accepted = await self._handle_signal(signal, risk_state)
+                    accepted, detail = await self._handle_signal(signal, risk_state)
                     rejected += int(not accepted)
+                    action = signal.action.value.replace("_", " ").title()
+                    activity = f"{action}: {signal.reason}. {detail}"
+                else:
+                    activity = self._waiting_reason(snapshot, risk_state)
             equity_curve.append(
                 EquityPoint(timestamp=candle.exchange_timestamp, equity=account.equity)
+            )
+            atr_value = self._finite(row["atr"])
+            center_value = self._decimal_or_none(row["center"])
+            band_distance = (
+                Decimal(str(self.config.strategy.range_multiplier)) * Decimal(str(atr_value))
+                if atr_value is not None and center_value is not None
+                else None
+            )
+            lower_band = (
+                center_value - band_distance
+                if center_value is not None and band_distance is not None
+                else None
+            )
+            upper_band = (
+                center_value + band_distance
+                if center_value is not None and band_distance is not None
+                else None
+            )
+            telemetry.append(
+                TelemetryPoint(
+                    timestamp=candle.exchange_timestamp,
+                    close=candle.close,
+                    center=center_value,
+                    lower_band=lower_band,
+                    upper_band=upper_band,
+                    atr=atr_value,
+                    adx=self._finite(row["adx"]),
+                    z_score=self._finite(row["z"]),
+                    atr_percentile=self._finite(row["atr_percentile"]),
+                    ema_slope=self._finite(row["ema_slope"]),
+                    spread_bps=float(self.config.backtest.spread_bps),
+                    regime=classified.regime.value,
+                    equity=account.equity,
+                    position_quantity=(
+                        self.broker.position.quantity
+                        if self.broker.position is not None
+                        else Decimal("0")
+                    ),
+                    activity=activity,
+                )
             )
             strategy_state = strategy_state.model_copy(
                 update={"last_z": None if pd.isna(row["z"]) else float(row["z"])}
@@ -180,6 +251,9 @@ class BacktestEngine:
         slippage = sum((fill.slippage for fill in self.broker.fills), Decimal("0"))
         net = final_account.equity - initial
         return BacktestResult(
+            instrument=self.config.instrument.symbol,
+            timeframe_minutes=self.config.strategy.timeframe_minutes,
+            risk_per_trade=self.config.risk.risk_per_trade,
             initial_equity=initial,
             final_equity=final_account.equity,
             gross_pnl=net + fees + slippage,
@@ -189,6 +263,7 @@ class BacktestEngine:
             max_drawdown=maximum_drawdown([point.equity for point in equity_curve]),
             fills=tuple(self.broker.fills),
             equity_curve=tuple(equity_curve),
+            telemetry=tuple(telemetry),
             signals=signal_count,
             rejected_signals=rejected,
             kill_switches=int(self.kill_switch.active),
@@ -247,7 +322,7 @@ class BacktestEngine:
     def _usable(row: pd.Series) -> bool:
         return not row[["atr", "adx", "center", "z", "atr_percentile", "ema_slope"]].isna().any()
 
-    async def _handle_signal(self, signal: Signal, risk_state: RiskState) -> bool:
+    async def _handle_signal(self, signal: Signal, risk_state: RiskState) -> tuple[bool, str]:
         if signal.action in {SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT}:
             account = await self.broker.get_account()
             costs = estimated_round_trip_cost_per_unit(
@@ -260,7 +335,7 @@ class BacktestEngine:
                 signal, self.config.instrument, account, risk_state, costs
             )
             if not decision.approved:
-                return False
+                return False, f"Risk rejected: {decision.reason}"
             side = Side.BUY if signal.action is SignalAction.ENTER_LONG else Side.SELL
             await self._submit(signal, "entry", side, OrderType.MARKET, decision.quantity)
             opposite = Side.SELL if side is Side.BUY else Side.BUY
@@ -284,19 +359,43 @@ class BacktestEngine:
                 limit_price=signal.target_price,
                 reduce_only=True,
             )
-            return True
+            return True, f"Risk approved · quantity {decision.quantity}"
 
         position = self.broker.position
         if position is None:
-            return False
+            return False, "No position is available to close"
         quantity = position.quantity
         if signal.action is SignalAction.REDUCE:
             quantity = floor_to_lot(quantity / 2, self.config.instrument.lot_size)
         if quantity <= 0:
-            return False
+            return False, "Rounded exit quantity is zero"
         side = Side.SELL if position.side is Side.BUY else Side.BUY
         await self._submit(signal, "exit", side, OrderType.MARKET, quantity, reduce_only=True)
-        return True
+        return True, f"Reduce-only order submitted · quantity {quantity}"
+
+    def _waiting_reason(self, snapshot: MarketSnapshot, state: RiskState) -> str:
+        if self.kill_switch.active:
+            return "Kill switch active — new entries blocked"
+        if state.cooldown_bars > 0:
+            return f"Cooldown active — {state.cooldown_bars} bars remaining"
+        if snapshot.regime.value != "range":
+            return f"No entry — market regime is {snapshot.regime.value.replace('_', ' ')}"
+        if abs(snapshot.z_score) < self.config.strategy.entry_z:
+            return (
+                f"No entry — |z| {abs(snapshot.z_score):.2f} is below "
+                f"{self.config.strategy.entry_z:.2f}"
+            )
+        return "No order — position, session or direction constraints are not satisfied"
+
+    @staticmethod
+    def _finite(value: Any) -> float | None:
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _decimal_or_none(cls, value: object) -> Decimal | None:
+        number = cls._finite(value)
+        return Decimal(str(number)) if number is not None else None
 
     async def _submit(
         self,

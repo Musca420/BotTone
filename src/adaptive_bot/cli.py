@@ -10,6 +10,7 @@ from pathlib import Path
 
 from adaptive_bot.backtest.engine import BacktestEngine
 from adaptive_bot.config import load_config
+from adaptive_bot.dashboard.server import serve_dashboard
 from adaptive_bot.data.repository import ParquetRepository
 from adaptive_bot.data.validation import validate_candles
 
@@ -43,6 +44,10 @@ def _parser() -> argparse.ArgumentParser:
     backtest.add_argument("--config", type=Path, required=True)
     backtest.add_argument("--input", type=Path)
     backtest.add_argument("--output", type=Path, default=Path("data/reports/backtest.json"))
+    dashboard = commands.add_parser("dashboard")
+    dashboard.add_argument("--report", type=Path, default=Path("data/reports/backtest.json"))
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8080)
     commands.add_parser("live")
     return parser
 
@@ -67,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report.passed else 2
     if arguments.command == "backtest":
         return asyncio.run(_backtest(arguments))
+    if arguments.command == "dashboard":
+        try:
+            serve_dashboard(arguments.report, arguments.host, arguments.port)
+        except KeyboardInterrupt:
+            return 0
+        return 0
     if arguments.command == "live":
         acknowledged = (
             os.getenv("TRADING_MODE") == "live"
