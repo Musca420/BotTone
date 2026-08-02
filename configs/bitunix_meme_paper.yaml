@@ -78,7 +78,8 @@ luna:
   minimum_regime_confidence: "0.60"
   maximum_systemic_risk: "0.75"
   policy_hours: 6
-  max_runs_per_day: 4
+  max_runs_per_day: 12
+  eligible_refresh_cooldown_minutes: 15
   low_timeout_seconds: 90
   codex_command: codex.cmd
   storage_directory: data/meme/luna

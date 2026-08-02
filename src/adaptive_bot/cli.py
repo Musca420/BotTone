@@ -325,6 +325,19 @@ def _luna_snapshot(config: MemeBotConfig) -> dict[str, object]:
     return payload
 
 
+def _meme_eligible_symbols(report_path: Path) -> set[str]:
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        scanner = report.get("scanner", [])
+        return {
+            str(item["symbol"])
+            for item in scanner
+            if isinstance(item, dict) and item.get("status") == "ELIGIBLE" and item.get("symbol")
+        }
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
 async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
     config = load_meme_config(arguments.config)
     if not codex_login_status(config.luna.codex_command):
@@ -334,10 +347,24 @@ async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
     store = PolicyStore(config.luna.storage_directory)
     deadline = asyncio.get_running_loop().time() + arguments.duration_hours * 3600
     refresh_max = arguments.refresh_max
+    refresh_requested = False
+    last_eligible = _meme_eligible_symbols(config.storage.report_path)
+    limit_warning_date = None
     while True:
         now = datetime.now(UTC)
         policy = store.active_policy()
-        valid = False if policy is None or refresh_max else validate_policy(policy, config, now)[0]
+        eligible = _meme_eligible_symbols(config.storage.report_path)
+        if eligible - last_eligible:
+            refresh_requested = True
+        last_eligible = eligible
+        cooldown_ready = policy is None or now >= policy.generated_at.astimezone(UTC) + timedelta(
+            minutes=config.luna.eligible_refresh_cooldown_minutes
+        )
+        valid = (
+            False
+            if policy is None or refresh_max or (refresh_requested and cooldown_ready)
+            else validate_policy(policy, config, now)[0]
+        )
         if not valid:
             todays_policies = sum(
                 1
@@ -346,10 +373,20 @@ async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
                 and datetime.fromtimestamp(path.stat().st_mtime, UTC).date() == now.date()
             )
             if todays_policies >= config.luna.max_runs_per_day:
-                raise RuntimeError("Luna Max daily run limit reached; paper entries remain paused")
-            policy = await asyncio.to_thread(run_luna_max, config, _luna_snapshot(config))
-            logging.getLogger(__name__).info("Luna Max promoted policy %s", policy.policy_id)
-            refresh_max = False
+                if arguments.once or refresh_max:
+                    raise RuntimeError(
+                        "Luna Max daily run limit reached; paper entries remain paused"
+                    )
+                if limit_warning_date != now.date():
+                    logging.getLogger(__name__).warning(
+                        "Luna Max daily run limit reached; paper entries remain paused"
+                    )
+                    limit_warning_date = now.date()
+            else:
+                policy = await asyncio.to_thread(run_luna_max, config, _luna_snapshot(config))
+                logging.getLogger(__name__).info("Luna Max promoted policy %s", policy.policy_id)
+                refresh_max = False
+                refresh_requested = False
         for path in sorted(store.requests.glob("*.json")):
             if store.review(path.stem) is not None:
                 continue

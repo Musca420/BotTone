@@ -110,7 +110,8 @@ class MemeLunaConfig(MemeConfigModel):
     minimum_regime_confidence: Decimal = Field(default=Decimal("0.60"), ge=0, le=1)
     maximum_systemic_risk: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
     policy_hours: int = Field(default=6, gt=0, le=24)
-    max_runs_per_day: int = Field(default=4, gt=0, le=24)
+    max_runs_per_day: int = Field(default=12, gt=0, le=24)
+    eligible_refresh_cooldown_minutes: int = Field(default=15, gt=0, le=60)
     low_timeout_seconds: int = Field(default=90, gt=0, le=300)
     codex_command: str = "codex.cmd"
     storage_directory: Path = Path("data/meme/luna")
