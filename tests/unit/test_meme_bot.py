@@ -38,10 +38,11 @@ def test_meme_config_is_isolated_and_live_locked() -> None:
     config = load_meme_config("configs/bitunix_meme_paper.yaml")
     assert config.dashboard_port == 8081
     assert config.initial_equity == Decimal("100")
-    assert config.risk.risk_per_trade == Decimal("0.005")
-    assert config.risk.hard_risk_cap == Decimal("0.006")
+    assert config.risk.risk_per_trade == Decimal("0.0025")
+    assert config.risk.hard_risk_cap == Decimal("0.003")
     assert config.risk.hard_notional_cap == Decimal("40")
-    assert config.risk.leverage_ceiling == 2
+    assert config.risk.leverage_ceiling == 3
+    assert config.risk.max_open_positions == 2
     with pytest.raises(LiveTradingDisabled):
         MemeBotConfig(trading_mode=TradingMode.LIVE)
 
@@ -114,7 +115,7 @@ def test_breakout_requires_later_retest_and_builds_one_r_levels() -> None:
     decision, state = strategy.evaluate(retest, "DOGEUSDT", state)
     assert decision.action == "enter_long"
     assert decision.stop_price == Decimal("99.30")
-    assert decision.target_price == Decimal("101.70")
+    assert decision.target_price == Decimal("102.6000")
     assert decision.regime is MarketRegime.TREND_UP
     assert state.initial_risk == Decimal("1.20")
 
@@ -264,11 +265,11 @@ def test_paper_sizing_respects_margin_and_stop_wins_ambiguous_bar() -> None:
     fill = engine._entry_fill(decision, pd.Series({"open": 1}), contract, Decimal("100"))
     assert fill is not None
     price, sizing = fill
-    assert sizing.leverage == 2
+    assert sizing.leverage in {1, 2, 3}
     assert price * sizing.quantity <= Decimal("40")
     assert price * sizing.quantity / sizing.leverage <= Decimal("20")
     assert sizing.effective_risk <= sizing.risk_budget
-    assert sizing.effective_risk <= Decimal("0.60")
+    assert sizing.effective_risk <= Decimal("0.30")
 
     position = PaperPosition(
         "DOGEUSDT",
@@ -375,6 +376,7 @@ def _strategy_row(
             "volume_zscore": 3,
             "range_atr": 1,
             "three_bar_atr": 1,
+            "momentum_atr": 2,
             "ema_fast_1h": 105,
             "ema_slow_1h": 100,
             "ema_slope_1h": 0.01,

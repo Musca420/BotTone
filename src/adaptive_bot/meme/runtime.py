@@ -50,6 +50,10 @@ class PaperPosition:
     bars_held: int = 0
     one_r_hit: bool = False
     best_price: Decimal | None = None
+    initial_quantity: Decimal | None = None
+    risk_amount: Decimal = Decimal("0")
+    profit_stage: int = 0
+    initial_risk_per_unit: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,7 @@ class MemePaperEngine:
         week_start = equity
         current_day = None
         current_week = None
-        position: PaperPosition | None = None
+        positions: dict[str, PaperPosition] = {}
         pending: PendingEntry | None = None
         cooldown = 0
         consecutive_losses = 0
@@ -142,9 +146,9 @@ class MemePaperEngine:
             day = moment.date()
             week = moment.isocalendar()[:2]
             if day != current_day:
-                day_start, current_day = self._mark_equity(equity, position, rows), day
+                day_start, current_day = self._mark_equity(equity, positions, rows), day
             if week != current_week:
-                week_start, current_week = self._mark_equity(equity, position, rows), week
+                week_start, current_week = self._mark_equity(equity, positions, rows), week
             cooldown = max(0, cooldown - 1)
 
             if (
@@ -159,6 +163,11 @@ class MemePaperEngine:
                     contract,
                     equity,
                     pending.risk_multiplier,
+                    max(
+                        Decimal("0"),
+                        equity * self.config.risk.max_portfolio_heat
+                        - sum((item.risk_amount for item in positions.values()), Decimal("0")),
+                    ),
                 )
                 if fill is None:
                     audit.append(
@@ -185,7 +194,11 @@ class MemePaperEngine:
                         leverage=sizing.leverage,
                         opened_at=moment,
                         best_price=price,
+                        initial_quantity=sizing.quantity,
+                        risk_amount=sizing.effective_risk,
+                        initial_risk_per_unit=abs(price - pending.decision.stop_price),
                     )
+                    positions[position.symbol] = position
                     operations.append(
                         self._operation(
                             moment,
@@ -201,14 +214,20 @@ class MemePaperEngine:
                     )
                 pending = None
 
-            if position is not None and position.symbol in rows and moment > position.opened_at:
+            for symbol, current_position in tuple(positions.items()):
+                if symbol not in rows or moment <= current_position.opened_at:
+                    continue
                 before = equity
-                position, equity, new_operations = self._process_position(
-                    position, rows[position.symbol], moment, equity
+                updated_position, equity, new_operations = self._process_position(
+                    current_position, rows[symbol], moment, equity
                 )
                 operations.extend(new_operations)
                 delta = equity - before
-                if position is None and delta != 0:
+                if updated_position is None:
+                    positions.pop(symbol, None)
+                else:
+                    positions[symbol] = updated_position
+                if updated_position is None and delta != 0:
                     realized += delta
                     if delta < 0:
                         consecutive_losses += 1
@@ -218,7 +237,7 @@ class MemePaperEngine:
                         consecutive_losses = 0
                     states = {symbol: MemeStrategyState() for symbol in features}
 
-            marked = self._mark_equity(equity, position, rows)
+            marked = self._mark_equity(equity, positions, rows)
             peak = max(peak, marked)
             loss_block = (
                 marked <= day_start * (Decimal("1") - self.config.risk.max_daily_loss)
@@ -228,9 +247,9 @@ class MemePaperEngine:
             can_trade = trade_after is None or moment > trade_after
             entry_options: list[MemeDecision] = []
             for symbol, row in rows.items():
-                domain_position = None
-                if position is not None and position.symbol == symbol:
-                    domain_position = self._domain_position(position)
+                domain_position = (
+                    None if symbol not in positions else self._domain_position(positions[symbol])
+                )
                 decision, states[symbol] = self.strategy.evaluate(
                     row,
                     symbol,
@@ -244,21 +263,32 @@ class MemePaperEngine:
                 if decision.action in {"enter_long", "enter_short"}:
                     entry_options.append(decision)
             if (
-                position is None
+                len(positions) < self.config.risk.max_open_positions
                 and pending is None
                 and can_trade
                 and not loss_block
                 and cooldown == 0
                 and entry_options
             ):
-                eligible = [decision for decision in entry_options if decision.symbol in ranks]
+                eligible = [
+                    decision
+                    for decision in entry_options
+                    if decision.symbol in ranks and decision.symbol not in positions
+                ]
                 if eligible:
                     chosen = min(eligible, key=lambda item: ranks[item.symbol] or 10**9)
                     multiplier, luna_reason = self._luna_gate(chosen, qualities, mode)
                     if multiplier is None:
                         audit.append(self._audit(moment, chosen.symbol, "LUNA_BLOCK", luna_reason))
                     else:
-                        pending = PendingEntry(chosen, moment, multiplier)
+                        candidate = next(
+                            item for item in scanner if item.contract.symbol == chosen.symbol
+                        )
+                        pending = PendingEntry(
+                            chosen,
+                            moment,
+                            multiplier * candidate.risk_multiplier,
+                        )
                         audit.append(
                             self._audit(
                                 moment,
@@ -269,7 +299,8 @@ class MemePaperEngine:
                         )
             equity_curve.append({"timestamp": moment.isoformat(), "equity": str(marked)})
 
-        final_equity = self._mark_equity(equity, position, latest_rows)
+        final_equity = self._mark_equity(equity, positions, latest_rows)
+        serialized_positions = [_jsonable(asdict(item)) for item in positions.values()]
         return {
             "mode": mode,
             "generated_at": datetime.now(UTC).isoformat(),
@@ -279,7 +310,8 @@ class MemePaperEngine:
             "realized_pnl": str(realized),
             "fees": str(fees),
             "risk": self.config.risk.model_dump(mode="json"),
-            "position": None if position is None else _jsonable(asdict(position)),
+            "position": None if not serialized_positions else serialized_positions[0],
+            "positions": serialized_positions,
             "pending_entry": None if pending is None else pending.decision.action,
             "operations": operations,
             "audit": list(audit),
@@ -289,6 +321,8 @@ class MemePaperEngine:
                     "symbol": item.contract.symbol,
                     "eligible": item.eligible,
                     "rank": item.rank,
+                    "status": item.status.value,
+                    "risk_multiplier": str(item.risk_multiplier),
                     "reasons": item.reasons,
                     "momentum_atr": str(item.quality.momentum_atr),
                     "volume_zscore": str(item.quality.volume_zscore),
@@ -324,6 +358,7 @@ class MemePaperEngine:
         contract: MemeContract,
         equity: Decimal,
         risk_multiplier: Decimal = Decimal("1"),
+        available_heat: Decimal | None = None,
     ) -> tuple[Decimal, Sizing] | None:
         assert decision.stop_price is not None
         opening = Decimal(str(row["open"]))
@@ -332,10 +367,19 @@ class MemePaperEngine:
         risk_per_unit = abs(price - decision.stop_price) + price * (
             self.config.risk.estimated_round_trip_cost_bps / Decimal("10000")
         )
+        risk_fraction = (
+            self.config.risk.early_entry_risk
+            if decision.reason.startswith("aggressive_")
+            else self.config.risk.risk_per_trade
+        )
+        if decision.action == "enter_short":
+            risk_fraction *= self.config.risk.short_risk_multiplier
         budget = min(
-            equity * self.config.risk.risk_per_trade,
+            equity * risk_fraction,
             equity * self.config.risk.hard_risk_cap,
         ) * min(Decimal("1"), risk_multiplier)
+        if available_heat is not None:
+            budget = min(budget, available_heat)
         if risk_per_unit <= 0 or budget <= 0:
             return None
         maximum_notional = min(
@@ -390,10 +434,31 @@ class MemePaperEngine:
         if quality is None:
             return None, "quantitative_quality_missing"
         assessment = assess_market(quality, self.config)
-        if assessment.liquidity_score < Decimal("0.50"):
+        if assessment.liquidity_score < self.config.universe.minimum_liquidity_score:
             return None, "liquidity_score_too_low"
-        if assessment.manipulation_risk > Decimal("0.75"):
+        if assessment.manipulation_risk > self.config.universe.maximum_manipulation_probability:
             return None, "manipulation_risk_too_high"
+        if quality.funding_8h is None:
+            return None, "funding_unavailable"
+        if (
+            decision.action == "enter_long"
+            and quality.funding_8h > self.config.universe.maximum_funding_8h
+        ):
+            return None, "long_funding_cost_extreme"
+        if (
+            decision.action == "enter_short"
+            and quality.funding_8h < -self.config.universe.maximum_funding_8h
+        ):
+            return None, "short_funding_cost_extreme"
+        minimum_p_win = (
+            self.config.models.minimum_short_p_win
+            if decision.action == "enter_short"
+            else self.config.models.minimum_p_win
+        )
+        if assessment.uncalibrated_p_win < minimum_p_win:
+            return None, "p_win_below_threshold"
+        if assessment.expected_value_r <= self.config.models.minimum_expected_value_r:
+            return None, "expected_value_not_positive"
         if self.config.models.mode == "paper_validated":
             return None, "validated_model_prediction_missing"
         request_key = (
@@ -406,7 +471,7 @@ class MemePaperEngine:
             created_at=datetime.now(UTC),
             symbol=decision.symbol,
             strategy=decision.strategy_name,
-            side="long",
+            side="long" if decision.action == "enter_long" else "short",
             entry_price=str(decision.reference_price),
             stop_price=str(decision.stop_price),
             target_price=str(decision.target_price),
@@ -453,11 +518,6 @@ class MemePaperEngine:
         stop_hit = (
             low <= position.stop_price if position.side is Side.BUY else high >= position.stop_price
         )
-        target_hit = (
-            high >= position.target_price
-            if position.side is Side.BUY
-            else low <= position.target_price
-        )
         if stop_hit:
             price = (
                 min(opening, position.stop_price)
@@ -465,27 +525,52 @@ class MemePaperEngine:
                 else max(opening, position.stop_price)
             )
             return self._close(position, position.quantity, price, moment, equity, "STOP")
-        if target_hit and not position.one_r_hit:
-            half = (
-                position.quantity / 2 / self.contracts[position.symbol].lot_size
-            ).to_integral_value(rounding=ROUND_FLOOR) * self.contracts[position.symbol].lot_size
-            half = (
-                position.quantity
-                if half < self.contracts[position.symbol].minimum_quantity
-                else half
-            )
+        risk = position.initial_risk_per_unit or abs(position.entry_price - position.stop_price)
+        first_target = position.entry_price + (
+            risk if position.side is Side.BUY else -risk * Decimal("0.75")
+        )
+        first_hit = high >= first_target if position.side is Side.BUY else low <= first_target
+        if position.profit_stage == 0 and first_hit:
+            initial = position.initial_quantity or position.quantity
+            quarter = self._floor_quantity(position.symbol, initial * Decimal("0.25"))
+            quarter = position.quantity if quarter <= 0 else min(quarter, position.quantity)
             remaining, equity, operations = self._close(
-                position, half, position.target_price, moment, equity, "TAKE_PROFIT_1R"
+                position, quarter, first_target, moment, equity, "TAKE_PROFIT_1"
             )
             if remaining is None:
                 return None, equity, operations
             return (
-                replace(remaining, one_r_hit=True, stop_price=remaining.entry_price),
+                replace(
+                    remaining,
+                    one_r_hit=True,
+                    profit_stage=1,
+                    stop_price=remaining.entry_price,
+                ),
                 equity,
                 operations,
             )
+        target_hit = (
+            high >= position.target_price
+            if position.side is Side.BUY
+            else low <= position.target_price
+        )
+        if position.profit_stage == 1 and target_hit:
+            initial = position.initial_quantity or position.quantity
+            quarter = self._floor_quantity(position.symbol, initial * Decimal("0.25"))
+            quarter = position.quantity if quarter <= 0 else min(quarter, position.quantity)
+            remaining, equity, operations = self._close(
+                position, quarter, position.target_price, moment, equity, "TAKE_PROFIT_2"
+            )
+            if remaining is None:
+                return None, equity, operations
+            return replace(remaining, profit_stage=2), equity, operations
         bars = position.bars_held + 1
-        if bars >= self.config.strategy.time_stop_bars:
+        time_stop = (
+            self.config.strategy.time_stop_bars
+            if position.side is Side.BUY
+            else self.config.strategy.short_time_stop_bars
+        )
+        if bars >= time_stop:
             return self._close(
                 position, position.quantity, Decimal(str(row["close"])), moment, equity, "TIME_STOP"
             )
@@ -518,7 +603,14 @@ class MemePaperEngine:
         pnl = sign * quantity * (price - position.entry_price) - fee
         equity += pnl
         remaining = position.quantity - quantity
-        updated = None if remaining <= 0 else replace(position, quantity=remaining)
+        risk_amount = (
+            Decimal("0") if remaining <= 0 else position.risk_amount * remaining / position.quantity
+        )
+        updated = (
+            None
+            if remaining <= 0
+            else replace(position, quantity=remaining, risk_amount=risk_amount)
+        )
         operation = self._operation(
             moment,
             position.symbol,
@@ -535,15 +627,22 @@ class MemePaperEngine:
     def _cost(self, notional: Decimal) -> Decimal:
         return notional * self.config.risk.estimated_round_trip_cost_bps / Decimal("10000")
 
+    def _floor_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+        lot = self.contracts[symbol].lot_size
+        return (quantity / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+
     @staticmethod
     def _mark_equity(
-        equity: Decimal, position: PaperPosition | None, rows: dict[str, pd.Series]
+        equity: Decimal, positions: dict[str, PaperPosition], rows: dict[str, pd.Series]
     ) -> Decimal:
-        if position is None or position.symbol not in rows:
-            return equity
-        close = Decimal(str(rows[position.symbol]["close"]))
-        sign = Decimal("1") if position.side is Side.BUY else Decimal("-1")
-        return equity + sign * position.quantity * (close - position.entry_price)
+        marked = equity
+        for position in positions.values():
+            if position.symbol not in rows:
+                continue
+            close = Decimal(str(rows[position.symbol]["close"]))
+            sign = Decimal("1") if position.side is Side.BUY else Decimal("-1")
+            marked += sign * position.quantity * (close - position.entry_price)
+        return marked
 
     @staticmethod
     def _domain_position(position: PaperPosition) -> Position:

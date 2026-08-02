@@ -41,7 +41,7 @@ def assess_market(quality: MarketQuality, config: MemeBotConfig) -> Quantitative
         - manipulation * Decimal("0.10")
     )
     cost_r = config.risk.estimated_round_trip_cost_bps / Decimal("10000")
-    expected_value = p_win - (Decimal("1") - p_win) - cost_r
+    expected_value = p_win * config.strategy.confirmed_reward_risk - (Decimal("1") - p_win) - cost_r
     safe_notional = min(
         config.risk.hard_notional_cap,
         quality.depth_half_percent / config.universe.minimum_depth_multiple,

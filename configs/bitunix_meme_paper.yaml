@@ -9,9 +9,13 @@ universe:
   minimum_listing_days: 7
   minimum_quote_volume: "5000000"
   maximum_spread_bps: "20"
+  preferred_spread_bps: "10"
   minimum_depth_multiple: "20"
   maximum_mark_divergence: "0.005"
   maximum_funding_8h: "0.001"
+  preferred_funding_8h: "0.0005"
+  minimum_liquidity_score: "0.75"
+  maximum_manipulation_probability: "0.55"
   detailed_symbols: 10
   catalog_cache_hours: 24
   fail_closed_after_hours: 72
@@ -25,7 +29,12 @@ strategy:
   minimum_adx: "25"
   breakout_bars: 20
   volume_window: 20
-  minimum_volume_zscore: "2"
+  minimum_volume_zscore: "0"
+  minimum_momentum_atr: "1.5"
+  aggressive_momentum_atr: "2.5"
+  confirmed_reward_risk: "1.75"
+  short_reward_risk: "1.8"
+  aggressive_reward_risk: "1.6"
   retest_bars: 3
   retest_tolerance_atr: "0.25"
   stop_buffer_atr: "0.25"
@@ -34,25 +43,31 @@ strategy:
   shock_three_bar_atr: "4"
   trailing_atr: "2"
   time_stop_bars: 24
-  short_enabled: false
+  short_enabled: true
+  short_time_stop_bars: 12
 risk:
-  risk_per_trade: "0.005"
-  hard_risk_cap: "0.006"
+  risk_per_trade: "0.0025"
+  early_entry_risk: "0.00125"
+  hard_risk_cap: "0.003"
   hard_notional_cap: "40"
   max_daily_loss: "0.015"
   max_weekly_loss: "0.04"
   max_strategy_drawdown: "0.08"
-  max_open_positions: 1
+  max_open_positions: 2
+  max_portfolio_heat: "0.01"
   max_consecutive_losses: 3
   cooldown_bars: 8
   max_margin_fraction: "0.20"
-  leverage_ceiling: 2
+  leverage_ceiling: 3
+  experimental_5x_enabled: false
+  short_risk_multiplier: "0.75"
   liquidation_buffer_fraction: "0.01"
   estimated_round_trip_cost_bps: "20"
 models:
   mode: paper_bootstrap
-  minimum_p_win: "0.60"
-  minimum_expected_value_r: "0.10"
+  minimum_p_win: "0.56"
+  minimum_short_p_win: "0.58"
+  minimum_expected_value_r: "0"
   minimum_mfe_mae_ratio: "1.25"
   minimum_samples: 1000
   minimum_weeks: 20

@@ -33,11 +33,12 @@ equivalenti a circa −10%/+10% ROE prima dei costi. Il percorso reale resta blo
 liquidazione e margine restituiti dal broker.
 # Profilo meme separato
 
-Il paper meme parte da 100 USDT e usa rischio base 0,50% (0,50 USDT), con cap assoluto 0,60%.
+Il paper meme parte da 100 USDT e usa rischio normale 0,25% (0,25 USDT), rischio anticipato 0,125%
+e cap assoluto 0,30%.
 La perdita massima è 1,5% giornaliera, 4% settimanale e 8% di drawdown. È consentita
-una sola posizione nell'intero universo e dopo tre perdite scatta un cooldown di otto barre.
+due posizioni nell'intero universo, portfolio heat massimo 1%, e dopo tre perdite scatta un cooldown di otto barre.
 Il notional è calcolato dallo stop e dai costi, poi limitato a 40 USDT e 20% di margine. Fra 1× e
-2× viene scelta la leva minima sufficiente; la leva non aumenta mai il budget monetario. Dopo il
+3× viene scelta la leva minima sufficiente; la leva non aumenta mai il budget monetario. Dopo il
 rounding il rischio viene ricalcolato e qualsiasi violazione rifiuta l'ordine.
 
 Il profilo è isolato dal bot BTC. Il live resta disabilitato e richiederà subaccount, chiavi e gate
@@ -50,5 +51,5 @@ aumentare rischio/leva. Dati assenti non vengono convertiti in zero; il risultat
 Il funding Bitunix è letto come frazione decimale per intervallo di settlement e normalizzato a otto
 ore (`rate * 8 / interval_hours`). Ad esempio `0.005` ogni quattro ore equivale a `1% / 8h`.
 Funding mancante, non finito o con intervallo invalido diventa `UNKNOWN` e blocca il contratto. Nel
-profilo long-only un valore positivo è un costo long; un valore negativo oltre soglia resta bloccato
-come dislocazione di mercato, non come costo short.
+long un valore positivo estremo blocca l'ingresso; per lo short è invece contesto favorevole. Il
+funding negativo estremo blocca lo short. Il controllo direzionale avviene prima del sizing.

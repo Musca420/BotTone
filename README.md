@@ -195,11 +195,12 @@ l'intersezione tra perpetual USDT Bitunix e categoria `meme-token` CoinGecko; ti
 stream stale, listing con meno di sette giorni, spread, depth, funding o mark divergence fuori
 soglia vengono esclusi.
 
-La strategia long-only combina due expert deterministici: breakout/retest Donchian e pullback sulla
-EMA20 in trend 1h confermato da EMA20/EMA50 e ADX. Stop massimo 1,5 ATR, metà posizione a 1R e
-trailing sul resto. Il conto paper parte da 100 USDT: rischio base 0,50 USDT, cap rischio 0,60 USDT,
-notional massimo 40 USDT, margine massimo 20 USDT e leva massima 2× isolated. I limiti sono 1,5%
-giornaliero, 4% settimanale, 8% drawdown, una posizione e cooldown di otto barre dopo tre perdite.
+La strategia deterministica abilita long breakout/pullback nei regimi rialzisti e short breakdown
+nei regimi distribution/ribassisti. Usa momentum normalizzato ATR, volume, liquidità, spread,
+funding, mark/index divergence e manipulation score. Il conto paper parte da 100 USDT: rischio
+normale 0,25 USDT, anticipato 0,125 USDT, cap assoluto 0,30 USDT, notional massimo 40 USDT,
+margine massimo 20 USDT e leva minima necessaria fino a 3× isolated. I limiti sono 1,5%
+giornaliero, 4% settimanale, 8% drawdown, due posizioni e cooldown di otto barre dopo tre perdite.
 
 Prima dell'avvio autenticare una volta la CLI Codex con l'abbonamento ChatGPT e scaricare lo storico
 in uno script separato (può restare in esecuzione mentre il collector lavora):
@@ -237,8 +238,8 @@ servono almeno 20 settimane, 1.000 setup e dieci simboli prima di poter passare 
 `UNKNOWN` finché
 non viene scelto e verificato un provider ufficiale.
 
-L'esecuzione privata Bitunix e il live meme sono bloccati nel codice anche se vengono fornite
-credenziali. Non esiste alcuna procedura automatica che possa abilitarli.
+Il paper usa dati pubblici Bitunix reali e simula localmente ordini, costi, stop, target ed equity.
+L'esecuzione privata Bitunix con denaro reale resta bloccata anche se vengono fornite credenziali.
 
 Luna Max usa `codex exec` con ricerca web e produce una Market Policy valida al massimo sei ore,
 usando soltanto domini autorizzati. Luna Low non usa il web e revisiona ogni setup. Entrambi possono

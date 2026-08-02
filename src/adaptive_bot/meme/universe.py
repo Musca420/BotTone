@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from typing import Any, cast
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -52,6 +53,12 @@ class MarketQuality:
     stream_age_seconds: Decimal = Decimal("0")
 
 
+class Eligibility(StrEnum):
+    BLOCKED = "BLOCKED"
+    ELIGIBLE_REDUCED = "ELIGIBLE_REDUCED"
+    ELIGIBLE = "ELIGIBLE"
+
+
 @dataclass(frozen=True)
 class RankedCandidate:
     contract: MemeContract
@@ -59,6 +66,8 @@ class RankedCandidate:
     eligible: bool
     reasons: tuple[str, ...]
     rank: int | None = None
+    status: Eligibility = Eligibility.BLOCKED
+    risk_multiplier: Decimal = Decimal("0")
 
 
 class MemeUniverseClient:
@@ -129,25 +138,48 @@ def rank_candidates(
             candidates.append(RankedCandidate(contract, _empty_quality(), False, ("missing_data",)))
             continue
         reasons: list[str] = []
+        soft_reasons: list[str] = []
         if quality.history_hours < config.minimum_listing_days * 24:
             reasons.append("listing_too_new")
         if quality.quote_volume_24h < config.minimum_quote_volume:
             reasons.append("insufficient_volume")
         if quality.spread_bps > config.maximum_spread_bps:
             reasons.append("spread_too_wide")
+        elif quality.spread_bps > config.preferred_spread_bps:
+            soft_reasons.append("spread_above_preferred")
         if quality.depth_half_percent < requested_notional * config.minimum_depth_multiple:
             reasons.append("insufficient_depth")
         if abs(quality.mark_divergence) > config.maximum_mark_divergence:
             reasons.append("mark_divergence")
         if quality.funding_8h is None:
             reasons.append("funding_unavailable")
-        elif quality.funding_8h > config.maximum_funding_8h:
-            reasons.append("long_funding_cost_extreme")
-        elif quality.funding_8h < -config.maximum_funding_8h:
-            reasons.append("negative_funding_dislocation")
+        elif abs(quality.funding_8h) > config.maximum_funding_8h:
+            soft_reasons.append("extreme_funding_requires_side_check")
+        elif abs(quality.funding_8h) > config.preferred_funding_8h:
+            soft_reasons.append("funding_elevated")
         if quality.stream_age_seconds > Decimal("5"):
             reasons.append("stale_stream")
-        candidates.append(RankedCandidate(contract, quality, not reasons, tuple(reasons)))
+        status = (
+            Eligibility.BLOCKED
+            if reasons
+            else Eligibility.ELIGIBLE_REDUCED
+            if soft_reasons
+            else Eligibility.ELIGIBLE
+        )
+        candidates.append(
+            RankedCandidate(
+                contract,
+                quality,
+                not reasons,
+                tuple((*reasons, *soft_reasons)),
+                status=status,
+                risk_multiplier=Decimal("0")
+                if reasons
+                else Decimal("0.6")
+                if soft_reasons
+                else Decimal("1"),
+            )
+        )
     eligible = sorted(
         (candidate for candidate in candidates if candidate.eligible),
         key=lambda item: (
@@ -165,6 +197,8 @@ def rank_candidates(
             candidate.eligible,
             candidate.reasons,
             ranks.get(candidate.contract.symbol),
+            candidate.status,
+            candidate.risk_multiplier,
         )
         for candidate in sorted(
             candidates, key=lambda item: (not item.eligible, ranks.get(item.contract.symbol, 10**9))

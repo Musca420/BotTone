@@ -29,7 +29,7 @@ function events(id, items) {
 function scanner(rows) {
   $("scanner").replaceChildren(...rows.map(item => {
     const row = document.createElement("tr");
-    [item.rank ?? "-", item.symbol, item.eligible ? "ELIGIBLE" : "BLOCKED", number(item.momentum_atr), number(item.volume_zscore), `${number(item.spread_bps)} bps`, item.funding_8h == null ? "UNKNOWN" : `${number(Number(item.funding_8h) * 100, 4)}%`, money(item.depth), number(item.liquidity_score), number(item.manipulation_risk), (item.reasons || []).join(", ") || "Ready"].forEach((value, index) => {
+    [item.rank ?? "-", item.symbol, item.status || (item.eligible ? "ELIGIBLE" : "BLOCKED"), number(item.momentum_atr), number(item.volume_zscore), `${number(item.spread_bps)} bps`, item.funding_8h == null ? "UNKNOWN" : `${number(Number(item.funding_8h) * 100, 4)}%`, money(item.depth), number(item.liquidity_score), number(item.manipulation_risk), (item.reasons || []).join(", ") || "Ready"].forEach((value, index) => {
       const cell = document.createElement("td"); cell.textContent = value;
       if (index === 2) cell.className = item.eligible ? "ok" : "blocked";
       row.append(cell);
@@ -48,12 +48,12 @@ function market() {
 }
 
 function readiness(stream, report) {
-  const policy = report.luna?.policy || {}, eligible = (report.scanner || []).filter(item => item.eligible).length;
+  const policy = report.luna?.policy || {}, eligible = (report.scanner || []).filter(item => item.eligible).length, open = (report.positions || []).length, maximum = Number(report.risk?.max_open_positions || 2);
   const gates = [
     ["Live market feed", Boolean(stream.connected), stream.connected ? "Receiving Bitunix public data" : "Feed is disconnected or stale"],
     ["Luna Max market policy", policy.action === "ALLOW_EVALUATION", policy.action ? `Current action: ${policy.action.replaceAll("_", " ")}` : "No validated policy"],
     ["Tradable contract", eligible > 0, eligible ? `${eligible} contract(s) passed liquidity, funding and spread checks` : "No contract currently passes the scanner"],
-    ["Portfolio capacity", !report.position, report.position ? "Maximum one simultaneous position" : "No position is open"],
+    ["Portfolio capacity", open < maximum, `${open}/${maximum} simulated position(s) open`],
     ["Probabilistic mode", Boolean(report.probabilistic?.can_trade), report.probabilistic?.can_trade ? "Paper bootstrap active; estimates remain shadow-only" : "Validated model gate is not ready"],
   ];
   $("entry-gates").replaceChildren(...gates.map(([label, pass, detail]) => {
@@ -75,9 +75,10 @@ function render(data) {
   const stream = data.stream, report = data.report, badge = $("stream"), risk = report.risk || {}, model = report.probabilistic || {}, luna = report.luna || {};
   badge.textContent = stream.connected ? "STREAMING" : "STALE / STOPPED"; badge.className = `pill ${stream.connected ? "safe" : "danger"}`;
   $("equity").textContent = money(report.final_equity); $("pnl").textContent = `Net PnL ${money(report.net_pnl)}`;
-  $("position").textContent = report.position ? `${report.position.side.toUpperCase()} ${report.position.symbol}` : "FLAT";
-  $("position-detail").textContent = report.position ? `Qty ${report.position.quantity} - ${report.position.leverage}x` : "No exposure";
-  $("risk").textContent = `${number(Number(risk.risk_per_trade || .005) * 100)}% per trade`;
+  const positions = report.positions || (report.position ? [report.position] : []);
+  $("position").textContent = positions.length ? `${positions.length} OPEN` : "FLAT";
+  $("position-detail").textContent = positions.length ? positions.map(item => `${item.side.toUpperCase()} ${item.symbol} - ${item.leverage}x`).join(" | ") : "No exposure";
+  $("risk").textContent = `${number(Number(risk.risk_per_trade || .0025) * 100)}% per trade`;
   $("limits").textContent = `${number(Number(risk.max_daily_loss || .015) * 100, 1)}% day - ${number(Number(risk.max_weekly_loss || .04) * 100, 0)}% week`;
   $("model").textContent = String(model.status || "collecting_data").replaceAll("_", " ").toUpperCase();
   $("model-note").textContent = model.can_trade ? "Bootstrap active; models shadow-only" : "Validated models required";

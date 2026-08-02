@@ -29,14 +29,16 @@ prezzo d'ingresso: circa −10%/+10% ROE prima dei costi. Il ritorno al center n
 questo profilo; restano attive le uscite di sicurezza e il time stop di otto barre.
 # Meme momentum experts
 
-La strategia meme non usa Adaptive Range ed è long-only. Richiede trend 1h confermato da
-EMA20/EMA50, slope e ADX. L'expert principale cerca il breakout delle 20 barre precedenti su 5m con
-volume z-score almeno 2; la candela corrente è esclusa dal Donchian e il retest deve arrivare entro
-tre barre. Il secondo expert cerca un pullback confermato sulla EMA20 5m con volume sopra la media.
+La strategia meme non usa Adaptive Range. Classifica `bullish expansion`, `euphoric pump`,
+`sideways`, `distribution`, `bearish expansion`, `panic crash`, `illiquid` e `unknown`. Long
+breakout/pullback sono ammessi nei regimi rialzisti; gli short breakdown, con rischio ridotto del
+25%, nei regimi distribution/ribassisti. Il momentum minimo è 1,5 ATR, il volume z-score minimo è
+zero e il retest deve arrivare entro tre barre.
 
 Una candela oltre 2,5 ATR o un movimento a tre barre oltre 4 ATR è `SHOCK`. In tal caso nessun
-ingresso è consentito. Stop, uscita 1R, trailing e time stop sono descritti nella configurazione e
-si applicano al long. Ogni segnale passa poi scanner, score quantitativi, Market Policy, Luna Low e
+ingresso è consentito. La gestione riduce il 25% a 1R long/0,75R short, un altro 25% al target e
+applica trailing alla quota residua; lo short ha un time stop più breve. Ogni segnale passa poi
+scanner hard/soft, score quantitativi, Market Policy, Luna Low e
 risk engine; nessuno di questi stadi può creare un segnale autonomamente.
 
 Il dataset probabilistico contiene soltanto setup deterministici e label `target prima dello stop`,

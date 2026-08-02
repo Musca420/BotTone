@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Literal
 
 import pandas as pd
@@ -16,6 +17,17 @@ from adaptive_bot.meme.config import MemeStrategyConfig
 MemeAction = Literal["hold", "watch", "reject", "enter_long", "enter_short", "reduce", "exit"]
 
 
+class MemeRegime(StrEnum):
+    BULLISH_EXPANSION = "bullish_expansion"
+    EUPHORIC_PUMP = "euphoric_pump"
+    SIDEWAYS = "sideways"
+    DISTRIBUTION = "distribution"
+    BEARISH_EXPANSION = "bearish_expansion"
+    PANIC_CRASH = "panic_crash"
+    ILLIQUID = "illiquid"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class MemeDecision:
     timestamp: datetime
@@ -27,6 +39,7 @@ class MemeDecision:
     target_price: Decimal | None = None
     regime: MarketRegime = MarketRegime.UNKNOWN
     strategy_name: str = "breakout_retest"
+    meme_regime: MemeRegime = MemeRegime.UNKNOWN
 
     def signal(self) -> Signal | None:
         actions = {
@@ -92,6 +105,9 @@ def build_meme_features(candles: pd.DataFrame, config: MemeStrategyConfig) -> pd
     frame["three_bar_atr"] = (
         frame["close"].pct_change(3).abs() * frame["close"] / atr_values.replace(0, pd.NA)
     )
+    frame["momentum_atr"] = (frame["close"] - frame["close"].shift(12)) / atr_values.replace(
+        0, pd.NA
+    )
     frame["ema_fast_5m"] = frame["close"].ewm(span=config.fast_ema, adjust=False).mean()
     frame["previous_close"] = frame["close"].shift(1)
 
@@ -128,13 +144,20 @@ class MemeMomentumStrategy:
         timestamp = pd.Timestamp(row["timestamp"]).to_pydatetime()
         close = Decimal(str(row["close"]))
         regime = self._regime(row)
+        meme_regime = self._meme_regime(row)
         if position is not None:
             return self._manage_position(row, timestamp, symbol, close, regime, state, position)
         if self._missing(row):
             return MemeDecision(timestamp, symbol, "reject", "indicators_warming_up", close), state
         if self._shock(row):
             return MemeDecision(
-                timestamp, symbol, "reject", "shock", close, regime=MarketRegime.SHOCK
+                timestamp,
+                symbol,
+                "reject",
+                "panic_or_vertical_candle",
+                close,
+                regime=MarketRegime.SHOCK,
+                meme_regime=meme_regime,
             ), MemeStrategyState()
 
         atr_value = Decimal(str(row["atr"]))
@@ -142,19 +165,33 @@ class MemeMomentumStrategy:
             return self._evaluate_retest(row, timestamp, symbol, close, atr_value, regime, state)
 
         volume_ok = Decimal(str(row["volume_zscore"])) >= self.config.minimum_volume_zscore
+        momentum = Decimal(str(row["momentum_atr"]))
         if (
             volume_ok
-            and regime is MarketRegime.TREND_UP
+            and meme_regime in {MemeRegime.BULLISH_EXPANSION, MemeRegime.EUPHORIC_PUMP}
+            and momentum >= self.config.minimum_momentum_atr
             and close > Decimal(str(row["breakout_high"]))
         ):
             next_state = MemeStrategyState(Side.BUY, Decimal(str(row["breakout_high"])), 0)
+            reason = (
+                "aggressive_long_waiting_external_context_and_consolidation"
+                if momentum >= self.config.aggressive_momentum_atr
+                else "long_breakout_waiting_retest"
+            )
             return MemeDecision(
-                timestamp, symbol, "watch", "long_breakout_waiting_retest", close, regime=regime
+                timestamp,
+                symbol,
+                "watch",
+                reason,
+                close,
+                regime=regime,
+                meme_regime=meme_regime,
             ), next_state
         if (
             self.config.short_enabled
             and volume_ok
-            and regime is MarketRegime.TREND_DOWN
+            and meme_regime in {MemeRegime.DISTRIBUTION, MemeRegime.BEARISH_EXPANSION}
+            and momentum <= -self.config.minimum_momentum_atr
             and close < Decimal(str(row["breakout_low"]))
         ):
             next_state = MemeStrategyState(Side.SELL, Decimal(str(row["breakout_low"])), 0)
@@ -162,8 +199,8 @@ class MemeMomentumStrategy:
                 timestamp, symbol, "watch", "short_breakout_waiting_retest", close, regime=regime
             ), next_state
         if (
-            regime is MarketRegime.TREND_UP
-            and Decimal(str(row["volume_zscore"])) >= Decimal("1")
+            meme_regime is MemeRegime.BULLISH_EXPANSION
+            and Decimal(str(row["volume_zscore"])) >= self.config.minimum_volume_zscore
             and Decimal(str(row["low"])) <= Decimal(str(row["ema_fast_5m"]))
             and close > Decimal(str(row["ema_fast_5m"]))
             and close > Decimal(str(row["previous_close"]))
@@ -179,9 +216,10 @@ class MemeMomentumStrategy:
                     "momentum_pullback_confirmed",
                     close,
                     stop,
-                    close + risk,
+                    close + risk * self.config.confirmed_reward_risk,
                     regime,
                     "momentum_pullback",
+                    meme_regime,
                 ), MemeStrategyState(
                     planned_stop=stop,
                     entry_price=close,
@@ -232,7 +270,13 @@ class MemeMomentumStrategy:
             return MemeDecision(
                 timestamp, symbol, "reject", "invalid_stop_distance", close, regime=regime
             ), MemeStrategyState()
-        target = close + risk if state.pending_side is Side.BUY else close - risk
+        reward_ratio = (
+            self.config.confirmed_reward_risk
+            if state.pending_side is Side.BUY
+            else self.config.short_reward_risk
+        )
+        reward = risk * reward_ratio
+        target = close + reward if state.pending_side is Side.BUY else close - reward
         next_state = MemeStrategyState(
             planned_stop=stop,
             entry_price=close,
@@ -240,7 +284,15 @@ class MemeMomentumStrategy:
             best_price=close,
         )
         return MemeDecision(
-            timestamp, symbol, action, "breakout_retest_confirmed", close, stop, target, regime
+            timestamp,
+            symbol,
+            action,
+            "breakout_retest_confirmed",
+            close,
+            stop,
+            target,
+            regime,
+            meme_regime=self._meme_regime(row),
         ), next_state
 
     def _manage_position(
@@ -299,19 +351,40 @@ class MemeMomentumStrategy:
         ), updated
 
     def _regime(self, row: pd.Series) -> MarketRegime:
-        if self._missing(row) or self._shock(row):
-            return MarketRegime.SHOCK if not self._missing(row) else MarketRegime.UNKNOWN
+        meme_regime = self._meme_regime(row)
+        if meme_regime in {MemeRegime.EUPHORIC_PUMP, MemeRegime.BULLISH_EXPANSION}:
+            return MarketRegime.TREND_UP
+        if meme_regime in {MemeRegime.DISTRIBUTION, MemeRegime.BEARISH_EXPANSION}:
+            return MarketRegime.TREND_DOWN
+        if meme_regime is MemeRegime.SIDEWAYS:
+            return MarketRegime.RANGE
+        if meme_regime is MemeRegime.PANIC_CRASH:
+            return MarketRegime.SHOCK
+        return MarketRegime.UNKNOWN
+
+    def _meme_regime(self, row: pd.Series) -> MemeRegime:
+        if self._missing(row):
+            return MemeRegime.UNKNOWN
+        momentum = Decimal(str(row["momentum_atr"]))
+        if self._shock(row):
+            return MemeRegime.PANIC_CRASH if momentum < 0 else MemeRegime.EUPHORIC_PUMP
         adx_value = Decimal(str(row["adx_1h"]))
         if adx_value < self.config.minimum_adx:
-            return MarketRegime.RANGE
+            return MemeRegime.SIDEWAYS
         fast = Decimal(str(row["ema_fast_1h"]))
         slow = Decimal(str(row["ema_slow_1h"]))
         slope = Decimal(str(row["ema_slope_1h"]))
         if fast > slow and slope > 0:
-            return MarketRegime.TREND_UP
+            return (
+                MemeRegime.EUPHORIC_PUMP
+                if momentum >= self.config.aggressive_momentum_atr
+                else MemeRegime.BULLISH_EXPANSION
+            )
+        if fast > slow and slope <= 0:
+            return MemeRegime.DISTRIBUTION
         if fast < slow and slope < 0:
-            return MarketRegime.TREND_DOWN
-        return MarketRegime.UNKNOWN
+            return MemeRegime.BEARISH_EXPANSION
+        return MemeRegime.DISTRIBUTION
 
     def _shock(self, row: pd.Series) -> bool:
         return (
@@ -328,6 +401,7 @@ class MemeMomentumStrategy:
             "volume_zscore",
             "range_atr",
             "three_bar_atr",
+            "momentum_atr",
             "ema_fast_1h",
             "ema_slow_1h",
             "ema_slope_1h",
