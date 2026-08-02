@@ -17,6 +17,7 @@ universe:
   minimum_liquidity_score: "0.75"
   maximum_manipulation_probability: "0.55"
   detailed_symbols: 10
+  rescan_minutes: 60
   catalog_cache_hours: 24
   fail_closed_after_hours: 72
 strategy:
@@ -45,6 +46,10 @@ strategy:
   time_stop_bars: 24
   short_enabled: true
   short_time_stop_bars: 12
+  adaptive_range_enabled: true
+  adaptive_vwap_window: 96
+  adaptive_entry_z: "2"
+  adaptive_stop_atr: "1.25"
 risk:
   risk_per_trade: "0.0025"
   early_entry_risk: "0.00125"

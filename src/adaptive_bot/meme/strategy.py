@@ -12,6 +12,7 @@ from adaptive_bot.domain.enums import MarketRegime, Side, SignalAction
 from adaptive_bot.domain.models import Position, Signal
 from adaptive_bot.indicators.adx import adx
 from adaptive_bot.indicators.atr import atr
+from adaptive_bot.indicators.vwap import rolling_vwap
 from adaptive_bot.meme.config import MemeStrategyConfig
 
 MemeAction = Literal["hold", "watch", "reject", "enter_long", "enter_short", "reduce", "exit"]
@@ -108,6 +109,14 @@ def build_meme_features(candles: pd.DataFrame, config: MemeStrategyConfig) -> pd
     frame["momentum_atr"] = (frame["close"] - frame["close"].shift(12)) / atr_values.replace(
         0, pd.NA
     )
+    frame["adaptive_center"] = rolling_vwap(
+        frame["high"],
+        frame["low"],
+        frame["close"],
+        frame["volume"],
+        config.adaptive_vwap_window,
+    )
+    frame["adaptive_z"] = (frame["close"] - frame["adaptive_center"]) / atr_values.replace(0, pd.NA)
     frame["ema_fast_5m"] = frame["close"].ewm(span=config.fast_ema, adjust=False).mean()
     frame["previous_close"] = frame["close"].shift(1)
 
@@ -163,6 +172,35 @@ class MemeMomentumStrategy:
         atr_value = Decimal(str(row["atr"]))
         if state.pending_side is not None:
             return self._evaluate_retest(row, timestamp, symbol, close, atr_value, regime, state)
+
+        adaptive_z = Decimal(str(row["adaptive_z"]))
+        if (
+            self.config.adaptive_range_enabled
+            and meme_regime is MemeRegime.SIDEWAYS
+            and abs(adaptive_z) >= self.config.adaptive_entry_z
+        ):
+            center = Decimal(str(row["adaptive_center"]))
+            stop_distance = atr_value * self.config.adaptive_stop_atr
+            side = Side.BUY if adaptive_z < 0 else Side.SELL
+            stop = close - stop_distance if side is Side.BUY else close + stop_distance
+            if abs(center - close) / stop_distance >= self.config.aggressive_reward_risk:
+                return MemeDecision(
+                    timestamp,
+                    symbol,
+                    "enter_long" if side is Side.BUY else "enter_short",
+                    "adaptive_range_mean_reversion",
+                    close,
+                    stop,
+                    center,
+                    regime,
+                    "adaptive_range",
+                    meme_regime,
+                ), MemeStrategyState(
+                    planned_stop=stop,
+                    entry_price=close,
+                    initial_risk=stop_distance,
+                    best_price=close,
+                )
 
         volume_ok = Decimal(str(row["volume_zscore"])) >= self.config.minimum_volume_zscore
         momentum = Decimal(str(row["momentum_atr"]))
@@ -402,6 +440,8 @@ class MemeMomentumStrategy:
             "range_atr",
             "three_bar_atr",
             "momentum_atr",
+            "adaptive_center",
+            "adaptive_z",
             "ema_fast_1h",
             "ema_slow_1h",
             "ema_slope_1h",

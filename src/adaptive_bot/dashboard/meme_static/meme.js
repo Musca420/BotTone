@@ -38,6 +38,18 @@ function scanner(rows) {
   }));
 }
 
+function universeScan(rows) {
+  $("universe-scan").replaceChildren(...rows.map(item => {
+    const row = document.createElement("tr");
+    [item.rank, item.symbol, item.selected ? "TOP 10" : "WATCH", item.range_favorable ? "RANGE" : "NO", number(item.adx), number(item.z), money(item.quote_volume_24h), item.reason].forEach((value, index) => {
+      const cell = document.createElement("td"); cell.textContent = value ?? "-";
+      if (index === 2 || index === 3) cell.className = value === "TOP 10" || value === "RANGE" ? "ok" : "blocked";
+      row.append(cell);
+    });
+    return row;
+  }));
+}
+
 function market() {
   if (!payload) return;
   const state = (payload.stream.symbols || {})[$("symbol").value] || {}, candle = state.latest_candle;
@@ -48,11 +60,11 @@ function market() {
 }
 
 function readiness(stream, report) {
-  const policy = report.luna?.policy || {}, eligible = (report.scanner || []).filter(item => item.eligible).length, open = (report.positions || []).length, maximum = Number(report.risk?.max_open_positions || 2);
+  const policy = report.luna?.policy || {}, eligible = (report.scanner || []).filter(item => item.eligible).length, open = (report.positions || []).length, maximum = Number(report.risk?.max_open_positions || 2), scanned = (stream.universe_scan || []).length, monitored = Object.keys(stream.symbols || {}).length;
   const gates = [
     ["Live market feed", Boolean(stream.connected), stream.connected ? "Receiving Bitunix public data" : "Feed is disconnected or stale"],
     ["Luna Max market policy", policy.action === "ALLOW_EVALUATION", policy.action ? `Current action: ${policy.action.replaceAll("_", " ")}` : "No validated policy"],
-    ["Tradable contract", eligible > 0, eligible ? `${eligible} contract(s) passed liquidity, funding and spread checks` : "No contract currently passes the scanner"],
+    ["Tradable contract", eligible > 0, eligible ? `${eligible} actionable; deep monitoring ${monitored}/${scanned || monitored} scanned contracts` : `No actionable contract; deep monitoring ${monitored}/${scanned || monitored} scanned contracts`],
     ["Portfolio capacity", open < maximum, `${open}/${maximum} simulated position(s) open`],
     ["Probabilistic mode", Boolean(report.probabilistic?.can_trade), report.probabilistic?.can_trade ? "Paper bootstrap active; estimates remain shadow-only" : "Validated model gate is not ready"],
   ];
@@ -85,7 +97,7 @@ function render(data) {
   $("luna").textContent = luna.ready ? "READY" : "FAIL CLOSED";
   const lowPending = (report.low_reviews_pending || []).length;
   $("luna-note").textContent = lowPending ? `${lowPending} setup(s) awaiting Luna Low` : luna.policy ? `${luna.policy.regime} - ${luna.policy.action}` : (luna.reason || "Waiting for policy");
-  readiness(stream, report); scanner(report.scanner || []); events("operations", report.operations || []); events("audit", report.audit || []);
+  readiness(stream, report); scanner(report.scanner || []); universeScan(stream.universe_scan || []); events("operations", report.operations || []); events("audit", report.audit || []);
   canvas("equity-chart", (report.equity_curve || []).map(point => Number(point.equity)), "#f3b74f");
   const select = $("symbol"), current = select.value, keys = Object.keys(stream.symbols || {});
   select.replaceChildren(...keys.map(key => { const option = document.createElement("option"); option.value = key; option.textContent = key; return option; }));

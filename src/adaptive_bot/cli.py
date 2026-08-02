@@ -313,6 +313,7 @@ def _luna_snapshot(config: MemeBotConfig) -> dict[str, object]:
                 for key in (
                     "generated_at",
                     "symbols",
+                    "universe_scan",
                     "scanner",
                     "position",
                     "net_pnl",

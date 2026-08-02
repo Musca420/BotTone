@@ -14,8 +14,12 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import pandas as pd
 from websockets.asyncio.client import connect
 
+from adaptive_bot.indicators.adx import adx
+from adaptive_bot.indicators.atr import atr
+from adaptive_bot.indicators.vwap import rolling_vwap
 from adaptive_bot.meme.config import MemeBotConfig
 from adaptive_bot.meme.universe import MemeContract, MemeUniverseClient
 
@@ -47,6 +51,7 @@ class MemeCollectorState:
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     error: str | None = None
     symbols: dict[str, SymbolStreamState] = field(default_factory=dict)
+    universe_scan: list[dict[str, object]] = field(default_factory=list)
 
 
 async def collect_meme_market(
@@ -60,9 +65,7 @@ async def collect_meme_market(
     if duration_hours <= 0:
         raise ValueError("collector duration must be positive")
     contracts = await asyncio.to_thread(_discover_cached, config, api_key)
-    selected, ticker_volumes = await asyncio.to_thread(
-        _select_liquid, contracts, config.universe.detailed_symbols
-    )
+    selected, ticker_volumes, universe_scan = await _select_adaptive_range(config, contracts)
     if not selected:
         raise RuntimeError("no unambiguous Bitunix meme contracts were discovered")
     await _bootstrap_history(config.storage.raw_directory, selected)
@@ -73,13 +76,15 @@ async def collect_meme_market(
                 quote_volume_24h=str(ticker_volumes.get(contract.symbol, Decimal("0"))),
             )
             for contract in selected
-        }
+        },
+        universe_scan=universe_scan,
     )
     snapshot_path = config.storage.raw_directory / "stream.json"
     events_path = config.storage.raw_directory / "events.jsonl"
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     _write_snapshot(snapshot_path, state, selected)
     deadline = monotonic() + duration_hours * 3600
+    refresh_at = monotonic() + config.universe.rescan_minutes * 60
     reconnects = 0
     while monotonic() < deadline:
         try:
@@ -116,6 +121,28 @@ async def collect_meme_market(
                             json.dumps({"op": "ping", "ping": int(datetime.now(UTC).timestamp())})
                         )
                         last_ping = monotonic()
+                    if monotonic() >= refresh_at:
+                        break
+                if monotonic() < deadline:
+                    contracts = await asyncio.to_thread(_discover_cached, config, api_key)
+                    selected, ticker_volumes, universe_scan = await _select_adaptive_range(
+                        config, contracts
+                    )
+                    await _bootstrap_history(config.storage.raw_directory, selected)
+                    state = MemeCollectorState(
+                        symbols={
+                            contract.symbol: SymbolStreamState(
+                                contract.symbol,
+                                quote_volume_24h=str(
+                                    ticker_volumes.get(contract.symbol, Decimal("0"))
+                                ),
+                            )
+                            for contract in selected
+                        },
+                        universe_scan=universe_scan,
+                    )
+                    refresh_at = monotonic() + config.universe.rescan_minutes * 60
+                    _write_snapshot(snapshot_path, state, selected)
         except (OSError, ValueError, json.JSONDecodeError, TimeoutError) as error:
             reconnects += 1
             state.connected = False
@@ -252,6 +279,10 @@ def _funding_interval_hours(start: object, end: object) -> str:
 
 def _discover_cached(config: MemeBotConfig, api_key: str | None) -> tuple[MemeContract, ...]:
     cache = config.storage.raw_directory / "universe.json"
+    if cache.exists() and (time.time() - cache.stat().st_mtime) / 3600 < (
+        config.universe.catalog_cache_hours
+    ):
+        return _read_contracts(cache)
     try:
         contracts = MemeUniverseClient(api_key).discover(config.universe.category)
         _write_contracts(cache, contracts)
@@ -287,6 +318,118 @@ def _select_liquid(
         reverse=True,
     )
     return tuple(ranked[:maximum]), volumes
+
+
+async def _select_adaptive_range(
+    config: MemeBotConfig, contracts: tuple[MemeContract, ...]
+) -> tuple[tuple[MemeContract, ...], dict[str, Decimal], list[dict[str, object]]]:
+    _, volumes = await asyncio.to_thread(_select_liquid, contracts, len(contracts))
+    scan: list[dict[str, object]] = []
+    for contract in contracts:
+        try:
+            candles = await asyncio.to_thread(_latest_candles, contract.symbol)
+            metrics = adaptive_range_metrics(candles, config)
+        except (InvalidOperation, OSError, ValueError, KeyError, TypeError):
+            metrics = {
+                "range_favorable": False,
+                "adx": None,
+                "z": None,
+                "score": "-Infinity",
+                "reason": "market_data_unavailable",
+            }
+        scan.append(
+            {
+                "symbol": contract.symbol,
+                "quote_volume_24h": str(volumes.get(contract.symbol, Decimal("0"))),
+                "volume_eligible": volumes.get(contract.symbol, Decimal("0"))
+                >= config.universe.minimum_quote_volume,
+                **metrics,
+            }
+        )
+        await asyncio.sleep(0.11)
+    ranked = sorted(
+        scan,
+        key=lambda item: (
+            not bool(item["range_favorable"]),
+            -Decimal(str(item["score"])),
+            -volumes.get(str(item["symbol"]), Decimal("0")),
+        ),
+    )
+    selected_symbols = [str(item["symbol"]) for item in ranked[: config.universe.detailed_symbols]]
+    contracts_by_symbol = {contract.symbol: contract for contract in contracts}
+    selected = tuple(
+        contracts_by_symbol[symbol] for symbol in selected_symbols if symbol in contracts_by_symbol
+    )
+    selected_set = set(selected_symbols)
+    for rank, item in enumerate(ranked, start=1):
+        item["rank"] = rank
+        item["selected"] = str(item["symbol"]) in selected_set
+    _atomic_write(
+        config.storage.raw_directory / "universe_scan.json",
+        json.dumps(ranked, separators=(",", ":")),
+    )
+    return selected, volumes, ranked
+
+
+def _latest_candles(symbol: str) -> list[dict[str, object]]:
+    parameters = urlencode({"symbol": symbol, "interval": "5m", "limit": 200, "type": "LAST_PRICE"})
+    payload = _public_json(f"https://fapi.bitunix.com/api/v1/futures/market/kline?{parameters}")
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("Bitunix kline response is invalid")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def adaptive_range_metrics(
+    candles: list[dict[str, object]], config: MemeBotConfig
+) -> dict[str, object]:
+    frame = pd.DataFrame(candles).rename(
+        columns={
+            "time": "timestamp",
+            "baseVol": "volume",
+        }
+    )
+    if len(frame) < config.strategy.adaptive_vwap_window:
+        raise ValueError("insufficient adaptive-range candles")
+    for name in ("open", "high", "low", "close", "volume"):
+        frame[name] = pd.to_numeric(frame[name])
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+    atr_values = atr(frame["high"], frame["low"], frame["close"], config.strategy.atr_period)
+    adx_values = adx(frame["high"], frame["low"], frame["close"], config.strategy.adx_period)["adx"]
+    center = rolling_vwap(
+        frame["high"],
+        frame["low"],
+        frame["close"],
+        frame["volume"],
+        config.strategy.adaptive_vwap_window,
+    )
+    atr_value = Decimal(str(atr_values.iloc[-1]))
+    adx_value = Decimal(str(adx_values.iloc[-1]))
+    close = Decimal(str(frame["close"].iloc[-1]))
+    center_value = Decimal(str(center.iloc[-1]))
+    if (
+        atr_value <= 0
+        or not atr_value.is_finite()
+        or not adx_value.is_finite()
+        or not center_value.is_finite()
+    ):
+        raise ValueError("invalid adaptive-range indicators")
+    z = (close - center_value) / atr_value
+    range_atr = Decimal(str(frame["high"].iloc[-1] - frame["low"].iloc[-1])) / atr_value
+    three_bar = abs(close - Decimal(str(frame["close"].iloc[-4]))) / atr_value
+    favorable = (
+        adx_value < Decimal("20")
+        and range_atr <= config.strategy.shock_candle_atr
+        and three_bar <= config.strategy.shock_three_bar_atr
+    )
+    score = abs(z) * Decimal("10") + max(Decimal("0"), Decimal("20") - adx_value)
+    return {
+        "range_favorable": favorable,
+        "adx": str(adx_value),
+        "z": str(z),
+        "score": str(score),
+        "reason": "range_favorable" if favorable else "regime_not_range",
+    }
 
 
 def _write_contracts(path: Path, contracts: tuple[MemeContract, ...]) -> None:
@@ -330,6 +473,7 @@ def _write_snapshot(
         "error": state.error,
         "contracts": [contract.symbol for contract in contracts],
         "symbols": {symbol: asdict(value) for symbol, value in state.symbols.items()},
+        "universe_scan": state.universe_scan,
     }
     _atomic_write(path, json.dumps(payload, separators=(",", ":")))
 

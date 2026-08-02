@@ -154,6 +154,7 @@ def validate_policy(policy: MarketPolicy, config: MemeBotConfig, now: datetime) 
     if policy.maximum_leverage > config.risk.leverage_ceiling:
         return False, "leverage_exceeds_ceiling"
     known_strategies = {
+        "adaptive_range",
         "breakout_retest",
         "momentum_pullback",
     }
@@ -249,7 +250,8 @@ def run_luna_max(config: MemeBotConfig, snapshot: dict[str, Any]) -> MarketPolic
     now = datetime.now(UTC)
     prompt = (
         "You are Luna Max, a cautious market-policy analyst for a long-and-short meme perpetual "
-        "paper bot. Long strategies are breakout and pullback in bullish regimes; short "
+        "paper bot. Adaptive Range mean reversion is allowed only in liquid sideways regimes; "
+        "long strategies are breakout and pullback in bullish regimes; short "
         "strategies are breakdown and failed-retest in distribution or bearish regimes. Positive "
         "funding is adverse to longs but may support shorts; negative funding is adverse to "
         "shorts. Use web search only for current evidence from the allowed domains included "

@@ -44,3 +44,15 @@ risk engine; nessuno di questi stadi può creare un segnale autonomamente.
 Il dataset probabilistico contiene soltanto setup deterministici e label `target prima dello stop`,
 con stop prevalente quando entrambe le barriere sono toccate nella stessa candela. Il modello futuro
 potrà soltanto rifiutare o ridurre il rischio, mai creare un segnale.
+
+## Adaptive Range Scanner meme
+
+Ogni ora il collector scarica le ultime 200 candele da 5 minuti per tutte le perpetual meme USDT
+presenti nell'intersezione Bitunix/CoinGecko. Calcola ATR(14), ADX(14), rolling VWAP(96), distanza
+normalizzata `z` e filtri shock; privilegia `ADX < 20` e seleziona dieci coppie per lo streaming
+profondo. Volume, spread, depth, funding e manipulation restano filtri operativi indipendenti: una
+coppia può essere monitorata senza essere autorizzata al trading.
+
+L'expert Adaptive Range entra soltanto in regime `SIDEWAYS` con `abs(z) >= 2`, target al rolling
+VWAP e stop a 1,25 ATR. Il rapporto reward/risk deve essere almeno 1,6. Gli expert momentum restano
+separati e non possono trasformare un regime laterale in un segnale trend.

@@ -29,6 +29,7 @@ class MemeUniverseConfig(MemeConfigModel):
     minimum_liquidity_score: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
     maximum_manipulation_probability: Decimal = Field(default=Decimal("0.55"), ge=0, le=1)
     detailed_symbols: int = Field(default=10, gt=0, le=50)
+    rescan_minutes: int = Field(default=60, ge=15, le=360)
     catalog_cache_hours: int = Field(default=24, gt=0)
     fail_closed_after_hours: int = Field(default=72, gt=0)
 
@@ -59,6 +60,10 @@ class MemeStrategyConfig(MemeConfigModel):
     time_stop_bars: int = Field(default=24, gt=0)
     short_enabled: bool = True
     short_time_stop_bars: int = Field(default=12, gt=0)
+    adaptive_range_enabled: bool = True
+    adaptive_vwap_window: int = Field(default=96, ge=20)
+    adaptive_entry_z: Decimal = Field(default=Decimal("2"), ge=Decimal("1.6"))
+    adaptive_stop_atr: Decimal = Field(default=Decimal("1.25"), gt=0)
 
     @model_validator(mode="after")
     def valid_ema_order(self) -> MemeStrategyConfig:

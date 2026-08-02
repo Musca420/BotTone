@@ -10,7 +10,12 @@ import pytest
 from adaptive_bot.dashboard.meme_server import build_meme_dashboard_payload
 from adaptive_bot.domain.enums import MarketRegime, Side, TradingMode
 from adaptive_bot.domain.exceptions import LiveTradingDisabled
-from adaptive_bot.meme.collector import MemeCollectorState, SymbolStreamState, apply_ws_message
+from adaptive_bot.meme.collector import (
+    MemeCollectorState,
+    SymbolStreamState,
+    adaptive_range_metrics,
+    apply_ws_message,
+)
 from adaptive_bot.meme.config import MemeBotConfig, MemeStrategyConfig, load_meme_config
 from adaptive_bot.meme.research import shadow_status
 from adaptive_bot.meme.runtime import (
@@ -134,6 +139,43 @@ def test_feature_breakout_level_excludes_current_candle() -> None:
     )
     features = build_meme_features(frame, MemeStrategyConfig())
     assert features.iloc[-1]["breakout_high"] == 101
+
+
+def test_meme_adaptive_range_enters_only_in_sideways_extreme() -> None:
+    strategy = MemeMomentumStrategy(MemeStrategyConfig())
+    row = _strategy_row(
+        datetime(2026, 8, 2, 8, tzinfo=UTC),
+        close=100,
+        low=99,
+        high=101,
+        breakout_high=110,
+    )
+    row["adx_1h"] = 10
+    row["adaptive_center"] = 104
+    row["adaptive_z"] = -2
+    decision, _ = strategy.evaluate(row, "DOGEUSDT", MemeStrategyState())
+    assert decision.action == "enter_long"
+    assert decision.strategy_name == "adaptive_range"
+    assert decision.stop_price == Decimal("97.50")
+    assert decision.target_price == Decimal("104")
+
+
+def test_adaptive_range_scanner_scores_sideways_market() -> None:
+    candles = []
+    for index in range(200):
+        close = Decimal("100") + Decimal(index % 6 - 3) / Decimal("10")
+        candles.append(
+            {
+                "time": index,
+                "open": str(close),
+                "high": str(close + Decimal("0.5")),
+                "low": str(close - Decimal("0.5")),
+                "close": str(close),
+                "baseVol": "1000",
+            }
+        )
+    metrics = adaptive_range_metrics(candles, MemeBotConfig())
+    assert metrics["range_favorable"] is True
 
 
 def test_triple_barrier_is_next_event_and_worst_case() -> None:
@@ -377,6 +419,8 @@ def _strategy_row(
             "range_atr": 1,
             "three_bar_atr": 1,
             "momentum_atr": 2,
+            "adaptive_center": close,
+            "adaptive_z": 0,
             "ema_fast_1h": 105,
             "ema_slow_1h": 100,
             "ema_slope_1h": 0.01,

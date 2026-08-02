@@ -209,7 +209,7 @@ class MemePaperEngine:
                             price,
                             equity,
                             sizing.leverage,
-                            "breakout_retest_confirmed",
+                            pending.decision.reason,
                         )
                     )
                 pending = None
@@ -717,6 +717,7 @@ async def run_meme_paper(
         frames = load_recorded_frames(config.storage.raw_directory / "events.jsonl")
         contracts = load_cached_contracts(config.storage.raw_directory / "universe.json")
         qualities = load_market_qualities(config.storage.raw_directory / "stream.json", frames)
+        frames = {symbol: frame for symbol, frame in frames.items() if symbol in qualities}
         market_signature = tuple(
             sorted(
                 (
