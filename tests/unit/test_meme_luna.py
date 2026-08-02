@@ -6,12 +6,14 @@ from adaptive_bot.meme.luna import (
     MarketPolicy,
     PolicyStore,
     SourceEvidence,
+    codex_login_status,
     validate_policy,
 )
 
 
 def _policy(now: datetime) -> MarketPolicy:
     return MarketPolicy(
+        schema_version="1",
         policy_id="policy-20260802",
         generated_at=now,
         expires_at=now + timedelta(hours=6),
@@ -60,3 +62,24 @@ def test_luna_policy_fails_closed_on_expiry_or_unapproved_source() -> None:
         }
     )
     assert validate_policy(invalid, config, now)[1] == "unapproved_source"
+
+
+def test_codex_login_status_accepts_cli_diagnostic_stream(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = "Logged in using ChatGPT"
+
+    monkeypatch.setattr("adaptive_bot.meme.luna.subprocess.run", lambda *args, **kwargs: Result())
+    assert codex_login_status("codex.cmd")
+
+
+def test_high_systemic_risk_can_only_promote_a_pause_policy() -> None:
+    now = datetime(2026, 8, 2, 10, tzinfo=UTC)
+    config = MemeBotConfig()
+    high_risk = _policy(now).model_copy(update={"systemic_risk": 0.95})
+    assert validate_policy(high_risk, config, now)[1] == "systemic_risk_too_high"
+    paused = high_risk.model_copy(
+        update={"action": LunaAction.PAUSE_NEW_ENTRIES, "allowed_strategies": ()}
+    )
+    assert validate_policy(paused, config, now) == (True, "ok")

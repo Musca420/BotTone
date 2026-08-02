@@ -41,7 +41,7 @@ class SourceEvidence(LunaModel):
 
 
 class MarketPolicy(LunaModel):
-    schema_version: str = "1"
+    schema_version: str
     policy_id: str = Field(min_length=8, max_length=100)
     generated_at: datetime
     expires_at: datetime
@@ -82,7 +82,7 @@ class LunaLowRequest(LunaModel):
 
 
 class LunaLowReview(LunaModel):
-    schema_version: str = "1"
+    schema_version: str
     request_id: str
     reviewed_at: datetime
     policy_id: str
@@ -141,16 +141,25 @@ def validate_policy(policy: MarketPolicy, config: MemeBotConfig, now: datetime) 
         return False, "policy_expired"
     if policy.expires_at - policy.generated_at > timedelta(hours=config.luna.policy_hours):
         return False, "policy_lifetime_exceeds_limit"
-    if policy.regime_confidence < float(config.luna.minimum_regime_confidence):
+    if (
+        policy.regime_confidence < float(config.luna.minimum_regime_confidence)
+        and policy.action is not LunaAction.PAUSE_NEW_ENTRIES
+    ):
         return False, "regime_confidence_too_low"
-    if policy.systemic_risk > float(config.luna.maximum_systemic_risk):
+    if (
+        policy.systemic_risk > float(config.luna.maximum_systemic_risk)
+        and policy.action is not LunaAction.PAUSE_NEW_ENTRIES
+    ):
         return False, "systemic_risk_too_high"
     if policy.maximum_leverage > config.risk.leverage_ceiling:
         return False, "leverage_exceeds_ceiling"
-    if not policy.allowed_strategies or not set(policy.allowed_strategies) <= {
+    known_strategies = {
         "breakout_retest",
         "momentum_pullback",
-    }:
+    }
+    if not set(policy.allowed_strategies) <= known_strategies or (
+        not policy.allowed_strategies and policy.action is not LunaAction.PAUSE_NEW_ENTRIES
+    ):
         return False, "invalid_strategy_allowlist"
     if not policy.sources:
         return False, "missing_sources"
@@ -176,7 +185,8 @@ def codex_login_status(command: str) -> bool:
             timeout=15,
             check=False,
         )
-        return result.returncode == 0 and "logged in" in result.stdout.lower()
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        return result.returncode == 0 and "logged in" in output
     except (OSError, subprocess.TimeoutExpired):
         return False
 
