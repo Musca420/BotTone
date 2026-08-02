@@ -325,14 +325,16 @@ def _luna_snapshot(config: MemeBotConfig) -> dict[str, object]:
     return payload
 
 
-def _meme_eligible_symbols(report_path: Path) -> set[str]:
+def _meme_actionable_symbols(report_path: Path) -> set[str]:
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         scanner = report.get("scanner", [])
         return {
             str(item["symbol"])
             for item in scanner
-            if isinstance(item, dict) and item.get("status") == "ELIGIBLE" and item.get("symbol")
+            if isinstance(item, dict)
+            and item.get("status") in {"ELIGIBLE", "ELIGIBLE_REDUCED"}
+            and item.get("symbol")
         }
     except (OSError, ValueError, TypeError):
         return set()
@@ -348,15 +350,15 @@ async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
     deadline = asyncio.get_running_loop().time() + arguments.duration_hours * 3600
     refresh_max = arguments.refresh_max
     refresh_requested = False
-    last_eligible = _meme_eligible_symbols(config.storage.report_path)
+    last_actionable = _meme_actionable_symbols(config.storage.report_path)
     limit_warning_date = None
     while True:
         now = datetime.now(UTC)
         policy = store.active_policy()
-        eligible = _meme_eligible_symbols(config.storage.report_path)
-        if eligible - last_eligible:
+        actionable = _meme_actionable_symbols(config.storage.report_path)
+        if actionable - last_actionable:
             refresh_requested = True
-        last_eligible = eligible
+        last_actionable = actionable
         cooldown_ready = policy is None or now >= policy.generated_at.astimezone(UTC) + timedelta(
             minutes=config.luna.eligible_refresh_cooldown_minutes
         )

@@ -1,6 +1,6 @@
 import json
 
-from adaptive_bot.cli import _meme_eligible_symbols, _parser, main
+from adaptive_bot.cli import _meme_actionable_symbols, _parser, main
 
 
 def test_meme_dashboard_accepts_container_bind_override() -> None:
@@ -31,7 +31,7 @@ def test_luna_max_can_be_refreshed_explicitly() -> None:
     assert arguments.once and arguments.refresh_max
 
 
-def test_only_full_eligibility_triggers_luna_max_refresh(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_reduced_and_full_eligibility_trigger_luna_max_refresh(tmp_path) -> None:  # type: ignore[no-untyped-def]
     report = tmp_path / "paper.json"
     report.write_text(
         json.dumps(
@@ -45,7 +45,7 @@ def test_only_full_eligibility_triggers_luna_max_refresh(tmp_path) -> None:  # t
         ),
         encoding="utf-8",
     )
-    assert _meme_eligible_symbols(report) == {"PEPEUSDT"}
+    assert _meme_actionable_symbols(report) == {"DOGEUSDT", "PEPEUSDT"}
 
 
 def test_live_command_fails_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]

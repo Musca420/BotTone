@@ -50,9 +50,9 @@ strategy experts → quantitative checks → Luna policy/review → risk sizing 
 Policy, richieste Luna Low e review sono file JSON atomici e persistenti. Il cambio della policy o
 l'arrivo di una review fanno parte della firma osservata dal paper engine, quindi provocano
 immediatamente un replay deterministico senza attendere un'altra modifica dei dati di mercato.
-Il sidecar richiede inoltre una nuova policy quando almeno un simbolo passa a `ELIGIBLE`; gli stati
-`ELIGIBLE_REDUCED` non attivano il refresh. Un cooldown di 15 minuti e il limite giornaliero
-impediscono rivalutazioni ripetute quando lo scanner oscilla attorno alle soglie.
+Il sidecar richiede inoltre una nuova policy quando almeno un simbolo passa a `ELIGIBLE_REDUCED` o
+`ELIGIBLE`. Un cooldown di 15 minuti e il limite giornaliero impediscono rivalutazioni ripetute
+quando lo scanner oscilla attorno alle soglie.
 
 I raw event vengono conservati in `data/meme/raw`, le feature Parquet in `data/meme/processed` e i
 report in `data/meme/reports`. Lo scanner è fail-closed: assenza catalogo, stream stale o metadata
