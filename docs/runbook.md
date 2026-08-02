@@ -66,6 +66,10 @@ configurazione, commit Git e log dell'ultima sessione.
 - Catalogo CoinGecko non disponibile: è ammessa la cache verificata fino a 72 ore, poi fail-closed.
 - Coin esclusa: leggere la colonna Reason dello scanner; non ridurre automaticamente la soglia.
 - Posizione paper inattesa: fermare `meme-paper`, conservare report/eventi e riprodurre il run.
+- `Luna FAIL CLOSED`: eseguire `codex.cmd login`, poi `adaptive-bot meme-luna-status`; non creare
+  policy manuali per aggirare fonti, scadenza o limiti. Riavviare il sidecar solo dopo la diagnosi.
+- Storico insufficiente: eseguire `adaptive-bot meme-download-history --weeks 52`; il paper può
+  continuare, ma i modelli restano shadow finché tutti i gate del dataset non sono soddisfatti.
 - Cambio leva: modificare la configurazione soltanto con bot fermo e posizione `FLAT`.
 - Credenziale compromessa: eliminare la chiave e mantenere live disabilitato; il collector pubblico
   non necessita di credenziali Bitunix.

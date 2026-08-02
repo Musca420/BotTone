@@ -44,9 +44,15 @@ strumento, azione, timestamp, correlation ID e scopo. Un retry restituisce l'ord
 
 `adaptive_bot.meme` è una seconda applicazione nello stesso pacchetto. Riusa modelli di dominio,
 indicatori e vincoli monetari, ma non condivide database, capitale, configurazione o dashboard con
-BTC. Il flusso è `CoinGecko category ∩ Bitunix USDT futures → REST bootstrap → WebSocket recorder →
-scanner → breakout/retest → risk sizing → paper ledger → report/dashboard`.
+BTC. Il flusso è `CoinGecko category ∩ Bitunix USDT futures → REST/WebSocket recorder → scanner →
+strategy experts → quantitative checks → Luna policy/review → risk sizing → paper ledger → dashboard`.
 
 I raw event vengono conservati in `data/meme/raw`, le feature Parquet in `data/meme/processed` e i
 report in `data/meme/reports`. Lo scanner è fail-closed: assenza catalogo, stream stale o metadata
 ambigui non producono un universo alternativo implicito.
+
+Luna è un sidecar host separato dai container. `codex exec` riceve soltanto JSON sanitizzato in una
+directory temporanea read-only. Luna Max può consultare fonti web allowlisted e promuove una policy
+solo dopo validazione Pydantic; Luna Low opera senza web su una coda di setup deterministica. Il
+runtime legge esclusivamente artefatti validati e resta fermo se il sidecar o l'autenticazione non
+sono disponibili. Il sidecar non importa né possiede un adapter di execution.

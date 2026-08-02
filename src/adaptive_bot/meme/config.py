@@ -48,7 +48,7 @@ class MemeStrategyConfig(MemeConfigModel):
     shock_three_bar_atr: Decimal = Field(default=Decimal("4"), gt=0)
     trailing_atr: Decimal = Field(default=Decimal("2"), gt=0)
     time_stop_bars: int = Field(default=24, gt=0)
-    short_enabled: bool = True
+    short_enabled: bool = False
 
     @model_validator(mode="after")
     def valid_ema_order(self) -> MemeStrategyConfig:
@@ -58,17 +58,55 @@ class MemeStrategyConfig(MemeConfigModel):
 
 
 class MemeRiskConfig(MemeConfigModel):
-    risk_per_trade: Decimal = Field(default=Decimal("0.01"), gt=0, le=Decimal("0.01"))
-    max_daily_loss: Decimal = Field(default=Decimal("0.03"), gt=0, le=1)
-    max_weekly_loss: Decimal = Field(default=Decimal("0.10"), gt=0, le=1)
-    max_strategy_drawdown: Decimal = Field(default=Decimal("0.15"), gt=0, le=1)
+    risk_per_trade: Decimal = Field(default=Decimal("0.005"), gt=0, le=Decimal("0.006"))
+    hard_risk_cap: Decimal = Field(default=Decimal("0.006"), gt=0, le=Decimal("0.006"))
+    hard_notional_cap: Decimal = Field(default=Decimal("40"), gt=0)
+    max_daily_loss: Decimal = Field(default=Decimal("0.015"), gt=0, le=1)
+    max_weekly_loss: Decimal = Field(default=Decimal("0.04"), gt=0, le=1)
+    max_strategy_drawdown: Decimal = Field(default=Decimal("0.08"), gt=0, le=1)
     max_open_positions: Literal[1] = 1
     max_consecutive_losses: int = Field(default=3, gt=0)
     cooldown_bars: int = Field(default=8, gt=0)
-    max_margin_fraction: Decimal = Field(default=Decimal("0.10"), gt=0, le=Decimal("0.10"))
-    leverage_ceiling: Literal[2, 3, 5] = 2
+    max_margin_fraction: Decimal = Field(default=Decimal("0.20"), gt=0, le=Decimal("0.20"))
+    leverage_ceiling: Literal[1, 2, 3, 5] = 2
     liquidation_buffer_fraction: Decimal = Field(default=Decimal("0.01"), ge=0, lt=1)
     estimated_round_trip_cost_bps: Decimal = Field(default=Decimal("20"), ge=0)
+
+    @model_validator(mode="after")
+    def valid_caps(self) -> MemeRiskConfig:
+        if self.risk_per_trade > self.hard_risk_cap:
+            raise ValueError("risk per trade cannot exceed the hard risk cap")
+        return self
+
+
+class MemeModelConfig(MemeConfigModel):
+    mode: Literal["paper_bootstrap", "paper_validated"] = "paper_bootstrap"
+    minimum_p_win: Decimal = Field(default=Decimal("0.60"), ge=0, le=1)
+    minimum_expected_value_r: Decimal = Decimal("0.10")
+    minimum_mfe_mae_ratio: Decimal = Field(default=Decimal("1.25"), gt=0)
+    minimum_samples: int = Field(default=1000, gt=0)
+    minimum_weeks: int = Field(default=20, gt=0)
+    minimum_symbols: int = Field(default=10, gt=0)
+
+
+class MemeLunaConfig(MemeConfigModel):
+    enabled: bool = True
+    policy_required: bool = True
+    minimum_regime_confidence: Decimal = Field(default=Decimal("0.60"), ge=0, le=1)
+    maximum_systemic_risk: Decimal = Field(default=Decimal("0.75"), ge=0, le=1)
+    policy_hours: int = Field(default=6, gt=0, le=24)
+    max_runs_per_day: int = Field(default=4, gt=0, le=24)
+    low_timeout_seconds: int = Field(default=90, gt=0, le=300)
+    codex_command: str = "codex.cmd"
+    storage_directory: Path = Path("data/meme/luna")
+    allowed_source_domains: tuple[str, ...] = (
+        "bitunix.com",
+        "coingecko.com",
+        "federalreserve.gov",
+        "ecb.europa.eu",
+        "sec.gov",
+        "cftc.gov",
+    )
 
 
 class MemeStorageConfig(MemeConfigModel):
@@ -80,10 +118,12 @@ class MemeStorageConfig(MemeConfigModel):
 
 class MemeBotConfig(MemeConfigModel):
     trading_mode: TradingMode = TradingMode.PAPER
-    initial_equity: Decimal = Field(default=Decimal("10000"), gt=0)
+    initial_equity: Decimal = Field(default=Decimal("100"), gt=0)
     universe: MemeUniverseConfig = MemeUniverseConfig()
     strategy: MemeStrategyConfig = MemeStrategyConfig()
     risk: MemeRiskConfig = MemeRiskConfig()
+    models: MemeModelConfig = MemeModelConfig()
+    luna: MemeLunaConfig = MemeLunaConfig()
     storage: MemeStorageConfig = MemeStorageConfig()
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = Field(default=8081, ge=1024, le=65535)

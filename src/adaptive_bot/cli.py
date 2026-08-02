@@ -23,8 +23,16 @@ from adaptive_bot.data.repository import ParquetRepository, SQLiteStateStore
 from adaptive_bot.data.validation import validate_candles
 from adaptive_bot.domain.enums import Side
 from adaptive_bot.domain.models import Position
-from adaptive_bot.meme.collector import collect_meme_market
-from adaptive_bot.meme.config import load_meme_config
+from adaptive_bot.meme.collector import collect_meme_market, download_meme_history
+from adaptive_bot.meme.config import MemeBotConfig, load_meme_config
+from adaptive_bot.meme.luna import (
+    LunaLowRequest,
+    PolicyStore,
+    codex_login_status,
+    run_luna_low,
+    run_luna_max,
+    validate_policy,
+)
 from adaptive_bot.meme.research import build_shadow_dataset, shadow_status
 from adaptive_bot.meme.runtime import (
     MemePaperEngine,
@@ -95,6 +103,10 @@ def _parser() -> argparse.ArgumentParser:
     meme_collect.add_argument("--config", type=Path, required=True)
     meme_collect.add_argument("--duration-hours", type=float, default=168)
 
+    meme_history = commands.add_parser("meme-download-history")
+    meme_history.add_argument("--config", type=Path, required=True)
+    meme_history.add_argument("--weeks", type=int, default=52)
+
     meme_backtest = commands.add_parser("meme-backtest")
     meme_backtest.add_argument("--config", type=Path, required=True)
     meme_backtest.add_argument("--events", type=Path)
@@ -117,6 +129,14 @@ def _parser() -> argparse.ArgumentParser:
     meme_dataset.add_argument(
         "--output", type=Path, default=Path("data/meme/processed/shadow_features.parquet")
     )
+    meme_luna = commands.add_parser("meme-luna-sidecar")
+    meme_luna.add_argument("--config", type=Path, required=True)
+    meme_luna.add_argument("--duration-hours", type=float, default=168)
+    meme_luna.add_argument("--poll-seconds", type=float, default=5)
+    meme_luna.add_argument("--once", action="store_true")
+
+    meme_luna_status = commands.add_parser("meme-luna-status")
+    meme_luna_status.add_argument("--config", type=Path, required=True)
 
     backtest = commands.add_parser("backtest")
     backtest.add_argument("--config", type=Path, required=True)
@@ -230,6 +250,15 @@ async def _meme_collect(arguments: argparse.Namespace) -> int:
     return 0
 
 
+async def _meme_download_history(arguments: argparse.Namespace) -> int:
+    config = load_meme_config(arguments.config)
+    result = await download_meme_history(
+        config, weeks=arguments.weeks, api_key=os.getenv("COINGECKO_API_KEY")
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 async def _meme_backtest(arguments: argparse.Namespace) -> int:
     config = load_meme_config(arguments.config)
     events = arguments.events or config.storage.raw_directory / "events.jsonl"
@@ -266,6 +295,94 @@ def _meme_build_dataset(arguments: argparse.Namespace) -> int:
     dataset.to_parquet(arguments.output, index=False)
     print(json.dumps(shadow_status(dataset), indent=2))
     return 0
+
+
+def _luna_snapshot(config: MemeBotConfig) -> dict[str, object]:
+    # The sidecar receives only pre-sanitized market state, never repository files or secrets.
+    storage = config.storage
+    payload: dict[str, object] = {"generated_at": datetime.now(UTC).isoformat()}
+    for name, path in (
+        ("market", storage.raw_directory / "stream.json"),
+        ("paper", storage.report_path),
+    ):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            payload[name] = {
+                key: raw.get(key)
+                for key in (
+                    "generated_at",
+                    "symbols",
+                    "scanner",
+                    "position",
+                    "net_pnl",
+                    "risk",
+                )
+                if key in raw
+            }
+        except (OSError, ValueError, TypeError):
+            payload[name] = None
+    return payload
+
+
+async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
+    config = load_meme_config(arguments.config)
+    if not codex_login_status(config.luna.codex_command):
+        raise RuntimeError("Codex CLI is not logged in; run: codex.cmd login")
+    if arguments.duration_hours <= 0 or arguments.poll_seconds <= 0:
+        raise ValueError("sidecar duration and poll interval must be positive")
+    store = PolicyStore(config.luna.storage_directory)
+    deadline = asyncio.get_running_loop().time() + arguments.duration_hours * 3600
+    while True:
+        now = datetime.now(UTC)
+        policy = store.active_policy()
+        valid = False if policy is None else validate_policy(policy, config, now)[0]
+        if not valid:
+            todays_policies = sum(
+                1
+                for path in store.policies.glob("*.json")
+                if path.name != "active.json"
+                and datetime.fromtimestamp(path.stat().st_mtime, UTC).date() == now.date()
+            )
+            if todays_policies >= config.luna.max_runs_per_day:
+                raise RuntimeError("Luna Max daily run limit reached; paper entries remain paused")
+            policy = await asyncio.to_thread(run_luna_max, config, _luna_snapshot(config))
+            logging.getLogger(__name__).info("Luna Max promoted policy %s", policy.policy_id)
+        for path in sorted(store.requests.glob("*.json")):
+            if store.review(path.stem) is not None:
+                continue
+            try:
+                request = LunaLowRequest.model_validate_json(path.read_text(encoding="utf-8"))
+                review = await asyncio.to_thread(run_luna_low, config, request)
+                logging.getLogger(__name__).info(
+                    "Luna Low reviewed %s: %s", request.request_id, review.action.value
+                )
+            except (OSError, ValueError, RuntimeError) as error:
+                logging.getLogger(__name__).error("Luna Low failed closed: %s", error)
+        if arguments.once or asyncio.get_running_loop().time() >= deadline:
+            return 0
+        await asyncio.sleep(arguments.poll_seconds)
+
+
+def _meme_luna_status(arguments: argparse.Namespace) -> int:
+    config = load_meme_config(arguments.config)
+    policy = PolicyStore(config.luna.storage_directory).active_policy()
+    valid, reason = (
+        (False, "missing_policy")
+        if policy is None
+        else validate_policy(policy, config, datetime.now(UTC))
+    )
+    print(
+        json.dumps(
+            {
+                "codex_logged_in": codex_login_status(config.luna.codex_command),
+                "policy_valid": valid,
+                "reason": reason,
+                "policy": None if policy is None else policy.model_dump(mode="json"),
+            },
+            indent=2,
+        )
+    )
+    return 0 if valid else 2
 
 
 async def _reconcile(arguments: argparse.Namespace) -> int:
@@ -415,6 +532,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_paper_bitunix(arguments))
     if arguments.command == "meme-collect":
         return asyncio.run(_meme_collect(arguments))
+    if arguments.command == "meme-download-history":
+        return asyncio.run(_meme_download_history(arguments))
     if arguments.command == "meme-backtest":
         return asyncio.run(_meme_backtest(arguments))
     if arguments.command == "meme-paper":
@@ -434,6 +553,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if arguments.command == "meme-build-dataset":
         return _meme_build_dataset(arguments)
+    if arguments.command == "meme-luna-sidecar":
+        return asyncio.run(_meme_luna_sidecar(arguments))
+    if arguments.command == "meme-luna-status":
+        return _meme_luna_status(arguments)
     if arguments.command == "backtest":
         return asyncio.run(_backtest(arguments))
     if arguments.command == "dashboard":

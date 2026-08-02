@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from collections.abc import Callable
@@ -128,6 +129,20 @@ async def collect_meme_market(
         "reconnects": reconnects,
         "output": str(snapshot_path),
     }
+
+
+async def download_meme_history(
+    config: MemeBotConfig, *, weeks: int, api_key: str | None = None
+) -> dict[str, object]:
+    if weeks <= 0 or weeks > 104:
+        raise ValueError("history window must be between 1 and 104 weeks")
+    contracts = await asyncio.to_thread(_discover_cached, config, api_key)
+    selected, _ = await asyncio.to_thread(
+        _select_liquid, contracts, config.universe.detailed_symbols
+    )
+    pages = math.ceil(weeks * 7 * 24 * 12 / 200)
+    await _bootstrap_history(config.storage.raw_directory, selected, pages=pages, force=True)
+    return {"symbols": len(selected), "weeks": weeks, "pages_per_symbol": pages}
 
 
 def apply_ws_message(state: MemeCollectorState, message: dict[str, Any]) -> None:
@@ -322,16 +337,22 @@ def _append_event(path: Path, message: dict[str, Any]) -> None:
         stream.write(json.dumps(envelope, separators=(",", ":")) + "\n")
 
 
-async def _bootstrap_history(raw_directory: Path, contracts: tuple[MemeContract, ...]) -> None:
+async def _bootstrap_history(
+    raw_directory: Path,
+    contracts: tuple[MemeContract, ...],
+    *,
+    pages: int = 13,
+    force: bool = False,
+) -> None:
     history_directory = raw_directory / "history"
     history_directory.mkdir(parents=True, exist_ok=True)
     for contract in contracts:
         target = history_directory / f"{contract.symbol}_5m.json"
-        if _history_is_current(target):
+        if not force and _history_is_current(target):
             continue
         rows: dict[int, dict[str, object]] = {}
         end_time: int | None = None
-        for _ in range(13):
+        for _ in range(pages):
             parameters: dict[str, object] = {
                 "symbol": contract.symbol,
                 "interval": "5m",

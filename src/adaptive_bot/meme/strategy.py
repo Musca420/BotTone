@@ -26,6 +26,7 @@ class MemeDecision:
     stop_price: Decimal | None = None
     target_price: Decimal | None = None
     regime: MarketRegime = MarketRegime.UNKNOWN
+    strategy_name: str = "breakout_retest"
 
     def signal(self) -> Signal | None:
         actions = {
@@ -91,6 +92,8 @@ def build_meme_features(candles: pd.DataFrame, config: MemeStrategyConfig) -> pd
     frame["three_bar_atr"] = (
         frame["close"].pct_change(3).abs() * frame["close"] / atr_values.replace(0, pd.NA)
     )
+    frame["ema_fast_5m"] = frame["close"].ewm(span=config.fast_ema, adjust=False).mean()
+    frame["previous_close"] = frame["close"].shift(1)
 
     indexed = frame.set_index("timestamp")
     hourly = indexed.resample("1h", label="right", closed="left").agg(
@@ -158,6 +161,33 @@ class MemeMomentumStrategy:
             return MemeDecision(
                 timestamp, symbol, "watch", "short_breakout_waiting_retest", close, regime=regime
             ), next_state
+        if (
+            regime is MarketRegime.TREND_UP
+            and Decimal(str(row["volume_zscore"])) >= Decimal("1")
+            and Decimal(str(row["low"])) <= Decimal(str(row["ema_fast_5m"]))
+            and close > Decimal(str(row["ema_fast_5m"]))
+            and close > Decimal(str(row["previous_close"]))
+        ):
+            atr_value = Decimal(str(row["atr"]))
+            stop = Decimal(str(row["low"])) - atr_value * self.config.stop_buffer_atr
+            risk = close - stop
+            if 0 < risk <= atr_value * self.config.maximum_stop_atr:
+                return MemeDecision(
+                    timestamp,
+                    symbol,
+                    "enter_long",
+                    "momentum_pullback_confirmed",
+                    close,
+                    stop,
+                    close + risk,
+                    regime,
+                    "momentum_pullback",
+                ), MemeStrategyState(
+                    planned_stop=stop,
+                    entry_price=close,
+                    initial_risk=risk,
+                    best_price=close,
+                )
         return MemeDecision(timestamp, symbol, "hold", "no_breakout", close, regime=regime), state
 
     def _evaluate_retest(
@@ -302,6 +332,8 @@ class MemeMomentumStrategy:
             "ema_slow_1h",
             "ema_slope_1h",
             "adx_1h",
+            "ema_fast_5m",
+            "previous_close",
         )
         return bool(row[list(names)].isna().any())
 

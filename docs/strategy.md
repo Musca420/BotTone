@@ -27,16 +27,17 @@ Il profilo operativo Bitunix è esclusivamente BTCUSDT perpetual futures, USDT i
 Long e short mantengono ingresso adaptive-range, ma usano stop e target simmetrici all'1% del
 prezzo d'ingresso: circa −10%/+10% ROE prima dei costi. Il ritorno al center non chiude in anticipo
 questo profilo; restano attive le uscite di sicurezza e il time stop di otto barre.
-# Meme momentum breakout
+# Meme momentum experts
 
-La strategia meme non usa Adaptive Range. Richiede trend 1h confermato da EMA20/EMA50, slope e
-ADX, quindi breakout delle 20 barre precedenti su 5m con volume z-score almeno 2. Il livello della
-candela corrente è escluso dal Donchian per evitare look-ahead. Il retest deve arrivare entro tre
-barre e confermare dalla parte della rottura.
+La strategia meme non usa Adaptive Range ed è long-only. Richiede trend 1h confermato da
+EMA20/EMA50, slope e ADX. L'expert principale cerca il breakout delle 20 barre precedenti su 5m con
+volume z-score almeno 2; la candela corrente è esclusa dal Donchian e il retest deve arrivare entro
+tre barre. Il secondo expert cerca un pullback confermato sulla EMA20 5m con volume sopra la media.
 
 Una candela oltre 2,5 ATR o un movimento a tre barre oltre 4 ATR è `SHOCK`. In tal caso nessun
 ingresso è consentito. Stop, uscita 1R, trailing e time stop sono descritti nella configurazione e
-si applicano simmetricamente a long e short.
+si applicano al long. Ogni segnale passa poi scanner, score quantitativi, Market Policy, Luna Low e
+risk engine; nessuno di questi stadi può creare un segnale autonomamente.
 
 Il dataset probabilistico contiene soltanto setup deterministici e label `target prima dello stop`,
 con stop prevalente quando entrambe le barriere sono toccate nella stessa candela. Il modello futuro

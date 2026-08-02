@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from collections import deque
@@ -15,6 +16,13 @@ import pandas as pd
 from adaptive_bot.domain.enums import Side
 from adaptive_bot.domain.models import Position
 from adaptive_bot.meme.config import MemeBotConfig
+from adaptive_bot.meme.intelligence import assess_market
+from adaptive_bot.meme.luna import (
+    LunaAction,
+    LunaLowRequest,
+    PolicyStore,
+    validate_policy,
+)
 from adaptive_bot.meme.strategy import (
     MemeDecision,
     MemeMomentumStrategy,
@@ -48,6 +56,7 @@ class PaperPosition:
 class PendingEntry:
     decision: MemeDecision
     created_at: datetime
+    risk_multiplier: Decimal = Decimal("1")
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,7 @@ class MemePaperEngine:
         self.config = config
         self.contracts = {contract.symbol: contract for contract in contracts}
         self.strategy = MemeMomentumStrategy(config.strategy)
+        self.policy_store = PolicyStore(config.luna.storage_directory)
 
     def run(
         self,
@@ -112,6 +122,9 @@ class MemePaperEngine:
             self.config.universe,
             equity * self.config.risk.max_margin_fraction * self.config.risk.leverage_ceiling,
         )
+        assessments = {
+            item.contract.symbol: assess_market(item.quality, self.config) for item in scanner
+        }
         ranks = {item.contract.symbol: item.rank for item in scanner if item.eligible}
 
         for timestamp in timestamps:
@@ -141,7 +154,11 @@ class MemePaperEngine:
             ):
                 contract = self.contracts[pending.decision.symbol]
                 fill = self._entry_fill(
-                    pending.decision, rows[pending.decision.symbol], contract, equity
+                    pending.decision,
+                    rows[pending.decision.symbol],
+                    contract,
+                    equity,
+                    pending.risk_multiplier,
                 )
                 if fill is None:
                     audit.append(
@@ -237,12 +254,19 @@ class MemePaperEngine:
                 eligible = [decision for decision in entry_options if decision.symbol in ranks]
                 if eligible:
                     chosen = min(eligible, key=lambda item: ranks[item.symbol] or 10**9)
-                    pending = PendingEntry(chosen, moment)
-                    audit.append(
-                        self._audit(
-                            moment, chosen.symbol, "ORDER_CREATED", "fill_not_before_next_candle"
+                    multiplier, luna_reason = self._luna_gate(chosen, qualities, mode)
+                    if multiplier is None:
+                        audit.append(self._audit(moment, chosen.symbol, "LUNA_BLOCK", luna_reason))
+                    else:
+                        pending = PendingEntry(chosen, moment, multiplier)
+                        audit.append(
+                            self._audit(
+                                moment,
+                                chosen.symbol,
+                                "ORDER_CREATED",
+                                f"fill_not_before_next_candle; {luna_reason}",
+                            )
                         )
-                    )
             equity_curve.append({"timestamp": moment.isoformat(), "equity": str(marked)})
 
         final_equity = self._mark_equity(equity, position, latest_rows)
@@ -270,20 +294,33 @@ class MemePaperEngine:
                     "volume_zscore": str(item.quality.volume_zscore),
                     "spread_bps": str(item.quality.spread_bps),
                     "depth": str(item.quality.depth_half_percent),
+                    "liquidity_score": str(assessments[item.contract.symbol].liquidity_score),
+                    "manipulation_risk": str(assessments[item.contract.symbol].manipulation_risk),
+                    "shadow_p_win": str(assessments[item.contract.symbol].uncalibrated_p_win),
+                    "shadow_expected_value_r": str(
+                        assessments[item.contract.symbol].expected_value_r
+                    ),
+                    "max_safe_notional": str(assessments[item.contract.symbol].max_safe_notional),
                 }
                 for item in scanner
             ],
             "probabilistic": {
-                "status": "collecting_data",
-                "can_trade": False,
+                "status": self.config.models.mode,
+                "can_trade": self.config.models.mode == "paper_bootstrap",
                 "p_win": None,
                 "expected_value": None,
                 "note": "Shadow models cannot affect orders before the validation gate.",
             },
+            "luna": self._luna_status(),
         }
 
     def _entry_fill(
-        self, decision: MemeDecision, row: pd.Series, contract: MemeContract, equity: Decimal
+        self,
+        decision: MemeDecision,
+        row: pd.Series,
+        contract: MemeContract,
+        equity: Decimal,
+        risk_multiplier: Decimal = Decimal("1"),
     ) -> tuple[Decimal, Sizing] | None:
         assert decision.stop_price is not None
         opening = Decimal(str(row["open"]))
@@ -292,13 +329,17 @@ class MemePaperEngine:
         risk_per_unit = abs(price - decision.stop_price) + price * (
             self.config.risk.estimated_round_trip_cost_bps / Decimal("10000")
         )
-        budget = equity * self.config.risk.risk_per_trade
+        budget = min(
+            equity * self.config.risk.risk_per_trade,
+            equity * self.config.risk.hard_risk_cap,
+        ) * min(Decimal("1"), risk_multiplier)
         if risk_per_unit <= 0 or budget <= 0:
             return None
-        maximum_notional = (
+        maximum_notional = min(
+            self.config.risk.hard_notional_cap,
             equity
             * self.config.risk.max_margin_fraction
-            * Decimal(self.config.risk.leverage_ceiling)
+            * Decimal(self.config.risk.leverage_ceiling),
         )
         quantity = min(budget / risk_per_unit, maximum_notional / price)
         quantity = (quantity / contract.lot_size).to_integral_value(
@@ -317,9 +358,90 @@ class MemePaperEngine:
             or quantity < contract.minimum_quantity
             or notional < contract.minimum_notional
             or effective > budget
+            or effective > equity * self.config.risk.hard_risk_cap
+            or notional > self.config.risk.hard_notional_cap
         ):
             return None
         return price, Sizing(quantity, leverage, effective, budget)
+
+    def _luna_gate(
+        self,
+        decision: MemeDecision,
+        qualities: dict[str, MarketQuality],
+        mode: str,
+    ) -> tuple[Decimal | None, str]:
+        if mode != "paper" or not self.config.luna.enabled:
+            return Decimal("1"), "luna_not_required_for_replay"
+        policy = self.policy_store.active_policy()
+        if policy is None:
+            return None, "active_policy_missing"
+        valid, reason = validate_policy(policy, self.config, datetime.now(UTC))
+        if not valid:
+            return None, reason
+        if policy.action is not LunaAction.ALLOW_EVALUATION:
+            return None, f"market_policy_{policy.action.value.lower()}"
+        if decision.strategy_name not in policy.allowed_strategies:
+            return None, "strategy_not_allowed_by_policy"
+        assert decision.stop_price is not None and decision.target_price is not None
+        quality = qualities.get(decision.symbol)
+        if quality is None:
+            return None, "quantitative_quality_missing"
+        assessment = assess_market(quality, self.config)
+        if assessment.liquidity_score < Decimal("0.50"):
+            return None, "liquidity_score_too_low"
+        if assessment.manipulation_risk > Decimal("0.75"):
+            return None, "manipulation_risk_too_high"
+        if self.config.models.mode == "paper_validated":
+            return None, "validated_model_prediction_missing"
+        request_key = (
+            f"{policy.policy_id}|{decision.symbol}|{decision.timestamp.isoformat()}|"
+            f"{decision.strategy_name}"
+        )
+        request_id = hashlib.sha256(request_key.encode()).hexdigest()[:24]
+        request = LunaLowRequest(
+            request_id=request_id,
+            created_at=datetime.now(UTC),
+            symbol=decision.symbol,
+            strategy=decision.strategy_name,
+            side="long",
+            entry_price=str(decision.reference_price),
+            stop_price=str(decision.stop_price),
+            target_price=str(decision.target_price),
+            regime=decision.regime.value,
+            quantitative_snapshot={
+                "spread_bps": str(quality.spread_bps),
+                "depth_half_percent": str(quality.depth_half_percent),
+                "funding_8h": str(quality.funding_8h),
+                "mark_divergence": str(quality.mark_divergence),
+                "liquidity_score": str(assessment.liquidity_score),
+                "manipulation_risk": str(assessment.manipulation_risk),
+                "shadow_p_win": str(assessment.uncalibrated_p_win),
+                "shadow_expected_value_r": str(assessment.expected_value_r),
+            },
+            policy_id=policy.policy_id,
+        )
+        review = self.policy_store.review(request_id)
+        if review is None:
+            self.policy_store.queue(request)
+            return None, f"low_review_queued:{request_id}"
+        if review.action is not LunaAction.ALLOW_EVALUATION:
+            return None, f"low_review_{review.action.value.lower()}"
+        return min(
+            Decimal(str(policy.risk_multiplier)),
+            Decimal(str(review.risk_multiplier)),
+        ), f"luna_approved:{request_id}"
+
+    def _luna_status(self) -> dict[str, object]:
+        policy = self.policy_store.active_policy()
+        if policy is None:
+            return {"enabled": self.config.luna.enabled, "ready": False, "reason": "missing_policy"}
+        valid, reason = validate_policy(policy, self.config, datetime.now(UTC))
+        return {
+            "enabled": self.config.luna.enabled,
+            "ready": valid and policy.action is LunaAction.ALLOW_EVALUATION,
+            "reason": reason,
+            "policy": policy.model_dump(mode="json"),
+        }
 
     def _process_position(
         self, position: PaperPosition, row: pd.Series, moment: datetime, equity: Decimal

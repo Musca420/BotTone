@@ -33,11 +33,16 @@ equivalenti a circa −10%/+10% ROE prima dei costi. Il percorso reale resta blo
 liquidazione e margine restituiti dal broker.
 # Profilo meme separato
 
-Il paper meme usa cap 1% per trade, 3% giornaliero, 10% settimanale e 15% drawdown. È consentita
+Il paper meme parte da 100 USDT e usa rischio base 0,50% (0,50 USDT), con cap assoluto 0,60%.
+La perdita massima è 1,5% giornaliera, 4% settimanale e 8% di drawdown. È consentita
 una sola posizione nell'intero universo e dopo tre perdite scatta un cooldown di otto barre.
-Il notional è prima calcolato dallo stop e dai costi, poi limitato al 10% di margine. Fra 2×, 3× e
-5× viene scelta la leva minima sufficiente entro il tetto manuale; la leva non aumenta mai il budget
-monetario. Quantità minima o rounding incompatibili causano rifiuto.
+Il notional è calcolato dallo stop e dai costi, poi limitato a 40 USDT e 20% di margine. Fra 1× e
+2× viene scelta la leva minima sufficiente; la leva non aumenta mai il budget monetario. Dopo il
+rounding il rischio viene ricalcolato e qualsiasi violazione rifiuta l'ordine.
 
 Il profilo è isolato dal bot BTC. Il live resta disabilitato e richiederà subaccount, chiavi e gate
 separati oltre alla modifica versionata della configurazione.
+
+Market Policy, Luna Low e score quantitativi sono filtri addizionali: non possono creare segnali né
+aumentare rischio/leva. Dati assenti non vengono convertiti in zero; il risultato è un blocco o
+`UNKNOWN`. In `paper_bootstrap` la stima probabilistica è mostrata ma non calibrata e resta shadow.

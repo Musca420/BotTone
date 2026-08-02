@@ -1,5 +1,5 @@
 trading_mode: paper
-initial_equity: "10000"
+initial_equity: "100"
 simulated_execution_only: true
 dashboard_host: 127.0.0.1
 dashboard_port: 8081
@@ -34,19 +34,46 @@ strategy:
   shock_three_bar_atr: "4"
   trailing_atr: "2"
   time_stop_bars: 24
-  short_enabled: true
+  short_enabled: false
 risk:
-  risk_per_trade: "0.01"
-  max_daily_loss: "0.03"
-  max_weekly_loss: "0.10"
-  max_strategy_drawdown: "0.15"
+  risk_per_trade: "0.005"
+  hard_risk_cap: "0.006"
+  hard_notional_cap: "40"
+  max_daily_loss: "0.015"
+  max_weekly_loss: "0.04"
+  max_strategy_drawdown: "0.08"
   max_open_positions: 1
   max_consecutive_losses: 3
   cooldown_bars: 8
-  max_margin_fraction: "0.10"
+  max_margin_fraction: "0.20"
   leverage_ceiling: 2
   liquidation_buffer_fraction: "0.01"
   estimated_round_trip_cost_bps: "20"
+models:
+  mode: paper_bootstrap
+  minimum_p_win: "0.60"
+  minimum_expected_value_r: "0.10"
+  minimum_mfe_mae_ratio: "1.25"
+  minimum_samples: 1000
+  minimum_weeks: 20
+  minimum_symbols: 10
+luna:
+  enabled: true
+  policy_required: true
+  minimum_regime_confidence: "0.60"
+  maximum_systemic_risk: "0.75"
+  policy_hours: 6
+  max_runs_per_day: 4
+  low_timeout_seconds: 90
+  codex_command: codex.cmd
+  storage_directory: data/meme/luna
+  allowed_source_domains:
+    - bitunix.com
+    - coingecko.com
+    - federalreserve.gov
+    - ecb.europa.eu
+    - sec.gov
+    - cftc.gov
 storage:
   database_url: sqlite:///data/meme/runtime.sqlite
   raw_directory: data/meme/raw

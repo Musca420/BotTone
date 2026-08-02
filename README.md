@@ -195,22 +195,32 @@ l'intersezione tra perpetual USDT Bitunix e categoria `meme-token` CoinGecko; ti
 stream stale, listing con meno di sette giorni, spread, depth, funding o mark divergence fuori
 soglia vengono esclusi.
 
-La strategia è deterministica: filtro EMA20/EMA50 e ADX su 1h, breakout Donchian su 5m con volume,
-attesa del retest, stop strutturale massimo 1,5 ATR, metà posizione a 1R e trailing sul resto. Opera
-long e short, ma mantiene una sola posizione complessiva. Il profilo paper usa rischio massimo 1%
-per trade, 3% giornaliero, 10% settimanale, drawdown 15%, margine isolated massimo 10% e tetto leva
-manuale 2×/3×/5×; il default è 2×.
+La strategia long-only combina due expert deterministici: breakout/retest Donchian e pullback sulla
+EMA20 in trend 1h confermato da EMA20/EMA50 e ADX. Stop massimo 1,5 ATR, metà posizione a 1R e
+trailing sul resto. Il conto paper parte da 100 USDT: rischio base 0,50 USDT, cap rischio 0,60 USDT,
+notional massimo 40 USDT, margine massimo 20 USDT e leva massima 2× isolated. I limiti sono 1,5%
+giornaliero, 4% settimanale, 8% drawdown, una posizione e cooldown di otto barre dopo tre perdite.
 
-Avviare tre terminali:
+Prima dell'avvio autenticare una volta la CLI Codex con l'abbonamento ChatGPT e scaricare lo storico
+in uno script separato (può restare in esecuzione mentre il collector lavora):
+
+```powershell
+codex.cmd login
+uv run adaptive-bot meme-download-history --config configs/bitunix_meme_paper.yaml --weeks 52
+```
+
+Avviare quattro terminali:
 
 ```powershell
 uv run adaptive-bot meme-collect --config configs/bitunix_meme_paper.yaml --duration-hours 168
+uv run adaptive-bot meme-luna-sidecar --config configs/bitunix_meme_paper.yaml --duration-hours 168
 uv run adaptive-bot meme-paper --config configs/bitunix_meme_paper.yaml --duration-hours 168
 uv run adaptive-bot meme-dashboard --config configs/bitunix_meme_paper.yaml
 ```
 
 Aprire `http://127.0.0.1:8081`. L'interfaccia, interamente in inglese, mostra feed, scanner,
-motivazioni di esclusione, posizione, operazioni, equity e audit. Con Tailscale Serve si può
+motivazioni di esclusione, liquidity/manipulation score, policy Luna, posizione, operazioni, equity
+e audit. Con Tailscale Serve si può
 pubblicare la porta come percorso `/meme`, mantenendo la dashboard BTC sulla porta 8080.
 
 Il recorder usa REST per il bootstrap storico e WebSocket pubblici per kline 5m/1h, trade, book e
@@ -221,10 +231,17 @@ uv run adaptive-bot meme-build-dataset --config configs/bitunix_meme_paper.yaml
 uv run adaptive-bot meme-backtest --config configs/bitunix_meme_paper.yaml
 ```
 
-Le triple-barrier label e le feature vengono generate offline. HMM/LightGBM non sono ancora
-installati né autorizzati a filtrare operazioni: servono almeno 20 settimane, 1.000 setup e dieci
-simboli prima del training. Open interest, liquidazioni, social e on-chain restano assenti finché
+Le triple-barrier label e le feature vengono generate offline. I modelli restano shadow-only:
+servono almeno 20 settimane, 1.000 setup e dieci simboli prima di poter passare da
+`paper_bootstrap` a `paper_validated`. Open interest, liquidazioni, social e on-chain restano
+`UNKNOWN` finché
 non viene scelto e verificato un provider ufficiale.
 
 L'esecuzione privata Bitunix e il live meme sono bloccati nel codice anche se vengono fornite
 credenziali. Non esiste alcuna procedura automatica che possa abilitarli.
+
+Luna Max usa `codex exec` con ricerca web e produce una Market Policy valida al massimo sei ore,
+usando soltanto domini autorizzati. Luna Low non usa il web e revisiona ogni setup. Entrambi possono
+solo bloccare o ridurre il rischio: senza login, policy, fonti ammesse o review valida il bot resta
+fail-closed. Codex opera in una directory temporanea con unicamente snapshot sanitizzato e schema;
+non riceve credenziali, repository o facoltà di inviare ordini.

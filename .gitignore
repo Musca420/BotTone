@@ -17,4 +17,6 @@ data/reports/*
 data/meme/raw/*
 data/meme/processed/*
 data/meme/reports/*
+data/meme/luna/*
+.test-run-*/
 !data/**/.gitkeep

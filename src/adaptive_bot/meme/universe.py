@@ -171,10 +171,10 @@ def rank_candidates(
 def choose_leverage(
     notional: Decimal, equity: Decimal, margin_fraction: Decimal, ceiling: int
 ) -> int | None:
-    if notional <= 0 or equity <= 0 or margin_fraction <= 0 or ceiling not in {2, 3, 5}:
+    if notional <= 0 or equity <= 0 or margin_fraction <= 0 or ceiling not in {1, 2, 3, 5}:
         return None
     margin_cap = equity * margin_fraction
-    for leverage in (2, 3, 5):
+    for leverage in (1, 2, 3, 5):
         if leverage <= ceiling and notional / leverage <= margin_cap:
             return leverage
     return None
