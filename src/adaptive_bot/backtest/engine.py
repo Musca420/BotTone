@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from adaptive_bot.backtest.metrics import maximum_drawdown
 from adaptive_bot.config import AppConfig
 from adaptive_bot.data.validation import ValidationReport, validate_candles
 from adaptive_bot.domain.enums import (
+    AssetClass,
     KillSwitchCause,
     OrderStatus,
     OrderType,
@@ -65,6 +66,8 @@ class BacktestResult(ResultModel):
     instrument: str
     timeframe_minutes: int
     risk_per_trade: Decimal
+    max_daily_loss: Decimal
+    max_weekly_loss: Decimal
     initial_equity: Decimal
     final_equity: Decimal
     gross_pnl: Decimal
@@ -82,7 +85,9 @@ class BacktestResult(ResultModel):
     def write_json(self, path: str | Path) -> None:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(target)
 
 
 class BacktestEngine:
@@ -102,8 +107,20 @@ class BacktestEngine:
         self.strategy = AdaptiveRangeStrategy(config.strategy)
         self.classifier = RegimeClassifier(config.strategy)
 
-    async def run(self, frame: pd.DataFrame) -> BacktestResult:
-        report = validate_candles(frame, timeframe_minutes=self.config.strategy.timeframe_minutes)
+    async def run(
+        self,
+        frame: pd.DataFrame,
+        *,
+        trade_after: datetime | None = None,
+        mode: str = "backtest",
+    ) -> BacktestResult:
+        report = validate_candles(
+            frame,
+            timeframe_minutes=self.config.strategy.timeframe_minutes,
+            calendar_name=(
+                None if self.config.instrument.asset_class is AssetClass.CRYPTO else "NYSE"
+            ),
+        )
         report.require(self.config.backtest.minimum_quality_score)
         data, sessions, opens, closes = self._prepare(frame, report)
         features = build_features(
@@ -125,6 +142,8 @@ class BacktestEngine:
 
         for position_index, (_, row) in enumerate(features.iterrows()):
             candle = self._candle(row)
+            spread_bps = self._spread_bps(row)
+            self.broker.spread_bps = spread_bps
             session = str(sessions.iloc[position_index])
             week = candle.exchange_timestamp.isocalendar()[:2]
             await self.broker.process_candle(candle)
@@ -159,7 +178,7 @@ class BacktestEngine:
                 atr_percentile=float(row["atr_percentile"]),
                 ema_slope=float(row["ema_slope"]),
                 atr_change=float(row["atr_change"]),
-                spread_bps=float(self.config.backtest.spread_bps),
+                spread_bps=float(spread_bps),
                 missing_ratio=0.0,
                 cumulative_move=float(row["cumulative_move"]),
             )
@@ -178,13 +197,17 @@ class BacktestEngine:
                 last_z=previous_z,
             )
             activity = "Indicators warming up — no trading decision"
-            if self._usable(row):
+            usable = self._usable(row)
+            trading_enabled = trade_after is None or candle.exchange_timestamp > trade_after
+            if usable and not trading_enabled:
+                activity = "Historical warm-up — paper orders disabled for this candle"
+            if usable and trading_enabled:
                 snapshot = MarketSnapshot(
                     candle=candle,
                     atr=Decimal(str(row["atr"])),
                     center=Decimal(str(row["center"])),
                     z_score=float(row["z"]),
-                    spread_bps=float(self.config.backtest.spread_bps),
+                    spread_bps=float(spread_bps),
                     regime=classified.regime,
                     session_open=opens.iloc[position_index],
                     session_close=closes.iloc[position_index],
@@ -193,7 +216,7 @@ class BacktestEngine:
                 signal = self.strategy.evaluate(snapshot, strategy_state, self.broker.position)
                 if signal is not None:
                     signal_count += 1
-                    accepted, detail = await self._handle_signal(signal, risk_state)
+                    accepted, detail = await self._handle_signal(signal, risk_state, spread_bps)
                     rejected += int(not accepted)
                     action = signal.action.value.replace("_", " ").title()
                     activity = f"{action}: {signal.reason}. {detail}"
@@ -231,7 +254,7 @@ class BacktestEngine:
                     z_score=self._finite(row["z"]),
                     atr_percentile=self._finite(row["atr_percentile"]),
                     ema_slope=self._finite(row["ema_slope"]),
-                    spread_bps=float(self.config.backtest.spread_bps),
+                    spread_bps=float(spread_bps),
                     regime=classified.regime.value,
                     equity=account.equity,
                     position_quantity=(
@@ -251,9 +274,12 @@ class BacktestEngine:
         slippage = sum((fill.slippage for fill in self.broker.fills), Decimal("0"))
         net = final_account.equity - initial
         return BacktestResult(
+            mode=mode,
             instrument=self.config.instrument.symbol,
             timeframe_minutes=self.config.strategy.timeframe_minutes,
             risk_per_trade=self.config.risk.risk_per_trade,
+            max_daily_loss=self.config.risk.max_daily_loss,
+            max_weekly_loss=self.config.risk.max_weekly_loss,
             initial_equity=initial,
             final_equity=final_account.equity,
             gross_pnl=net + fees + slippage,
@@ -277,6 +303,15 @@ class BacktestEngine:
         data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
         for column in ("open", "high", "low", "close", "volume"):
             data[column] = pd.to_numeric(data[column])
+        if self.config.instrument.asset_class is AssetClass.CRYPTO:
+            timestamps = data["timestamp"]
+            opens = timestamps.dt.floor("1D")
+            return (
+                data,
+                timestamps.dt.date.astype(str),
+                opens,
+                opens + timedelta(days=1),
+            )
         calendar = mcal.get_calendar("NYSE")
         schedule = calendar.schedule(
             start_date=data["timestamp"].iloc[0].date(),
@@ -322,12 +357,21 @@ class BacktestEngine:
     def _usable(row: pd.Series) -> bool:
         return not row[["atr", "adx", "center", "z", "atr_percentile", "ema_slope"]].isna().any()
 
-    async def _handle_signal(self, signal: Signal, risk_state: RiskState) -> tuple[bool, str]:
+    def _spread_bps(self, row: pd.Series) -> Decimal:
+        value = row.get("spread_bps", self.config.backtest.spread_bps)
+        spread = self.config.backtest.spread_bps if pd.isna(value) else Decimal(str(value))
+        if not spread.is_finite() or spread < 0:
+            raise ValueError("spread_bps must be finite and non-negative")
+        return spread
+
+    async def _handle_signal(
+        self, signal: Signal, risk_state: RiskState, spread_bps: Decimal
+    ) -> tuple[bool, str]:
         if signal.action in {SignalAction.ENTER_LONG, SignalAction.ENTER_SHORT}:
             account = await self.broker.get_account()
             costs = estimated_round_trip_cost_per_unit(
                 signal.reference_price,
-                self.config.backtest.spread_bps,
+                spread_bps,
                 self.config.backtest.slippage_bps,
                 self.config.backtest.commission_per_unit,
             )
@@ -449,7 +493,12 @@ class BacktestEngine:
                 KillSwitchCause.DAILY_LOSS,
                 candle.exchange_timestamp,
                 "daily loss limit reached",
-                close_position=True,
+            )
+        if equity <= state.week_start_equity * (Decimal("1") - self.config.risk.max_weekly_loss):
+            self.kill_switch.trigger(
+                KillSwitchCause.WEEKLY_LOSS,
+                candle.exchange_timestamp,
+                "weekly loss limit reached",
             )
         if (
             state.peak_equity > 0

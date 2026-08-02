@@ -7,6 +7,7 @@ from hypothesis import strategies as st
 from adaptive_bot.domain.enums import KillSwitchCause, MarketRegime, OrderType, Side, SignalAction
 from adaptive_bot.domain.models import AccountSnapshot, OrderRequest, Signal
 from adaptive_bot.execution.idempotency import client_order_id
+from adaptive_bot.meme.universe import choose_leverage
 from adaptive_bot.risk.engine import DefaultRiskEngine, RiskState
 from adaptive_bot.risk.kill_switch import KillSwitch
 from adaptive_bot.risk.position_sizing import SizingInput, size_position
@@ -29,7 +30,7 @@ def test_rounded_risk_never_exceeds_budget(instrument, equity, entry, distance) 
             entry_price=entry,
             stop_price=stop,
             estimated_cost_per_unit=Decimal("0.01"),
-            risk_fraction=Decimal("0.0025"),
+            risk_fraction=Decimal("0.01"),
             hard_notional_cap=equity,
             side=Side.BUY,
         ),
@@ -118,6 +119,20 @@ def test_zero_equity_never_approved(instrument) -> None:  # type: ignore[no-unty
         Decimal("0"),
     )
     assert not decision.approved and decision.quantity == 0
+
+
+@given(
+    notional=st.decimals(min_value="0.01", max_value="5000", places=2),
+    equity=st.decimals(min_value="1", max_value="100000", places=2),
+    ceiling=st.sampled_from([2, 3, 5]),
+)
+def test_meme_leverage_never_exceeds_manual_ceiling(
+    notional: Decimal, equity: Decimal, ceiling: int
+) -> None:
+    leverage = choose_leverage(notional, equity, Decimal("0.10"), ceiling)
+    if leverage is not None:
+        assert leverage <= ceiling
+        assert notional / leverage <= equity * Decimal("0.10")
 
 
 from adaptive_bot.config import RiskConfig  # noqa: E402

@@ -8,3 +8,35 @@ services:
       - ./configs:/app/configs:ro
       - ./data:/app/data
     command: ["--help"]
+
+  meme-collector:
+    build: .
+    profiles: ["meme"]
+    environment:
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./data:/app/data
+    command:
+      ["meme-collect", "--config", "configs/bitunix_meme_paper.yaml", "--duration-hours", "168"]
+
+  meme-paper:
+    build: .
+    profiles: ["meme"]
+    depends_on: [meme-collector]
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./data:/app/data
+    command:
+      ["meme-paper", "--config", "configs/bitunix_meme_paper.yaml", "--duration-hours", "168"]
+
+  meme-dashboard:
+    build: .
+    profiles: ["meme"]
+    depends_on: [meme-collector, meme-paper]
+    ports:
+      - "127.0.0.1:8081:8081"
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./data:/app/data:ro
+    command: ["meme-dashboard", "--config", "configs/bitunix_meme_paper.yaml"]

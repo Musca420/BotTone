@@ -70,3 +70,36 @@ def test_stop_cannot_be_widened() -> None:
     assert tighten_stop(Decimal("95"), Decimal("97"), Side.BUY) == 97
     with pytest.raises(ValueError, match="widened"):
         tighten_stop(Decimal("95"), Decimal("94"), Side.BUY)
+
+
+def test_fixed_roe_levels_are_symmetric_and_do_not_exit_at_center() -> None:
+    strategy = AdaptiveRangeStrategy(
+        StrategyConfig(
+            session_flatten_enabled=False,
+            fixed_stop_fraction=Decimal("0.01"),
+            fixed_target_fraction=Decimal("0.01"),
+        )
+    )
+    bar = candle()
+    snapshot = MarketSnapshot(
+        candle=bar,
+        atr=Decimal("2"),
+        center=Decimal("101"),
+        z_score=-1.6,
+        spread_bps=1,
+        regime=MarketRegime.RANGE,
+        session_open=bar.exchange_timestamp,
+        session_close=bar.exchange_timestamp,
+    )
+    signal = strategy.evaluate(snapshot, StrategyState(), None)
+    assert signal is not None
+    assert signal.stop_price == Decimal("99.00")
+    assert signal.target_price == Decimal("101.00")
+    position = Position(
+        instrument="BTCUSDT",
+        quantity=Decimal("0.01"),
+        side=Side.BUY,
+        average_entry_price=Decimal("100"),
+        opened_at=bar.exchange_timestamp,
+    )
+    assert strategy.evaluate(snapshot, StrategyState(), position) is None

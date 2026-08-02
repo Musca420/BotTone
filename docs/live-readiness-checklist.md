@@ -19,3 +19,12 @@ Stato Milestone 1: **NON PRONTO**.
 - [ ] Revisione manuale di account allowlist, cap e credenziali live
 
 Non modificare automaticamente le soglie per spuntare un gate.
+# Meme-specific live gate
+
+- [ ] Subaccount Bitunix e API key dedicati, senza prelievo e con IP allowlist.
+- [ ] Almeno 100 operazioni paper e 300 out-of-sample dopo costi.
+- [ ] Profit factor almeno 1,15, expectancy positiva e max drawdown massimo 10%.
+- [ ] Nessuna violazione rischio, duplicazione, posizione orfana o liquidazione.
+- [ ] Costi 2× e gap/slippage stress ancora accettabili.
+- [ ] Modello probabilistico, se presente, calibrato e validato; shadow non può inviare ordini.
+- [ ] Attivazione live eseguita come modifica manuale, revisionata e separata da questo MVP.

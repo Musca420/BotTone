@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -38,18 +39,36 @@ class StrategyConfig(ConfigModel):
     short_enabled: bool = False
     no_entry_minutes_after_open: int = Field(default=15, ge=0)
     flatten_minutes_before_close: int = Field(default=15, ge=0)
+    session_flatten_enabled: bool = True
+    fixed_stop_fraction: Decimal | None = Field(default=None, gt=0, lt=1)
+    fixed_target_fraction: Decimal | None = Field(default=None, gt=0, lt=1)
+
+    @model_validator(mode="after")
+    def fixed_risk_reward_is_complete(self) -> StrategyConfig:
+        if (self.fixed_stop_fraction is None) != (self.fixed_target_fraction is None):
+            raise ValueError("fixed stop and target fractions must be configured together")
+        if (
+            self.fixed_stop_fraction is not None
+            and self.fixed_stop_fraction != self.fixed_target_fraction
+        ):
+            raise ValueError("fixed stop and target must preserve 1:1 risk/reward")
+        return self
 
 
 class RiskConfig(ConfigModel):
-    risk_per_trade: Decimal = Field(default=Decimal("0.0025"), gt=0, le=1)
-    max_daily_loss: Decimal = Field(default=Decimal("0.01"), gt=0, le=1)
-    max_weekly_loss: Decimal = Field(default=Decimal("0.025"), gt=0, le=1)
+    risk_per_trade: Decimal = Field(default=Decimal("0.01"), gt=0, le=1)
+    max_daily_loss: Decimal = Field(default=Decimal("0.02"), gt=0, le=1)
+    max_weekly_loss: Decimal = Field(default=Decimal("0.10"), gt=0, le=1)
     max_strategy_drawdown: Decimal = Field(default=Decimal("0.08"), gt=0, le=1)
     max_open_positions: int = Field(default=1, gt=0)
     max_correlated_positions: int = Field(default=1, gt=0)
     max_consecutive_losses: int = Field(default=3, gt=0)
     cooldown_after_losses: int = Field(default=8, gt=0)
     hard_notional_cap: Decimal = Field(default=Decimal("25000"), gt=0)
+    target_exposure_fraction: Decimal = Field(default=Decimal("1"), gt=0, le=1)
+    max_margin_fraction: Decimal = Field(default=Decimal("1"), gt=0, le=1)
+    allow_simulated_leverage: bool = False
+    liquidation_buffer_fraction: Decimal = Field(default=Decimal("0.01"), ge=0, lt=1)
 
 
 class BacktestConfig(ConfigModel):
@@ -71,6 +90,15 @@ class AlpacaConfig(ConfigModel):
     stale_after_seconds: int = Field(default=90, gt=0)
     shadow: bool = True
     paper_execution_enabled: bool = False
+
+
+class BitunixConfig(ConfigModel):
+    enabled: bool = False
+    market: Literal["spot", "futures"]
+    simulated_execution_only: bool = True
+    margin_coin: Literal["USDT"] = "USDT"
+    margin_mode: Literal["isolated"] = "isolated"
+    leverage: Decimal = Field(default=Decimal("10"), ge=1)
 
 
 class EnvironmentSettings(BaseSettings):
@@ -97,6 +125,7 @@ class AppConfig(ConfigModel):
     risk: RiskConfig
     backtest: BacktestConfig
     alpaca: AlpacaConfig | None = None
+    bitunix: BitunixConfig | None = None
     allow_live_trading: str | None = None
     allowed_instruments: tuple[str, ...] = ("QQQ",)
     allowed_accounts: tuple[str, ...] = ("SIM-QQQ",)
@@ -112,6 +141,22 @@ class AppConfig(ConfigModel):
                 raise LiveTradingDisabled("Alpaca live endpoint is disabled")
             if self.trading_mode is not TradingMode.PAPER:
                 raise ValueError("Alpaca MVP requires paper trading mode")
+        if self.bitunix is not None:
+            if not self.bitunix.enabled:
+                raise ValueError("Bitunix market data is disabled")
+            if not self.bitunix.simulated_execution_only or self.broker != "simulated":
+                raise LiveTradingDisabled("Bitunix execution is limited to the simulated broker")
+            if (
+                self.bitunix.market != "futures"
+                or self.instrument.symbol != "BTCUSDT"
+                or self.instrument.currency != "USDT"
+            ):
+                raise ValueError("Bitunix is restricted to BTCUSDT USDT-margined futures")
+            if self.bitunix.leverage != self.instrument.max_leverage:
+                raise ValueError("Bitunix leverage must match the instrument leverage")
+            margin_fraction = self.risk.target_exposure_fraction / self.bitunix.leverage
+            if margin_fraction > self.risk.max_margin_fraction:
+                raise ValueError("target exposure exceeds the margin allocation cap")
         if self.trading_mode is TradingMode.LIVE:
             if self.allow_live_trading != "I_ACKNOWLEDGE_THE_RISK":
                 raise LiveTradingDisabled("live acknowledgement missing")

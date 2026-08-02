@@ -25,9 +25,9 @@ strategy:
   max_spread_bps: 5.0
   partial_exit_enabled: false
 risk:
-  risk_per_trade: "0.0025"
-  max_daily_loss: "0.01"
-  max_weekly_loss: "0.025"
+  risk_per_trade: "0.01"
+  max_daily_loss: "0.02"
+  max_weekly_loss: "0.10"
   max_strategy_drawdown: "0.08"
   max_open_positions: 1
   max_correlated_positions: 1

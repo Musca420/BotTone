@@ -66,6 +66,7 @@ class HealthLevel(StrEnum):
 
 class KillSwitchCause(StrEnum):
     DAILY_LOSS = "daily_loss"
+    WEEKLY_LOSS = "weekly_loss"
     DRAWDOWN = "drawdown"
     STALE_DATA = "stale_data"
     WEBSOCKET_DISCONNECTED = "websocket_disconnected"

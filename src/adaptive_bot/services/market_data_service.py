@@ -21,6 +21,7 @@ async def download_history(
     output: str | Path,
     *,
     timeframe_minutes: int = 15,
+    regular_session: bool = True,
 ) -> ValidationReport:
     events = await provider.historical(instrument, start, end)
     rows = [
@@ -36,13 +37,19 @@ async def download_history(
         if isinstance(event, Candle)
     ]
     frame = pd.DataFrame(rows, columns=("timestamp", "open", "high", "low", "close", "volume"))
+    calendar_name = "NYSE" if regular_session else None
     if frame.empty:
-        report = validate_candles(frame, timeframe_minutes=timeframe_minutes)
+        report = validate_candles(
+            frame, timeframe_minutes=timeframe_minutes, calendar_name=calendar_name
+        )
         report.require(1.0)
     frame = resample_ohlcv(frame, timeframe_minutes)
-    frame = _regular_session(frame, timeframe_minutes)
-    frame.attrs["split_adjusted"] = True
-    report = validate_candles(frame, timeframe_minutes=timeframe_minutes)
+    if regular_session:
+        frame = _regular_session(frame, timeframe_minutes)
+        frame.attrs["split_adjusted"] = True
+    report = validate_candles(
+        frame, timeframe_minutes=timeframe_minutes, calendar_name=calendar_name
+    )
     report.require(1.0)
     ParquetRepository.write(frame, output)
     return report

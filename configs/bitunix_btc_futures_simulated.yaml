@@ -1,0 +1,50 @@
+trading_mode: backtest
+broker: simulated
+database_url: sqlite:///data/adaptive_bot.db
+allowed_instruments: [BTCUSDT]
+allowed_accounts: [SIM-BITUNIX-FUTURES]
+instrument:
+  symbol: BTCUSDT
+  asset_class: crypto
+  currency: USDT
+  tick_size: "0.1"
+  lot_size: "0.0001"
+  minimum_quantity: "0.0001"
+  minimum_notional: "5"
+  point_value: "1"
+  shortable: true
+  max_leverage: "10"
+bitunix:
+  enabled: true
+  market: futures
+  simulated_execution_only: true
+  margin_coin: USDT
+  margin_mode: isolated
+  leverage: "10"
+strategy:
+  timeframe_minutes: 5
+  crypto_vwap_window: 288
+  short_enabled: true
+  session_flatten_enabled: false
+  fixed_stop_fraction: "0.01"
+  fixed_target_fraction: "0.01"
+risk:
+  risk_per_trade: "0.01"
+  max_daily_loss: "0.02"
+  max_weekly_loss: "0.10"
+  max_strategy_drawdown: "0.08"
+  max_open_positions: 1
+  max_correlated_positions: 1
+  max_consecutive_losses: 3
+  cooldown_after_losses: 8
+  target_exposure_fraction: "0.20"
+  max_margin_fraction: "0.10"
+  allow_simulated_leverage: true
+  liquidation_buffer_fraction: "0.01"
+  hard_notional_cap: "10000"
+backtest:
+  input_path: data/raw/bitunix_btcusdt_futures_5m.parquet
+  initial_equity: "10000"
+  spread_bps: "3"
+  slippage_bps: "2"
+  commission_per_unit: "0"

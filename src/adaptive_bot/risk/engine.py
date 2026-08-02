@@ -41,10 +41,17 @@ class DefaultRiskEngine:
         if signal.stop_price is None:
             return RiskDecision(approved=False, reason="entry requires a protective stop")
         if instrument.max_leverage > 1:
-            return RiskDecision(
-                approved=False,
-                reason="reliable broker liquidation data is required for leveraged instruments",
+            if not self.config.allow_simulated_leverage:
+                return RiskDecision(
+                    approved=False,
+                    reason="reliable broker liquidation data is required for leveraged instruments",
+                )
+            stop_fraction = abs(signal.reference_price - signal.stop_price) / signal.reference_price
+            liquidation_distance = (
+                Decimal("1") / instrument.max_leverage - self.config.liquidation_buffer_fraction
             )
+            if liquidation_distance < Decimal("3") * stop_fraction:
+                return RiskDecision(approved=False, reason="simulated liquidation buffer is unsafe")
         side = Side.BUY if signal.action.value.endswith("long") else Side.SELL
         if side is Side.SELL and not instrument.shortable:
             return RiskDecision(approved=False, reason="short selling is disabled")
@@ -56,7 +63,10 @@ class DefaultRiskEngine:
                 stop_price=signal.stop_price,
                 estimated_cost_per_unit=estimated_cost_per_unit,
                 risk_fraction=self.config.risk_per_trade,
-                hard_notional_cap=self.config.hard_notional_cap,
+                hard_notional_cap=min(
+                    self.config.hard_notional_cap,
+                    account.equity * self.config.target_exposure_fraction,
+                ),
                 side=side,
             ),
             instrument,

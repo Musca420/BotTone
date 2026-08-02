@@ -62,7 +62,6 @@ class AdaptiveRangeStrategy:
     def evaluate(
         self, snapshot: MarketSnapshot, state: StrategyState, position: Position | None
     ) -> Signal | None:
-        candle = snapshot.candle
         if position is not None:
             reason = self._exit_reason(snapshot, state, position)
             if reason is None:
@@ -81,18 +80,32 @@ class AdaptiveRangeStrategy:
         if snapshot.spread_bps > self.config.max_spread_bps:
             return None
         if snapshot.z_score <= -self.config.entry_z:
-            stop = initial_stop(
-                candle.close, snapshot.atr, Side.BUY, Decimal(str(self.config.stop_atr))
+            stop, target = self._entry_levels(snapshot, Side.BUY)
+            return self._signal(
+                snapshot, SignalAction.ENTER_LONG, "range lower-band entry", stop, target
             )
-            return self._signal(snapshot, SignalAction.ENTER_LONG, "range lower-band entry", stop)
         if self.config.short_enabled and snapshot.z_score >= self.config.entry_z:
-            stop = initial_stop(
-                candle.close, snapshot.atr, Side.SELL, Decimal(str(self.config.stop_atr))
+            stop, target = self._entry_levels(snapshot, Side.SELL)
+            return self._signal(
+                snapshot, SignalAction.ENTER_SHORT, "range upper-band entry", stop, target
             )
-            return self._signal(snapshot, SignalAction.ENTER_SHORT, "range upper-band entry", stop)
         return None
 
+    def _entry_levels(self, snapshot: MarketSnapshot, side: Side) -> tuple[Decimal, Decimal]:
+        entry = snapshot.candle.close
+        if self.config.fixed_stop_fraction is None:
+            stop = initial_stop(entry, snapshot.atr, side, Decimal(str(self.config.stop_atr)))
+            return stop, snapshot.center
+        stop_distance = entry * self.config.fixed_stop_fraction
+        assert self.config.fixed_target_fraction is not None
+        target_distance = entry * self.config.fixed_target_fraction
+        if side is Side.BUY:
+            return entry - stop_distance, entry + target_distance
+        return entry + stop_distance, entry - target_distance
+
     def _entry_window(self, snapshot: MarketSnapshot) -> bool:
+        if not self.config.session_flatten_enabled:
+            return True
         opened = snapshot.session_open + timedelta(minutes=self.config.no_entry_minutes_after_open)
         flatten = snapshot.session_close - timedelta(
             minutes=self.config.flatten_minutes_before_close
@@ -111,13 +124,21 @@ class AdaptiveRangeStrategy:
             return "data integrity compromised"
         if snapshot.regime is MarketRegime.SHOCK:
             return "shock regime"
-        if snapshot.candle.exchange_timestamp >= flatten:
+        if self.config.session_flatten_enabled and snapshot.candle.exchange_timestamp >= flatten:
             return "session flatten"
         if position.bars_held >= self.config.time_stop_bars:
             return "time stop"
-        if position.side is Side.BUY and snapshot.z_score >= 0:
+        if (
+            self.config.fixed_target_fraction is None
+            and position.side is Side.BUY
+            and snapshot.z_score >= 0
+        ):
             return "center reached"
-        if position.side is Side.SELL and snapshot.z_score <= 0:
+        if (
+            self.config.fixed_target_fraction is None
+            and position.side is Side.SELL
+            and snapshot.z_score <= 0
+        ):
             return "center reached"
         if (
             self.config.partial_exit_enabled
@@ -134,6 +155,7 @@ class AdaptiveRangeStrategy:
         action: SignalAction,
         reason: str,
         stop: Decimal | None = None,
+        target: Decimal | None = None,
     ) -> Signal:
         candle = snapshot.candle
         return Signal(
@@ -146,7 +168,7 @@ class AdaptiveRangeStrategy:
             action=action,
             reference_price=candle.close,
             stop_price=stop,
-            target_price=snapshot.center,
+            target_price=target or snapshot.center,
             z_score=snapshot.z_score,
             regime=snapshot.regime,
             reason=reason,

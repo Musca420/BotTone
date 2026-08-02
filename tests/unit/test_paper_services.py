@@ -22,6 +22,7 @@ from adaptive_bot.domain.models import (
     Quote,
     Signal,
 )
+from adaptive_bot.risk.engine import RiskState
 from adaptive_bot.services.paper_service import PaperRuntime
 from adaptive_bot.services.trading_service import CandleAggregator
 
@@ -268,3 +269,21 @@ async def test_persisted_kill_switch_blocks_automatic_restart(
     runtime, _ = _paper_runtime(rth_frame, tmp_path, FakePaperBroker(), store)
     with pytest.raises(RuntimeError, match="latched"):
         await runtime.initialize()
+
+
+@pytest.mark.asyncio
+async def test_weekly_loss_latches_without_forced_flatten(
+    rth_frame: pd.DataFrame,
+    tmp_path: Path,
+) -> None:
+    runtime, current = _paper_runtime(rth_frame, tmp_path, FakePaperBroker())
+    await runtime.initialize()
+    runtime.risk_state = RiskState(
+        day_start_equity=Decimal("90000"),
+        week_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+    )
+    runtime._activate_loss_switch(Decimal("90000"), current)
+    assert runtime.kill_switch.event is not None
+    assert runtime.kill_switch.event.cause.value == "weekly_loss"
+    assert not runtime.kill_switch.event.close_position

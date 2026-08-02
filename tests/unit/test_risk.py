@@ -19,19 +19,24 @@ def test_sizing_rounds_down_and_respects_budget(instrument) -> None:  # type: ig
             entry_price=Decimal("100"),
             stop_price=Decimal("95"),
             estimated_cost_per_unit=Decimal("0.10"),
-            risk_fraction=Decimal("0.0025"),
+            risk_fraction=Decimal("0.01"),
             hard_notional_cap=Decimal("25000"),
             side=Side.BUY,
         ),
         instrument,
     )
-    assert result.approved and result.quantity == 49
+    assert result.approved and result.quantity == 196
     assert result.effective_risk <= result.risk_budget
     assert floor_to_lot(Decimal("3.9"), Decimal("1")) == 3
 
 
 def test_daily_loss_drawdown_and_liquidation_buffer() -> None:
-    assert loss_limit_breached(Decimal("99000"), Decimal("100000"), Decimal("0.01"))
+    config = RiskConfig()
+    assert config.risk_per_trade == Decimal("0.01")
+    assert config.max_daily_loss == Decimal("0.02")
+    assert config.max_weekly_loss == Decimal("0.10")
+    assert loss_limit_breached(Decimal("98000"), Decimal("100000"), config.max_daily_loss)
+    assert loss_limit_breached(Decimal("90000"), Decimal("100000"), config.max_weekly_loss)
     assert drawdown(Decimal("90"), Decimal("100")) == Decimal("0.1")
     assert liquidation_buffer_valid(
         LiquidationCheck(
@@ -86,3 +91,45 @@ def test_kill_switch_latches_and_blocks_entries(instrument) -> None:  # type: ig
         Decimal("0"),
     )
     assert not decision.approved
+
+
+def test_simulated_leverage_caps_exposure_and_margin(instrument) -> None:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    leveraged = instrument.model_copy(update={"symbol": "BTCUSDT", "max_leverage": Decimal("10")})
+    signal = Signal(
+        exchange_timestamp=now,
+        received_timestamp=now,
+        source="test",
+        instrument="BTCUSDT",
+        action=SignalAction.ENTER_LONG,
+        reference_price=Decimal("100"),
+        stop_price=Decimal("99"),
+        target_price=Decimal("101"),
+        z_score=-2,
+        regime=MarketRegime.RANGE,
+        reason="test",
+    )
+    account = AccountSnapshot(
+        timestamp=now,
+        account_id="SIM-BITUNIX-FUTURES",
+        equity=Decimal("10000"),
+        cash=Decimal("10000"),
+        buying_power=Decimal("10000"),
+    )
+    config = RiskConfig(
+        target_exposure_fraction=Decimal("0.20"),
+        max_margin_fraction=Decimal("0.10"),
+        allow_simulated_leverage=True,
+    )
+    decision = DefaultRiskEngine(config, KillSwitch()).assess(
+        signal,
+        leveraged,
+        account,
+        RiskState(Decimal("10000"), Decimal("10000"), Decimal("10000")),
+        Decimal("0"),
+    )
+    assert decision.approved and decision.quantity == Decimal("20")
+    notional = decision.quantity * signal.reference_price
+    assert notional == account.equity * Decimal("0.20")
+    assert notional / leveraged.max_leverage == account.equity * Decimal("0.02")
+    assert decision.effective_risk == account.equity * Decimal("0.002")

@@ -34,5 +34,19 @@ regime, interroga account/posizioni/ordini Alpaca e sottopone ogni entry al Risk
 approvati usano bracket atomici; il kill switch impedisce nuove entry e richiede flatten paper per
 perdita oltre soglia o stop protettivo assente. I report paper usano lo stesso schema della dashboard.
 
+Bitunix è limitato a BTCUSDT perpetual futures con margine isolated USDT. Il calendario NYSE non
+viene applicato alle candele crypto 24/7. Non esiste un percorso dal runtime agli endpoint privati
+Bitunix: tutti gli ordini restano nel broker simulato locale.
+
 Gli ordini seguono una state machine esplicita. Il client order ID è un hash deterministico di
 strumento, azione, timestamp, correlation ID e scopo. Un retry restituisce l'ordine esistente.
+# Meme application boundary
+
+`adaptive_bot.meme` è una seconda applicazione nello stesso pacchetto. Riusa modelli di dominio,
+indicatori e vincoli monetari, ma non condivide database, capitale, configurazione o dashboard con
+BTC. Il flusso è `CoinGecko category ∩ Bitunix USDT futures → REST bootstrap → WebSocket recorder →
+scanner → breakout/retest → risk sizing → paper ledger → report/dashboard`.
+
+I raw event vengono conservati in `data/meme/raw`, le feature Parquet in `data/meme/processed` e i
+report in `data/meme/reports`. Lo scanner è fail-closed: assenza catalogo, stream stale o metadata
+ambigui non producono un universo alternativo implicito.

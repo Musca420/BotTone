@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Meme Futures Lab</title>
+  <link rel="stylesheet" href="/meme.css">
+</head>
+<body>
+  <header>
+    <div><span class="eyebrow">BITUNIX · SIMULATED EXECUTION</span><h1>Meme Futures Lab</h1></div>
+    <div class="status"><span id="stream" class="pill danger">WAITING</span><span id="updated">—</span></div>
+  </header>
+  <main>
+    <section id="empty" class="card"><h2>Preparing the market feed</h2><p id="empty-copy">Waiting for data.</p></section>
+    <div id="dashboard" class="hidden">
+      <section class="grid summary">
+        <article class="card"><small>Equity</small><strong id="equity">—</strong><span id="pnl">—</span></article>
+        <article class="card"><small>Open position</small><strong id="position">FLAT</strong><span id="position-detail">No exposure</span></article>
+        <article class="card"><small>Risk profile</small><strong id="risk">1.00%</strong><span id="limits">3% day · 10% week</span></article>
+        <article class="card"><small>Probabilistic gate</small><strong id="model">COLLECTING DATA</strong><span id="model-note">Cannot trade</span></article>
+      </section>
+
+      <section class="grid charts">
+        <article class="card"><div class="title"><h2>Live selected market</h2><select id="symbol"></select></div><canvas id="price-chart"></canvas><div id="market-detail" class="metrics"></div></article>
+        <article class="card"><h2>Equity curve</h2><canvas id="equity-chart"></canvas></article>
+      </section>
+
+      <section class="card"><div class="title"><h2>Scanner</h2><span>Eligibility before signal strength</span></div>
+        <div class="table"><table><thead><tr><th>Rank</th><th>Symbol</th><th>Status</th><th>Momentum / ATR</th><th>Volume z</th><th>Spread</th><th>Depth</th><th>Reason</th></tr></thead><tbody id="scanner"></tbody></table></div>
+      </section>
+
+      <section class="grid lower">
+        <article class="card"><h2>Paper operations</h2><div id="operations" class="timeline"></div></article>
+        <article class="card"><h2>Decision audit</h2><div id="audit" class="timeline"></div></article>
+      </section>
+      <p class="warning">Live execution is locked. Leverage is a margin setting, never permission to exceed the monetary risk budget.</p>
+    </div>
+  </main>
+  <script src="/meme.js"></script>
+</body>
+</html>

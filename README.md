@@ -5,12 +5,20 @@ backtest QQQ a 15 minuti con broker simulato, senza leva e con massimo una posiz
 2 include dati, shadow mode e trading Alpaca Paper con denaro simulato, ordini bracket e
 riconciliazione fail-closed. La modalità live resta disabilitata.
 
+Il profilo crypto operativo corrente è esclusivamente BTCUSDT perpetual futures con margine USDT
+isolated; gli adapter delle milestone precedenti restano disponibili soltanto come codice storico e
+testato.
+
 ## Rischi e limitazioni
 
 Il software non garantisce profitto né assenza di perdite. Un backtest OHLCV non ricostruisce
 la sequenza intrabar: applica spread, slippage, volume disponibile, gap e l'ipotesi peggiore se
 stop e target sono entrambi toccati. Dati incompleti o non UTC fermano il run. La modalità live
 è disabilitata nel codice e non va usata come sistema operativo di trading.
+
+La policy di rischio corrente limita ogni trade all'1% dell'equity, blocca nuovi ingressi dopo una
+perdita giornaliera del 2% o settimanale del 10% e mantiene il drawdown massimo all'8%. Il blocco è
+persistente e richiede reset manuale motivato; non forza da solo la chiusura di posizioni protette.
 
 ## Installazione
 
@@ -67,8 +75,9 @@ per la Milestone 3 e non costituisce evidenza di live readiness.
 ## Dashboard operativa
 
 La dashboard locale read-only mostra equity, drawdown, regime, ATR, ADX, VWAP, z-score, bande,
-decisioni, fill, kill switch e avanzamento del progetto. L'interfaccia è in inglese e rilegge il
-report ogni due secondi:
+decisioni, fill, kill switch e avanzamento del progetto. Mostra inoltre il feed pubblico BTCUSDT
+raccolto in tempo reale, il grafico delle barre chiuse, l'età del feed e il warm-up degli indicatori.
+L'interfaccia è in inglese e si aggiorna ogni due secondi:
 
 ```powershell
 uv run adaptive-bot dashboard --report data/reports/backtest.json
@@ -137,5 +146,85 @@ In caso di stop mancante, posizione sconosciuta, perdita oltre soglia, dati stal
 bloccare nuovi ordini, preservare/ripristinare la protezione, cancellare ordini non protettivi e
 seguire il runbook. Il kill switch richiede reset manuale motivato.
 
+## Bitunix futures con denaro simulato
+
+Il solo mercato operativo crypto è BTCUSDT perpetual futures, margine isolated USDT. Usa dati
+storici pubblici Bitunix e il broker simulato locale: non servono API key e nessun ordine raggiunge
+l'exchange.
+
+```powershell
+uv run adaptive-bot download-data --config configs/bitunix_btc_futures_simulated.yaml `
+  --output data/raw/bitunix_btcusdt_futures_5m.parquet
+uv run adaptive-bot backtest --config configs/bitunix_btc_futures_simulated.yaml
+```
+
+Il collector autonomo archivia per sette giorni le candele pubbliche chiuse da 5 minuti in JSONL,
+deduplicandole a ogni riavvio. Il file grezzo viene poi convertito e validato prima del backtest:
+
+```powershell
+uv run adaptive-bot collect-bitunix --config configs/bitunix_btc_futures_simulated.yaml `
+  --output data/raw/bitunix_btcusdt_mark_futures_5m.jsonl --duration-hours 168 --poll-seconds 60
+uv run adaptive-bot paper-bitunix --config configs/bitunix_btc_futures_simulated.yaml `
+  --input data/raw/bitunix_btcusdt_mark_futures_5m.jsonl `
+  --output data/reports/bitunix_paper.json --duration-hours 168
+```
+
+Il paper engine persiste il timestamp di avvio, usa lo storico precedente soltanto come warm-up e
+può simulare ordini esclusivamente sulle candele successive. La dashboard deve leggere
+`data/reports/bitunix_paper.json` per mostrare decisioni e operazioni BTCUSDT.
+
+L'esecuzione privata Bitunix resta disabilitata finché il testnet non dispone di endpoint ufficiali
+verificati. I limiti strumento locali sono conservativi e dovranno essere confrontati con i metadati
+pubblici correnti prima di una futura modalità paper collegata all'exchange. Il downloader rifiuta
+deviazioni OHLC superiori a 1 bps; entro tale soglia il dataset processato espande conservativamente
+high/low per includere open e close, registra il conteggio e conserva immutato il raw originale.
+
+La simulazione usa candele da 5 minuti e VWAP rolling su 288 barre (24 ore), leva 10×,
+esposizione massima del 20% dell'equity e quindi margine previsto del
+2%, sotto il cap del 10%. Stop e target sono simmetrici all'1% del prezzo, equivalenti a circa
+−10%/+10% ROE prima di fee e slippage.
+
 Approfondimenti: `docs/architecture.md`, `docs/risk-model.md`, `docs/strategy.md`,
 `docs/backtesting.md` e `docs/live-readiness-checklist.md`.
+
+## Meme Futures Lab — Bitunix paper 24/7
+
+Il secondo bot usa lo stesso core di dominio e rischio ma possiede configurazione, dati, report,
+equity simulata e dashboard indipendenti. Il bot BTC non viene riconfigurato. L'universo è
+l'intersezione tra perpetual USDT Bitunix e categoria `meme-token` CoinGecko; ticker ambigui,
+stream stale, listing con meno di sette giorni, spread, depth, funding o mark divergence fuori
+soglia vengono esclusi.
+
+La strategia è deterministica: filtro EMA20/EMA50 e ADX su 1h, breakout Donchian su 5m con volume,
+attesa del retest, stop strutturale massimo 1,5 ATR, metà posizione a 1R e trailing sul resto. Opera
+long e short, ma mantiene una sola posizione complessiva. Il profilo paper usa rischio massimo 1%
+per trade, 3% giornaliero, 10% settimanale, drawdown 15%, margine isolated massimo 10% e tetto leva
+manuale 2×/3×/5×; il default è 2×.
+
+Avviare tre terminali:
+
+```powershell
+uv run adaptive-bot meme-collect --config configs/bitunix_meme_paper.yaml --duration-hours 168
+uv run adaptive-bot meme-paper --config configs/bitunix_meme_paper.yaml --duration-hours 168
+uv run adaptive-bot meme-dashboard --config configs/bitunix_meme_paper.yaml
+```
+
+Aprire `http://127.0.0.1:8081`. L'interfaccia, interamente in inglese, mostra feed, scanner,
+motivazioni di esclusione, posizione, operazioni, equity e audit. Con Tailscale Serve si può
+pubblicare la porta come percorso `/meme`, mantenendo la dashboard BTC sulla porta 8080.
+
+Il recorder usa REST per il bootstrap storico e WebSocket pubblici per kline 5m/1h, trade, book e
+mark/index/funding. Per costruire il dataset shadow:
+
+```powershell
+uv run adaptive-bot meme-build-dataset --config configs/bitunix_meme_paper.yaml
+uv run adaptive-bot meme-backtest --config configs/bitunix_meme_paper.yaml
+```
+
+Le triple-barrier label e le feature vengono generate offline. HMM/LightGBM non sono ancora
+installati né autorizzati a filtrare operazioni: servono almeno 20 settimane, 1.000 setup e dieci
+simboli prima del training. Open interest, liquidazioni, social e on-chain restano assenti finché
+non viene scelto e verificato un provider ufficiale.
+
+L'esecuzione privata Bitunix e il live meme sono bloccati nel codice anche se vengono fornite
+credenziali. Non esiste alcuna procedura automatica che possa abilitarli.

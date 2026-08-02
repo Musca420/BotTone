@@ -60,3 +60,12 @@ l'incidente.
 Fermare il processo, attivare il kill switch, cancellare ordini non protettivi, chiudere o
 trasferire la gestione della posizione secondo policy, revocare le chiavi e archiviare database,
 configurazione, commit Git e log dell'ultima sessione.
+# Meme collector and paper runtime
+
+- Dashboard `STALE / STOPPED`: verificare `meme-collector`; il paper engine non deve aprire ordini.
+- Catalogo CoinGecko non disponibile: è ammessa la cache verificata fino a 72 ore, poi fail-closed.
+- Coin esclusa: leggere la colonna Reason dello scanner; non ridurre automaticamente la soglia.
+- Posizione paper inattesa: fermare `meme-paper`, conservare report/eventi e riprodurre il run.
+- Cambio leva: modificare la configurazione soltanto con bot fermo e posizione `FLAT`.
+- Credenziale compromessa: eliminare la chiave e mantenere live disabilitato; il collector pubblico
+  non necessita di credenziali Bitunix.

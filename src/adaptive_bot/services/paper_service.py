@@ -47,6 +47,8 @@ class PaperReport(ResultModel):
     instrument: str
     timeframe_minutes: int
     risk_per_trade: Decimal
+    max_daily_loss: Decimal
+    max_weekly_loss: Decimal
     initial_equity: Decimal
     final_equity: Decimal
     gross_pnl: Decimal
@@ -380,9 +382,11 @@ class PaperRuntime:
         if loss_limit_breached(
             equity, self.risk_state.day_start_equity, self.config.risk.max_daily_loss
         ):
-            self.kill_switch.trigger(
-                KillSwitchCause.DAILY_LOSS, timestamp, "daily loss limit", close_position=True
-            )
+            self.kill_switch.trigger(KillSwitchCause.DAILY_LOSS, timestamp, "daily loss limit")
+        elif loss_limit_breached(
+            equity, self.risk_state.week_start_equity, self.config.risk.max_weekly_loss
+        ):
+            self.kill_switch.trigger(KillSwitchCause.WEEKLY_LOSS, timestamp, "weekly loss limit")
         elif (
             drawdown(equity, self.risk_state.peak_equity) >= self.config.risk.max_strategy_drawdown
         ):
@@ -535,6 +539,8 @@ class PaperRuntime:
             instrument=self.config.instrument.symbol,
             timeframe_minutes=self.config.strategy.timeframe_minutes,
             risk_per_trade=self.config.risk.risk_per_trade,
+            max_daily_loss=self.config.risk.max_daily_loss,
+            max_weekly_loss=self.config.risk.max_weekly_loss,
             initial_equity=self.initial_equity,
             final_equity=equity,
             gross_pnl=net + fees + slippage,

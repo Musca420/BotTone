@@ -21,6 +21,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -45,6 +46,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pydantic-settings", specifier = ">=2.10" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "websockets", specifier = ">=15.0" },
 ]
 
 [package.metadata.requires-dev]

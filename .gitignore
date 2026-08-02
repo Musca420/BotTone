@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp/
+.pytest-tmp-*/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
@@ -13,4 +14,7 @@ __pycache__/
 data/raw/*
 data/processed/*
 data/reports/*
+data/meme/raw/*
+data/meme/processed/*
+data/meme/reports/*
 !data/**/.gitkeep

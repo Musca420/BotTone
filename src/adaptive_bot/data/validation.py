@@ -28,7 +28,7 @@ def validate_candles(
     frame: pd.DataFrame,
     *,
     timeframe_minutes: int = 15,
-    calendar_name: str = "NYSE",
+    calendar_name: str | None = "NYSE",
 ) -> ValidationReport:
     errors: list[str] = []
     warnings: list[str] = []
@@ -75,12 +75,16 @@ def validate_candles(
     )
     if (jumps & ~acknowledged).any():
         errors.append("unexplained price jump above 20%")
-    if not bool(frame.attrs.get("split_adjusted", False)):
+    if calendar_name is not None and not bool(frame.attrs.get("split_adjusted", False)):
         warnings.append("split-adjustment metadata is absent")
 
-    missing = _missing_rth_candles(timestamps.dropna(), timeframe_minutes, calendar_name)
+    missing = (
+        _missing_rth_candles(timestamps.dropna(), timeframe_minutes, calendar_name)
+        if calendar_name is not None
+        else _missing_continuous_candles(timestamps.dropna(), timeframe_minutes)
+    )
     if missing:
-        errors.append(f"{missing} regular-session candles are missing")
+        errors.append(f"{missing} candles are missing")
     denominator = max(len(frame) + missing, 1)
     score = max(0.0, 1.0 - (len(errors) + missing) / denominator)
     return ValidationReport(not errors, score, tuple(errors), tuple(warnings), missing)
@@ -107,3 +111,13 @@ def _missing_rth_candles(timestamps: pd.Series, timeframe_minutes: int, calendar
     observed = pd.DatetimeIndex(timestamps)
     expected_in_span = expected[(expected >= observed.min()) & (expected <= observed.max())]
     return len(expected_in_span.difference(observed))
+
+
+def _missing_continuous_candles(timestamps: pd.Series, timeframe_minutes: int) -> int:
+    if timestamps.empty:
+        return 0
+    observed = pd.DatetimeIndex(timestamps)
+    expected = pd.date_range(
+        observed.min(), observed.max(), freq=f"{timeframe_minutes}min", tz="UTC"
+    )
+    return len(expected.difference(observed))

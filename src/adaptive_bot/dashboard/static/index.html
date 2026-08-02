@@ -36,7 +36,8 @@
       <div id="dashboard" class="dashboard hidden">
         <section class="context-strip" aria-label="Run context">
           <div><span>Mode</span><strong id="mode">—</strong></div>
-          <div><span>Instrument</span><strong id="instrument">—</strong></div>
+          <div><span>Report instrument</span><strong id="instrument">—</strong></div>
+          <div><span>Active profile</span><strong>BTCUSDT FUTURES · 5M · 10×</strong></div>
           <div><span>Timeframe</span><strong id="timeframe">—</strong></div>
           <div><span>Latest bar</span><strong id="latest-bar">—</strong></div>
           <div><span>Engine</span><strong class="safe">Deterministic</strong></div>
@@ -56,11 +57,51 @@
             <span>Signals</span><strong id="signals">—</strong><small id="rejected">—</small>
           </article>
           <article class="kpi-card">
+            <span>Current position</span><strong id="position-status">—</strong><small id="position-quantity">—</small>
+          </article>
+          <article class="kpi-card">
             <span>Modeled costs</span><strong id="costs">—</strong><small>Fees + slippage</small>
           </article>
         </section>
 
         <section class="main-grid">
+          <article class="panel live-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">BITUNIX PUBLIC FEED</p><h2>BTCUSDT 5-minute market monitor</h2></div>
+              <span id="live-status" class="pill">WAITING</span>
+            </div>
+            <p id="live-activity" class="decision-copy">Waiting for closed candles.</p>
+            <dl class="live-stats">
+              <div><dt>Last close</dt><dd id="live-close">—</dd></div>
+              <div><dt>Candle timestamp</dt><dd id="live-time">—</dd></div>
+              <div><dt>Feed age</dt><dd id="live-age">—</dd></div>
+              <div><dt>Warm-up</dt><dd id="live-warmup">—</dd></div>
+              <div><dt>Open</dt><dd id="live-open">—</dd></div>
+              <div><dt>High</dt><dd id="live-high">—</dd></div>
+              <div><dt>Low</dt><dd id="live-low">—</dd></div>
+              <div><dt>Volume</dt><dd id="live-volume">—</dd></div>
+              <div><dt>Best bid</dt><dd id="live-bid">—</dd></div>
+              <div><dt>Best ask</dt><dd id="live-ask">—</dd></div>
+              <div><dt>Spread</dt><dd id="live-spread">—</dd></div>
+            </dl>
+            <div class="market-charts">
+              <section class="chart-box">
+                <div class="chart-title"><strong>5-minute candlesticks</strong><span>Bitunix mark price</span></div>
+                <canvas id="live-candle-chart" role="img" aria-label="Live BTCUSDT five-minute candlestick chart"></canvas>
+              </section>
+              <section class="chart-box realtime-box">
+                <div class="chart-title"><strong>Real-time market</strong><span id="ws-status" class="pill">CONNECTING</span></div>
+                <strong id="realtime-price" class="realtime-price">—</strong>
+                <small id="realtime-time" class="muted">Waiting for WebSocket data</small>
+                <canvas id="realtime-chart" role="img" aria-label="Real-time BTCUSDT mark-price chart"></canvas>
+                <dl class="stream-stats">
+                  <div><dt>Index</dt><dd id="index-price">—</dd></div>
+                  <div><dt>Funding</dt><dd id="funding-rate">—</dd></div>
+                </dl>
+              </section>
+            </div>
+          </article>
+
           <article class="panel chart-panel wide">
             <div class="panel-heading">
               <div><p class="eyebrow">ACCOUNT</p><h2>Equity curve</h2></div>
@@ -109,23 +150,29 @@
             <div class="risk-meter-label"><span>Drawdown usage</span><strong id="risk-usage">—</strong></div>
             <div class="risk-meter"><span id="risk-meter-fill"></span></div>
             <ul class="guardrail-list">
-              <li><span>Risk per trade</span><strong id="risk-per-trade">0.25%</strong></li>
-              <li><span>Daily loss limit</span><strong>1.00%</strong></li>
+              <li><span>Risk per trade</span><strong id="risk-per-trade">1.00%</strong></li>
+              <li><span>Daily loss limit</span><strong id="daily-loss-limit">2.00%</strong></li>
+              <li><span>Weekly loss limit</span><strong id="weekly-loss-limit">10.00%</strong></li>
               <li><span>Max open positions</span><strong>1</strong></li>
-              <li><span>Leverage</span><strong>None</strong></li>
+              <li><span>Market</span><strong>BTCUSDT perpetual</strong></li>
+              <li><span>Margin</span><strong>USDT isolated</strong></li>
+              <li><span>Leverage</span><strong>10×</strong></li>
+              <li><span>Target exposure</span><strong>20%</strong></li>
+              <li><span>Expected margin</span><strong>2% · max 10%</strong></li>
+              <li><span>Stop / target</span><strong>−10% / +10% ROE</strong></li>
               <li><span>Manual reset after breach</span><strong>Required</strong></li>
             </ul>
           </article>
 
           <article class="panel fills-panel wide">
             <div class="panel-heading">
-              <div><p class="eyebrow">EXECUTION</p><h2>Recent fills</h2></div>
-              <span id="fill-count" class="muted">0 fills</span>
+              <div><p class="eyebrow">EXECUTION</p><h2>Operation history</h2></div>
+              <span id="fill-count" class="muted">0 operations</span>
             </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Time</th><th>Side</th><th>Quantity</th><th>Price</th><th>Fee</th><th>Slippage</th><th>Order ID</th></tr></thead>
-                <tbody id="fills-body"><tr><td colspan="7" class="empty-cell">No fills recorded.</td></tr></tbody>
+                <thead><tr><th>Time</th><th>Event</th><th>Side</th><th>Quantity</th><th>Price</th><th>Position after</th><th>Details</th></tr></thead>
+                <tbody id="fills-body"><tr><td colspan="7" class="empty-cell">No operations recorded.</td></tr></tbody>
               </table>
             </div>
           </article>
