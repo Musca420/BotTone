@@ -7,6 +7,7 @@ from adaptive_bot.meme.luna import (
     PolicyStore,
     SourceEvidence,
     codex_login_status,
+    run_luna_max,
     validate_policy,
 )
 
@@ -83,3 +84,20 @@ def test_high_systemic_risk_can_only_promote_a_pause_policy() -> None:
         update={"action": LunaAction.PAUSE_NEW_ENTRIES, "allowed_strategies": ()}
     )
     assert validate_policy(paused, config, now) == (True, "ok")
+
+
+def test_luna_max_prompt_covers_long_short_and_directional_funding(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    policy = _policy(now)
+    config = MemeBotConfig(luna={"storage_directory": tmp_path})
+    captured = ""
+
+    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal captured
+        captured = args[1]
+        return policy
+
+    monkeypatch.setattr("adaptive_bot.meme.luna.run_codex_json", fake_run)
+    assert run_luna_max(config, {}) == policy
+    assert "long-and-short" in captured
+    assert "Positive funding is adverse to longs" in captured

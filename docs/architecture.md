@@ -47,6 +47,10 @@ indicatori e vincoli monetari, ma non condivide database, capitale, configurazio
 BTC. Il flusso è `CoinGecko category ∩ Bitunix USDT futures → REST/WebSocket recorder → scanner →
 strategy experts → quantitative checks → Luna policy/review → risk sizing → paper ledger → dashboard`.
 
+Policy, richieste Luna Low e review sono file JSON atomici e persistenti. Il cambio della policy o
+l'arrivo di una review fanno parte della firma osservata dal paper engine, quindi provocano
+immediatamente un replay deterministico senza attendere un'altra modifica dei dati di mercato.
+
 I raw event vengono conservati in `data/meme/raw`, le feature Parquet in `data/meme/processed` e i
 report in `data/meme/reports`. Lo scanner è fail-closed: assenza catalogo, stream stale o metadata
 ambigui non producono un universo alternativo implicito.

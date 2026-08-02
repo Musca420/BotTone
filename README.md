@@ -219,6 +219,15 @@ uv run adaptive-bot meme-paper --config configs/bitunix_meme_paper.yaml --durati
 uv run adaptive-bot meme-dashboard --config configs/bitunix_meme_paper.yaml
 ```
 
+Per richiedere esplicitamente una nuova policy senza cancellare file:
+
+```powershell
+uv run adaptive-bot meme-luna-sidecar --config configs/bitunix_meme_paper.yaml --once --refresh-max
+```
+
+I setup inviati a Luna Low restano nella coda persistente e il paper engine si aggiorna appena
+compare la review; la dashboard mostra quante revisioni sono ancora in attesa.
+
 Aprire `http://127.0.0.1:8081`. L'interfaccia, interamente in inglese, mostra feed, scanner,
 motivazioni di esclusione, liquidity/manipulation score, policy Luna, posizione, operazioni, equity
 e audit. Con Tailscale Serve si può

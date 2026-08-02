@@ -248,8 +248,11 @@ def _command(command: str, *arguments: str) -> list[str]:
 def run_luna_max(config: MemeBotConfig, snapshot: dict[str, Any]) -> MarketPolicy:
     now = datetime.now(UTC)
     prompt = (
-        "You are Luna Max, a cautious market-policy analyst for a long-only meme perpetual "
-        "paper bot. Use web search only for current evidence from the allowed domains included "
+        "You are Luna Max, a cautious market-policy analyst for a long-and-short meme perpetual "
+        "paper bot. Long strategies are breakout and pullback in bullish regimes; short "
+        "strategies are breakdown and failed-retest in distribution or bearish regimes. Positive "
+        "funding is adverse to longs but may support shorts; negative funding is adverse to "
+        "shorts. Use web search only for current evidence from the allowed domains included "
         "below. Never place or suggest an order. Return only the requested JSON. Fail closed: "
         "PAUSE_NEW_ENTRIES when evidence is missing, contradictory or stale. Risk multiplier may "
         "only reduce risk. Policy lifetime must be at most six hours.\n"

@@ -83,7 +83,8 @@ function render(data) {
   $("model").textContent = String(model.status || "collecting_data").replaceAll("_", " ").toUpperCase();
   $("model-note").textContent = model.can_trade ? "Bootstrap active; models shadow-only" : "Validated models required";
   $("luna").textContent = luna.ready ? "READY" : "FAIL CLOSED";
-  $("luna-note").textContent = luna.policy ? `${luna.policy.regime} - ${luna.policy.action}` : (luna.reason || "Waiting for policy");
+  const lowPending = (report.low_reviews_pending || []).length;
+  $("luna-note").textContent = lowPending ? `${lowPending} setup(s) awaiting Luna Low` : luna.policy ? `${luna.policy.regime} - ${luna.policy.action}` : (luna.reason || "Waiting for policy");
   readiness(stream, report); scanner(report.scanner || []); events("operations", report.operations || []); events("audit", report.audit || []);
   canvas("equity-chart", (report.equity_curve || []).map(point => Number(point.equity)), "#f3b74f");
   const select = $("symbol"), current = select.value, keys = Object.keys(stream.symbols || {});

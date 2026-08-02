@@ -134,6 +134,7 @@ def _parser() -> argparse.ArgumentParser:
     meme_luna.add_argument("--duration-hours", type=float, default=168)
     meme_luna.add_argument("--poll-seconds", type=float, default=5)
     meme_luna.add_argument("--once", action="store_true")
+    meme_luna.add_argument("--refresh-max", action="store_true")
 
     meme_luna_status = commands.add_parser("meme-luna-status")
     meme_luna_status.add_argument("--config", type=Path, required=True)
@@ -332,10 +333,11 @@ async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
         raise ValueError("sidecar duration and poll interval must be positive")
     store = PolicyStore(config.luna.storage_directory)
     deadline = asyncio.get_running_loop().time() + arguments.duration_hours * 3600
+    refresh_max = arguments.refresh_max
     while True:
         now = datetime.now(UTC)
         policy = store.active_policy()
-        valid = False if policy is None else validate_policy(policy, config, now)[0]
+        valid = False if policy is None or refresh_max else validate_policy(policy, config, now)[0]
         if not valid:
             todays_policies = sum(
                 1
@@ -347,6 +349,7 @@ async def _meme_luna_sidecar(arguments: argparse.Namespace) -> int:
                 raise RuntimeError("Luna Max daily run limit reached; paper entries remain paused")
             policy = await asyncio.to_thread(run_luna_max, config, _luna_snapshot(config))
             logging.getLogger(__name__).info("Luna Max promoted policy %s", policy.policy_id)
+            refresh_max = False
         for path in sorted(store.requests.glob("*.json")):
             if store.review(path.stem) is not None:
                 continue

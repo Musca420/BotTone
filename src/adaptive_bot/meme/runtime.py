@@ -313,6 +313,7 @@ class MemePaperEngine:
             "position": None if not serialized_positions else serialized_positions[0],
             "positions": serialized_positions,
             "pending_entry": None if pending is None else pending.decision.action,
+            "low_reviews_pending": self._pending_low_reviews(),
             "operations": operations,
             "audit": list(audit),
             "equity_curve": equity_curve[-1000:],
@@ -511,6 +512,13 @@ class MemePaperEngine:
             "policy": policy.model_dump(mode="json"),
         }
 
+    def _pending_low_reviews(self) -> list[str]:
+        return sorted(
+            path.stem
+            for path in self.policy_store.requests.glob("*.json")
+            if self.policy_store.review(path.stem) is None
+        )
+
     def _process_position(
         self, position: PaperPosition, row: pd.Series, moment: datetime, equity: Decimal
     ) -> tuple[PaperPosition | None, Decimal, list[dict[str, object]]]:
@@ -702,12 +710,14 @@ async def run_meme_paper(
     baseline_path = config.storage.raw_directory / "paper.start"
     baseline = _paper_baseline(baseline_path)
     deadline = monotonic() + duration_hours * 3600
-    last_signature: tuple[tuple[str, str, int], ...] | None = None
+    last_signature: tuple[tuple[tuple[str, str, int], ...], str | None, tuple[str, ...]] | None = (
+        None
+    )
     while True:
         frames = load_recorded_frames(config.storage.raw_directory / "events.jsonl")
         contracts = load_cached_contracts(config.storage.raw_directory / "universe.json")
         qualities = load_market_qualities(config.storage.raw_directory / "stream.json", frames)
-        signature = tuple(
+        market_signature = tuple(
             sorted(
                 (
                     symbol,
@@ -717,6 +727,13 @@ async def run_meme_paper(
                 for symbol, frame in frames.items()
                 if not frame.empty
             )
+        )
+        policy_store = PolicyStore(config.luna.storage_directory)
+        policy = policy_store.active_policy()
+        signature = (
+            market_signature,
+            None if policy is None else policy.policy_id,
+            tuple(sorted(path.stem for path in policy_store.reviews.glob("*.json"))),
         )
         if frames and contracts and signature != last_signature:
             report = MemePaperEngine(config, contracts).run(
