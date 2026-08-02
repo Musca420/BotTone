@@ -294,6 +294,9 @@ class MemePaperEngine:
                     "volume_zscore": str(item.quality.volume_zscore),
                     "spread_bps": str(item.quality.spread_bps),
                     "depth": str(item.quality.depth_half_percent),
+                    "funding_8h": None
+                    if item.quality.funding_8h is None
+                    else str(item.quality.funding_8h),
                     "liquidity_score": str(assessments[item.contract.symbol].liquidity_score),
                     "manipulation_risk": str(assessments[item.contract.symbol].manipulation_risk),
                     "shadow_p_win": str(assessments[item.contract.symbol].uncalibrated_p_win),
@@ -411,7 +414,7 @@ class MemePaperEngine:
             quantitative_snapshot={
                 "spread_bps": str(quality.spread_bps),
                 "depth_half_percent": str(quality.depth_half_percent),
-                "funding_8h": str(quality.funding_8h),
+                "funding_8h": None if quality.funding_8h is None else str(quality.funding_8h),
                 "mark_divergence": str(quality.mark_divergence),
                 "liquidity_score": str(assessment.liquidity_score),
                 "manipulation_risk": str(assessment.manipulation_risk),
@@ -739,9 +742,12 @@ def load_market_qualities(path: Path, frames: dict[str, pd.DataFrame]) -> dict[s
         atr_value = Decimal(str(price_range.mean())) if not price_range.empty else Decimal("0")
         comparison = Decimal(str(frame["close"].iloc[-13])) if len(frame) >= 13 else close
         momentum = (close - comparison) / atr_value if atr_value > 0 else Decimal("0")
-        funding_interval = Decimal(str(state.get("funding_interval_hours") or "8"))
+        funding_rate = _finite_decimal(state.get("funding_rate"))
+        funding_interval = _finite_decimal(state.get("funding_interval_hours"))
         funding_8h = (
-            Decimal(str(state.get("funding_rate") or "0")) * Decimal("8") / funding_interval
+            None
+            if funding_rate is None or funding_interval is None or funding_interval <= 0
+            else funding_rate * Decimal("8") / funding_interval
         )
         qualities[symbol] = MarketQuality(
             quote_volume_24h=quote_volume,
@@ -779,3 +785,11 @@ def _jsonable(value: object) -> object:
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in value.items()}
     return value
+
+
+def _finite_decimal(value: object) -> Decimal | None:
+    try:
+        result = Decimal(str(value))
+        return result if result.is_finite() else None
+    except (ValueError, ArithmeticError):
+        return None

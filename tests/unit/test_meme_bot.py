@@ -1,6 +1,8 @@
 import json
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from importlib.resources import files
 
 import pandas as pd
 import pytest
@@ -187,6 +189,48 @@ def test_websocket_depth_and_trade_flow_are_normalized() -> None:
     assert Decimal(stream.funding_interval_hours) == Decimal("4")
 
 
+def test_invalid_funding_is_unknown_and_fails_closed() -> None:
+    state = MemeCollectorState(symbols={"DOGEUSDT": SymbolStreamState("DOGEUSDT")})
+    apply_ws_message(
+        state,
+        {
+            "ch": "price",
+            "symbol": "DOGEUSDT",
+            "data": {
+                "mp": "1",
+                "ip": "1",
+                "fr": "NaN",
+                "ft": "2026-08-02T00:00:00Z",
+                "nft": "2026-08-02T08:00:00Z",
+            },
+        },
+    )
+    assert state.symbols["DOGEUSDT"].funding_rate is None
+
+    contract = intersect_meme_contracts(
+        {"data": [{"symbol": "DOGEUSDT", "base": "DOGE", "quote": "USDT"}]},
+        [{"id": "dogecoin", "symbol": "doge"}],
+    )[0]
+    quality = MarketQuality(
+        quote_volume_24h=Decimal("10000000"),
+        spread_bps=Decimal("1"),
+        depth_half_percent=Decimal("10000"),
+        mark_divergence=Decimal("0"),
+        funding_8h=None,
+        history_hours=200,
+        momentum_atr=Decimal("1"),
+        volume_zscore=Decimal("2"),
+    )
+    ranked = rank_candidates(
+        (contract,),
+        {"DOGEUSDT": quality},
+        load_meme_config("configs/bitunix_meme_paper.yaml").universe,
+        Decimal("40"),
+    )
+    assert not ranked[0].eligible
+    assert "funding_unavailable" in ranked[0].reasons
+
+
 def test_paper_sizing_respects_margin_and_stop_wins_ambiguous_bar() -> None:
     config = load_meme_config("configs/bitunix_meme_paper.yaml")
     contract = intersect_meme_contracts(
@@ -298,6 +342,15 @@ def test_shadow_gate_and_dashboard_never_claim_live_execution(tmp_path) -> None:
     assert payload["available"]
     assert payload["safety"]["live_enabled"] is False
     assert payload["report"]["probabilistic"]["can_trade"] is False
+
+
+def test_meme_dashboard_script_only_references_existing_elements() -> None:
+    assets = files("adaptive_bot.dashboard.meme_static")
+    html = assets.joinpath("index.html").read_text(encoding="utf-8")
+    script = assets.joinpath("meme.js").read_text(encoding="utf-8")
+    referenced = set(re.findall(r'\$\("([^"]+)"\)', script))
+    available = set(re.findall(r'id="([^"]+)"', html))
+    assert referenced <= available
 
 
 def _strategy_row(

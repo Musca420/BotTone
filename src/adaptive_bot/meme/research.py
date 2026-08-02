@@ -48,7 +48,7 @@ def build_shadow_dataset(
     strategy = MemeMomentumStrategy(config.strategy)
     for symbol, candles in sorted(frames.items()):
         quality = qualities.get(symbol)
-        if quality is None:
+        if quality is None or quality.funding_8h is None:
             continue
         features = build_meme_features(candles, config.strategy)
         state = MemeStrategyState()
@@ -97,7 +97,11 @@ def build_shadow_dataset(
 
 def market_quality_risk(quality: MarketQuality, config: MemeBotConfig) -> float:
     spread = min(1.0, float(quality.spread_bps / config.universe.maximum_spread_bps))
-    funding = min(1.0, float(abs(quality.funding_8h) / config.universe.maximum_funding_8h))
+    funding = (
+        1.0
+        if quality.funding_8h is None
+        else min(1.0, float(abs(quality.funding_8h) / config.universe.maximum_funding_8h))
+    )
     divergence = min(
         1.0, float(abs(quality.mark_divergence) / config.universe.maximum_mark_divergence)
     )

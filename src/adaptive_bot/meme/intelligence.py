@@ -20,7 +20,11 @@ def assess_market(quality: MarketQuality, config: MemeBotConfig) -> Quantitative
     spread = _ratio(quality.spread_bps, config.universe.maximum_spread_bps)
     depth_needed = config.risk.hard_notional_cap * config.universe.minimum_depth_multiple
     depth = min(Decimal("1"), _ratio(quality.depth_half_percent, depth_needed))
-    funding = _ratio(abs(quality.funding_8h), config.universe.maximum_funding_8h)
+    funding = (
+        Decimal("1")
+        if quality.funding_8h is None
+        else _ratio(abs(quality.funding_8h), config.universe.maximum_funding_8h)
+    )
     divergence = _ratio(abs(quality.mark_divergence), config.universe.maximum_mark_divergence)
     liquidity = _clamp((Decimal("1") - spread) * Decimal("0.5") + depth * Decimal("0.5"))
     manipulation = _clamp(

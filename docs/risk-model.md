@@ -46,3 +46,9 @@ separati oltre alla modifica versionata della configurazione.
 Market Policy, Luna Low e score quantitativi sono filtri addizionali: non possono creare segnali né
 aumentare rischio/leva. Dati assenti non vengono convertiti in zero; il risultato è un blocco o
 `UNKNOWN`. In `paper_bootstrap` la stima probabilistica è mostrata ma non calibrata e resta shadow.
+
+Il funding Bitunix è letto come frazione decimale per intervallo di settlement e normalizzato a otto
+ore (`rate * 8 / interval_hours`). Ad esempio `0.005` ogni quattro ore equivale a `1% / 8h`.
+Funding mancante, non finito o con intervallo invalido diventa `UNKNOWN` e blocca il contratto. Nel
+profilo long-only un valore positivo è un costo long; un valore negativo oltre soglia resta bloccato
+come dislocazione di mercato, non come costo short.

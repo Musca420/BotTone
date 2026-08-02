@@ -45,7 +45,7 @@ class MarketQuality:
     spread_bps: Decimal
     depth_half_percent: Decimal
     mark_divergence: Decimal
-    funding_8h: Decimal
+    funding_8h: Decimal | None
     history_hours: int
     momentum_atr: Decimal
     volume_zscore: Decimal
@@ -139,8 +139,12 @@ def rank_candidates(
             reasons.append("insufficient_depth")
         if abs(quality.mark_divergence) > config.maximum_mark_divergence:
             reasons.append("mark_divergence")
-        if abs(quality.funding_8h) > config.maximum_funding_8h:
-            reasons.append("funding_extreme")
+        if quality.funding_8h is None:
+            reasons.append("funding_unavailable")
+        elif quality.funding_8h > config.maximum_funding_8h:
+            reasons.append("long_funding_cost_extreme")
+        elif quality.funding_8h < -config.maximum_funding_8h:
+            reasons.append("negative_funding_dislocation")
         if quality.stream_age_seconds > Decimal("5"):
             reasons.append("stale_stream")
         candidates.append(RankedCandidate(contract, quality, not reasons, tuple(reasons)))
@@ -207,7 +211,7 @@ def _empty_quality() -> MarketQuality:
         spread_bps=Decimal("0"),
         depth_half_percent=Decimal("0"),
         mark_divergence=Decimal("0"),
-        funding_8h=Decimal("0"),
+        funding_8h=None,
         history_hours=0,
         momentum_atr=Decimal("0"),
         volume_zscore=Decimal("0"),

@@ -171,9 +171,12 @@ def apply_ws_message(state: MemeCollectorState, message: dict[str, Any]) -> None
             }
             target.latest_candle = candle
         elif channel == "price" and isinstance(data, dict):
-            target.mark_price = str(data["mp"])
-            target.index_price = str(data["ip"])
-            target.funding_rate = str(data["fr"])
+            mark, index, funding = (_finite_decimal(data.get(name)) for name in ("mp", "ip", "fr"))
+            if mark is None or index is None or mark <= 0 or index <= 0:
+                return
+            target.mark_price = str(mark)
+            target.index_price = str(index)
+            target.funding_rate = None if funding is None else str(funding)
             target.funding_interval_hours = _funding_interval_hours(data.get("ft"), data.get("nft"))
         elif channel.startswith("depth_") and isinstance(data, dict):
             _apply_depth(target, data)
@@ -220,6 +223,14 @@ def _levels(value: object) -> list[tuple[Decimal, Decimal]]:
         if isinstance(level, list) and len(level) >= 2:
             levels.append((Decimal(str(level[0])), Decimal(str(level[1]))))
     return levels
+
+
+def _finite_decimal(value: object) -> Decimal | None:
+    try:
+        result = Decimal(str(value))
+        return result if result.is_finite() else None
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _timestamp(value: object) -> str:

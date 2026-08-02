@@ -21,12 +21,25 @@
         <article class="card"><small>Probabilistic gate</small><strong id="model">COLLECTING DATA</strong><span id="model-note">Models are shadow-only</span></article>
         <article class="card"><small>Luna policy</small><strong id="luna">FAIL CLOSED</strong><span id="luna-note">Waiting for policy</span></article>
       </section>
+      <section class="grid readiness">
+        <article class="card">
+          <div class="title"><h2>Entry readiness</h2><span id="entry-summary">Checking required gates</span></div>
+          <p class="explain">An order can be simulated only when every required gate is green. A valid market policy cannot create a trade: a confirmed 5-minute setup and Luna Low approval are also required.</p>
+          <div id="entry-gates" class="gate-list"></div>
+        </article>
+        <article class="card policy-card">
+          <div class="title"><h2>What Luna needs to allow entries</h2><span id="policy-expiry">No active policy</span></div>
+          <p id="policy-thesis" class="thesis">Waiting for Luna Max.</p>
+          <h3>Reassessment conditions</h3><ul id="policy-conditions"></ul>
+          <h3>Evidence</h3><div id="policy-sources" class="sources"></div>
+        </article>
+      </section>
       <section class="grid charts">
         <article class="card"><div class="title"><h2>Live selected market</h2><select id="symbol"></select></div><canvas id="price-chart"></canvas><div id="market-detail" class="metrics"></div></article>
         <article class="card"><h2>Equity curve</h2><canvas id="equity-chart"></canvas></article>
       </section>
       <section class="card"><div class="title"><h2>Scanner</h2><span>Eligibility before signal strength</span></div>
-        <div class="table"><table><thead><tr><th>Rank</th><th>Symbol</th><th>Status</th><th>Momentum / ATR</th><th>Volume z</th><th>Spread</th><th>Depth</th><th>Liquidity</th><th>Manipulation</th><th>Reason</th></tr></thead><tbody id="scanner"></tbody></table></div>
+        <div class="table"><table><thead><tr><th>Rank</th><th>Symbol</th><th>Status</th><th>Momentum / ATR</th><th>Volume z</th><th>Spread</th><th>Funding / 8h</th><th>Depth</th><th>Liquidity</th><th>Manipulation</th><th>Reason</th></tr></thead><tbody id="scanner"></tbody></table></div>
       </section>
       <section class="grid lower">
         <article class="card"><h2>Paper operations</h2><div id="operations" class="timeline"></div></article>
