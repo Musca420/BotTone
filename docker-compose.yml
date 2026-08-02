@@ -39,4 +39,5 @@ services:
     volumes:
       - ./configs:/app/configs:ro
       - ./data:/app/data:ro
-    command: ["meme-dashboard", "--config", "configs/bitunix_meme_paper.yaml"]
+    command:
+      ["meme-dashboard", "--config", "configs/bitunix_meme_paper.yaml", "--host", "0.0.0.0", "--allow-non-loopback"]

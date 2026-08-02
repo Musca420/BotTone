@@ -11,7 +11,12 @@ from adaptive_bot.domain.exceptions import LiveTradingDisabled
 from adaptive_bot.meme.collector import MemeCollectorState, SymbolStreamState, apply_ws_message
 from adaptive_bot.meme.config import MemeBotConfig, MemeStrategyConfig, load_meme_config
 from adaptive_bot.meme.research import shadow_status
-from adaptive_bot.meme.runtime import MemePaperEngine, PaperPosition, load_recorded_frames
+from adaptive_bot.meme.runtime import (
+    MemePaperEngine,
+    PaperPosition,
+    load_market_qualities,
+    load_recorded_frames,
+)
 from adaptive_bot.meme.strategy import (
     MemeDecision,
     MemeMomentumStrategy,
@@ -254,6 +259,17 @@ def test_recorded_frames_deduplicate_live_kline_updates(tmp_path) -> None:  # ty
     frames = load_recorded_frames(path)
     assert len(frames["DOGEUSDT"]) == 1
     assert frames["DOGEUSDT"].iloc[0]["close"] == "1.2"
+
+
+def test_market_quality_reader_fails_closed_during_atomic_replace(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "stream.json"
+    path.write_text("{}", encoding="utf-8")
+
+    def missing(*_args, **_kwargs) -> str:  # type: ignore[no-untyped-def]
+        raise FileNotFoundError
+
+    monkeypatch.setattr(path.__class__, "read_text", missing)
+    assert load_market_qualities(path, {}) == {}
 
 
 def test_shadow_gate_and_dashboard_never_claim_live_execution(tmp_path) -> None:  # type: ignore[no-untyped-def]

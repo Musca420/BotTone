@@ -47,8 +47,13 @@ def serve_meme_dashboard(
     stream_path: str | Path,
     host: str = "127.0.0.1",
     port: int = 8081,
+    allow_non_loopback: bool = False,
 ) -> None:
-    if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
+    if (
+        not allow_non_loopback
+        and host != "localhost"
+        and not ipaddress.ip_address(host).is_loopback
+    ):
         raise ValueError("meme dashboard host must be loopback-only")
     handler = _handler(Path(report_path), Path(stream_path))
     with ThreadingHTTPServer((host, port), handler) as server:

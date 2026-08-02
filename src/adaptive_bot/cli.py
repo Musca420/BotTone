@@ -107,6 +107,9 @@ def _parser() -> argparse.ArgumentParser:
 
     meme_dashboard = commands.add_parser("meme-dashboard")
     meme_dashboard.add_argument("--config", type=Path, required=True)
+    meme_dashboard.add_argument("--host")
+    meme_dashboard.add_argument("--port", type=int)
+    meme_dashboard.add_argument("--allow-non-loopback", action="store_true")
 
     meme_dataset = commands.add_parser("meme-build-dataset")
     meme_dataset.add_argument("--config", type=Path, required=True)
@@ -422,8 +425,9 @@ def main(argv: list[str] | None = None) -> int:
             serve_meme_dashboard(
                 config.storage.report_path,
                 config.storage.raw_directory / "stream.json",
-                config.dashboard_host,
-                config.dashboard_port,
+                arguments.host or config.dashboard_host,
+                arguments.port or config.dashboard_port,
+                arguments.allow_non_loopback,
             )
         except KeyboardInterrupt:
             return 0

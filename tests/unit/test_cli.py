@@ -1,4 +1,19 @@
-from adaptive_bot.cli import main
+from adaptive_bot.cli import _parser, main
+
+
+def test_meme_dashboard_accepts_container_bind_override() -> None:
+    arguments = _parser().parse_args(
+        [
+            "meme-dashboard",
+            "--config",
+            "config.yaml",
+            "--host",
+            "0.0.0.0",
+            "--allow-non-loopback",
+        ]
+    )
+    assert arguments.host == "0.0.0.0"
+    assert arguments.allow_non_loopback
 
 
 def test_live_command_fails_closed(monkeypatch) -> None:  # type: ignore[no-untyped-def]

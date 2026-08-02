@@ -578,10 +578,11 @@ def load_cached_contracts(path: Path) -> tuple[MemeContract, ...]:
 
 
 def load_market_qualities(path: Path, frames: dict[str, pd.DataFrame]) -> dict[str, MarketQuality]:
-    if not path.exists():
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        generated = datetime.fromisoformat(payload["generated_at"])
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    generated = datetime.fromisoformat(payload["generated_at"])
     age = Decimal(str(max(0, (datetime.now(UTC) - generated).total_seconds())))
     qualities: dict[str, MarketQuality] = {}
     for symbol, state in payload.get("symbols", {}).items():
