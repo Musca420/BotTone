@@ -989,6 +989,64 @@ passato dalla selezione di aprile; non puo' diventare bundle.
 paper V8 e live disabilitato. La ricerca si ferma qui come richiesto dall'utente; non esiste un
 prossimo esperimento autorizzato.
 
+### 2026-08-10 — FT-034: costo-opportunità lineare della durata
+
+**Ipotesi preregistrata.** Penalizzare l'EV calibrata del MoE positivo in proporzione alle ore
+durante le quali l'esperto occupa l'unica posizione, senza modificare esperti o label.
+
+**Risultato.** In giugno la penalità da 1 bps/ora porta la frequenza da 2,23 a 2,33 trade/giorno,
+ma riduce l'EV da +21,31 a +16,64 bps. Da 2 bps/ora la policy favorisce gli esperti da un'ora e
+diventa negativa: EV −9,62 bps, PF 0,77 e 0,93 trade/giorno. Luglio resta quasi interamente senza
+segnali. La calibrazione cronologica di maggio non produce alcuna azione positiva, quindi non
+esiste neppure un parametro selezionabile senza leggere giugno.
+
+**Decisione.** Respinta e vietata da ripetere. Un costo lineare non stima il valore delle
+opportunità future; serve un target sequenziale a orizzonte finito. Protocollo successivo:
+`docs/musca-btc-daily-portfolio-challenger.md`.
+
+### 2026-08-10 — FT-035: advantage giornaliero semi-Markov
+
+**Ipotesi preregistrata.** Apprendere il vantaggio di LONG/SHORT/FLAT rispetto al valore della
+prossima decisione libera, includendo esplicitamente la durata che blocca la posizione. Nessuna
+soglia verrà scelta sul 2026.
+
+**Dati e split.** OOF Binance 2025 già esistente: Q2 fit, Q3 model selection, Q2–Q3 refit e Q4
+calibrazione. Gennaio–luglio 2026 è audit discovery; dal 10 agosto l'holdout resta chiuso.
+
+**Decisione.** In corso. Tutti i dettagli, gate e riferimenti sono congelati in
+`docs/musca-btc-daily-portfolio-challenger.md`.
+
+**Risultato FT-035.** `NO_INCREMENTAL_DAILY_Q_ALPHA`, hash
+`995bcdb6fbbdef3c7d40d4e39a928f44d0388ac574915257e3860ac3e904e21d`. Il target era positivo
+solo nello 0,125–0,127% delle azioni. L'errore è nel teacher: il valore di `FLAT` usava il massimo
+futuro realizzato e disponeva quindi di hindsight che nessuna azione causale possedeva. Il modello
+ha emesso correttamente zero trade. Target vietato da ripetere.
+
+### 2026-08-10 — FT-036: Fitted Q Iteration con FLAT appreso
+
+**Ipotesi preregistrata.** Sostituire l'oracle onnisciente con quattro aggiornamenti di Bellman. Il
+valore futuro arriva esclusivamente dalla stima dell'iterazione precedente; `FLAT` è una vera
+azione di attesa con transizione causale al minuto seguente.
+
+**Dati e split.** Invariati rispetto a FT-035. Nessun risultato 2026 seleziona modello,
+calibrazione o soglia. Ridge champion, XGBoost GPU challenger; gestione finale identica a 5 s.
+
+**Decisione.** In corso. Report previsto:
+`data/reports/musca_btc_daily_portfolio_fqi.json`.
+
+**Risultato FT-036.** Hash
+`1f4cbfc845453c542ace123ba40c7c8b4dc76d7d821c47393524ef8a781bffaa`, verdetto
+`NO_INCREMENTAL_FQI_DAILY_ALPHA`. I giorni parziali di fine split sono esclusi. Nel Q3 2025 Ridge
+produce 1,01 trade/giorno con EV −11,21 bps, PF 0,63 e drawdown 13,70%. XGBoost riduce il TD MAE
+ma a 2,63 trade/giorno produce EV −14,18 bps, PF 0,52 e drawdown 40,29%; non può diventare
+champion. Ridge rifittata e calibrata sul Q4
+emette zero azioni nel 2026. Nessun gate economico, tranne il rispetto del risk budget, passa.
+
+**Decisione.** Respinta e vietata da ripetere sugli stessi action label. La policy paper positiva
+Auto-MoE resta invariata. Il risultato dimostra che l'obiettivo giornaliero corretto non crea edge
+nei candidati frequenti già negativi dopo i costi; un nuovo tentativo richiede nuovi dati o un
+nuovo meccanismo economico osservabile, non un'altra loss, soglia o rete.
+
 ## Template per il prossimo esperimento
 
 ### YYYY-MM-DD — FT-NNN: titolo
