@@ -1,7 +1,9 @@
 # Musca Altcoin Micro — risultato dell'audit Binance
 
-Data: 2026-08-10  
-Branch: `codex/multiasset-micro`  
+Data: 2026-08-10
+
+Branch: `codex/multiasset-micro`
+
 Protocol hash: `6a047d6aad8349c59dc4b03b9392078e4d4e1a22e1b2243e493ea4d21525ead4`
 
 ## Verdetto
