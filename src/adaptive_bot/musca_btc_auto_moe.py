@@ -25,6 +25,7 @@ ROOT = Path("data/ml/musca_btc_auto_moe")
 CANDIDATES = ROOT / "candidates.parquet"
 LIBRARY = ROOT / "expert_library.joblib"
 ACTIONS = ROOT / "expert_actions.parquet"
+AUDIT_TRADES = ROOT / "audit_trades.parquet"
 REPORT = Path("data/reports/musca_btc_auto_moe.json")
 STATUS = Path("data/reports/musca_btc_auto_moe.status.json")
 BUNDLE = Path("data/models/musca_btc_auto_moe/research_bundle.joblib")
@@ -716,6 +717,40 @@ def _library_spa(actions: pd.DataFrame) -> float | None:
     return float(test.pvalues["consistent"])
 
 
+def _simple_trade_metrics(trades: pd.DataFrame) -> dict[str, Any]:
+    if trades.empty:
+        return {"trades": 0, "expectancy_bps": None, "profit_factor": None, "win_rate": None}
+    net = trades["net_bps"].to_numpy(float)
+    gains = float(net[net > 0].sum())
+    losses = float(-net[net < 0].sum())
+    return {
+        "trades": len(trades),
+        "expectancy_bps": float(net.mean()),
+        "profit_factor": gains / losses if losses else None,
+        "win_rate": float((net > 0).mean()),
+    }
+
+
+def _trade_breakdown(trades: pd.DataFrame) -> dict[str, Any]:
+    if trades.empty:
+        return {"gross_expectancy_bps": None, "by_side": {}, "by_horizon": {}, "outcomes": {}}
+    return {
+        "gross_expectancy_bps": float(trades["gross_bps"].mean()),
+        "funding_expectancy_bps": float(trades["funding_bps"].mean()),
+        "round_trip_cost_bps": base.ROUND_TRIP_COST_BPS,
+        "by_side": {
+            str(key): _simple_trade_metrics(group) for key, group in trades.groupby("side")
+        },
+        "by_horizon": {
+            str(key): _simple_trade_metrics(group)
+            for key, group in trades.groupby("horizon_seconds")
+        },
+        "outcomes": {
+            str(key): int(value) for key, value in trades["outcome"].value_counts().items()
+        },
+    }
+
+
 def train(*, force: bool = False) -> dict[str, Any]:
     _status("start", "BTC automatic expert discovery", 0)
     matrix = base.build_matrix(force=False)
@@ -786,9 +821,19 @@ def train(*, force: bool = False) -> dict[str, Any]:
     calibrators = _fit_calibrators(calibration, champion_model)
     audit_scored = _score(historical_audit, champion_model, calibrators)
     trades = _execute(audit_scored)
+    AUDIT_TRADES.parent.mkdir(parents=True, exist_ok=True)
+    temporary_trades = AUDIT_TRADES.with_suffix(".parquet.tmp")
+    trades.to_parquet(temporary_trades, index=False)
+    temporary_trades.replace(AUDIT_TRADES)
     metrics = base._metrics(trades, CALIBRATION_END, HISTORICAL_AUDIT_END)
     gates = base._audit_gates(metrics)
     historical_pass = all(gates.values())
+    months: dict[str, Any] = {}
+    for start in pd.date_range(CALIBRATION_END, HISTORICAL_AUDIT_END, freq="MS", inclusive="left"):
+        end = min(start + pd.offsets.MonthBegin(1), HISTORICAL_AUDIT_END)
+        timestamp_trades = pd.to_datetime(trades["entry_timestamp"], utc=True)
+        monthly_trades = trades.loc[timestamp_trades.ge(start) & timestamp_trades.lt(end)].copy()
+        months[start.strftime("%Y-%m")] = base._metrics(monthly_trades, start, end)
     report.update(
         {
             "forward_action_rows": len(actions),
@@ -800,7 +845,15 @@ def train(*, force: bool = False) -> dict[str, Any]:
             "library_spa_pvalue": _library_spa(gate_tune),
             "candidate_metrics": candidate_metrics,
             "gating_champion": champion,
-            "historical_audit": {"metrics": metrics, "gates": gates},
+            "historical_audit": {
+                "metrics": metrics,
+                "gates": gates,
+                "months": months,
+                "trade_breakdown": _trade_breakdown(trades),
+                "timestamps_with_positive_candidate_fraction": float(
+                    audit_scored.groupby("entry_timestamp")["calibrated_ev_bps"].max().gt(0).mean()
+                ),
+            },
             "verdict": (
                 "HISTORICAL_ALPHA_READY_FOR_FUTURE_HOLDOUT"
                 if historical_pass

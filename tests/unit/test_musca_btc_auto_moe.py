@@ -107,6 +107,23 @@ def test_flat_is_neutral_when_every_expert_has_negative_ev() -> None:
     assert auto._execute(rows).empty
 
 
+def test_trade_breakdown_keeps_gross_costs_and_net_separate() -> None:
+    trades = pd.DataFrame(
+        {
+            "net_bps": [10.0, -5.0],
+            "gross_bps": [19.0, 4.0],
+            "funding_bps": [0.0, 0.0],
+            "side": [1, -1],
+            "horizon_seconds": [300, 900],
+            "outcome": ["TARGET_2", "STOP"],
+        }
+    )
+    result = auto._trade_breakdown(trades)
+    assert result["gross_expectancy_bps"] == 11.5
+    assert result["round_trip_cost_bps"] == 9.0
+    assert auto._simple_trade_metrics(trades)["profit_factor"] == 2.0
+
+
 def test_chronology_keeps_discovery_gate_and_audit_separate() -> None:
     assert auto.DISCOVERY_FIT_END < auto.LIBRARY_FREEZE_END
     assert auto.LIBRARY_FREEZE_END < auto.GATE_TUNE_END
