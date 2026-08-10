@@ -333,6 +333,15 @@ def _status(phase: str, detail: str, percent: float) -> None:
     print(f"[{payload['percent']:6.2f}%] {phase}: {detail}", flush=True)
 
 
+def _read_protocol_parquet(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    protocol = pd.read_parquet(path, columns=["protocol_hash"])
+    if protocol.empty or not protocol["protocol_hash"].eq(PROTOCOL_HASH).all():
+        return pd.DataFrame()
+    return pd.read_parquet(path)
+
+
 def _load_source() -> pd.DataFrame:
     rows = pd.read_parquet(SOURCE)
     rows["timestamp"] = pd.to_datetime(rows["timestamp"], utc=True)
@@ -415,9 +424,9 @@ def _forward_extreme(values: np.ndarray, steps: int, operation: str) -> np.ndarr
 
 
 def build_matrix(*, force: bool = False) -> pd.DataFrame:
-    if MATRIX.exists() and not force:
-        cached = pd.read_parquet(MATRIX)
-        if len(cached) and cached["protocol_hash"].eq(PROTOCOL_HASH).all():
+    if not force:
+        cached = _read_protocol_parquet(MATRIX)
+        if not cached.empty:
             return cached
     _status("matrix", "contesto 1m + aggTrades causali a 5 secondi", 2)
     minute_source = _load_source()
@@ -1182,12 +1191,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     source = _load_micro_source()
     source_manifest = _micro_manifest(source)
     oof_path = CHECKPOINTS / "oof_actions.parquet"
-    if oof_path.exists():
-        oof = pd.read_parquet(oof_path)
-        if not len(oof) or oof["protocol_hash"].iloc[0] != PROTOCOL_HASH:
-            oof = pd.DataFrame()
-    else:
-        oof = pd.DataFrame()
+    oof = _read_protocol_parquet(oof_path)
     if oof.empty:
         oof = _oof_actions(matrix, source)
         oof["protocol_hash"] = PROTOCOL_HASH
@@ -1207,12 +1211,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     )
     future_rows = _period(matrix, META_END, HISTORICAL_AUDIT_END)
     future_actions_path = CHECKPOINTS / "future_actions.parquet"
-    if future_actions_path.exists():
-        future_actions = pd.read_parquet(future_actions_path)
-        if not len(future_actions) or future_actions["protocol_hash"].iloc[0] != PROTOCOL_HASH:
-            future_actions = pd.DataFrame()
-    else:
-        future_actions = pd.DataFrame()
+    future_actions = _read_protocol_parquet(future_actions_path)
     if future_actions.empty:
         future_predictions = _predict_experts(future_rows, final_pool)
         future_actions = _action_rows(future_rows, future_predictions)
