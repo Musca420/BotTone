@@ -231,7 +231,7 @@ def _candidate(
 
     timestamps = pd.to_datetime(validation.iloc[validation_indexes]["entry_timestamp"], utc=True)
     months = pd.DataFrame(
-        {"month": timestamps.dt.to_period("M").astype(str), "net": validation_values}
+        {"month": timestamps.dt.strftime("%Y-%m").to_numpy(), "net": validation_values}
     )
     monthly = months.groupby("month")["net"].mean() if len(months) else pd.Series(dtype=float)
     positive_months = int(monthly.gt(0).sum())
@@ -251,9 +251,9 @@ def _candidate(
     target_2 = float(np.clip(max(favorable_q75, target_1 + 1.0), target_1 + 1.0, 300.0))
     stop = float(np.clip(adverse_q75, 3.0, base.MAX_STOP_BPS))
     trailing = float(np.clip(adverse_q50, 3.0, stop))
-    signature = hashlib.sha256(
-        np.packbits(np.isin(np.arange(len(validation)), validation_indexes)).tobytes()
-    ).hexdigest()
+    signal = np.zeros(len(validation), dtype=bool)
+    signal[validation_indexes] = True
+    signature = hashlib.sha256(np.packbits(signal).tobytes()).hexdigest()
     stability_penalty = float(monthly.std(ddof=0)) if len(monthly) else 1_000.0
     robust_score = validation_expectancy + 0.25 * fit_expectancy - 0.10 * stability_penalty
     return {
