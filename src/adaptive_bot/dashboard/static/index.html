@@ -75,7 +75,7 @@
         <section class="main-grid">
           <article class="panel live-panel">
             <div class="panel-heading">
-              <div><p class="eyebrow">BINANCE PUBLIC FEED</p><h2>BTCUSDT 5-minute market monitor</h2></div>
+              <div><p class="eyebrow">BINANCE OFFICIAL MARKET DATA</p><h2 id="live-market-title">BTCUSDT 1-minute decision monitor</h2></div>
               <span id="live-status" class="pill">WAITING</span>
             </div>
             <p id="live-activity" class="decision-copy">Waiting for closed candles.</p>
@@ -94,13 +94,13 @@
             </dl>
             <div class="market-charts">
               <section class="chart-box">
-                <div class="chart-title"><strong>5-minute candlesticks</strong><span>Binance mark price</span></div>
-                <canvas id="live-candle-chart" role="img" aria-label="Live BTCUSDT five-minute candlestick chart"></canvas>
+                <div class="chart-title"><strong>1-minute closed candles</strong><span>Binance USD-M contract price</span></div>
+                <canvas id="live-candle-chart" role="img" aria-label="Live BTCUSDT one-minute candlestick chart"></canvas>
               </section>
               <section class="chart-box realtime-box">
-                <div class="chart-title"><strong>Real-time market</strong><span id="ws-status" class="pill">CONNECTING</span></div>
+                <div class="chart-title"><strong>Real-time execution market</strong><span id="ws-status" class="pill">WAITING</span></div>
                 <strong id="realtime-price" class="realtime-price">—</strong>
-                <small id="realtime-time" class="muted">Waiting for WebSocket data</small>
+                <small id="realtime-time" class="muted">Waiting for the supervised Binance collector</small>
                 <canvas id="realtime-chart" role="img" aria-label="Real-time BTCUSDT mark-price chart"></canvas>
                 <dl class="stream-stats">
                   <div><dt>Index</dt><dd id="index-price">—</dd></div>
@@ -151,10 +151,10 @@
               <div><dt>Osservazione valutata</dt><dd id="v5-evaluated-at">-</dd></div>
               <div><dt>Setup piu vicino</dt><dd id="v5-setup">-</dd></div>
               <div><dt>Direzione</dt><dd id="v5-direction">-</dd></div>
-              <div><dt>Probabilita target / stop / timeout</dt><dd id="v5-probability">Non addestrata</dd></div>
+              <div><dt>Probabilita rendimento netto positivo</dt><dd id="v5-probability">Non disponibile</dd></div>
               <div><dt>EV netto previsto</dt><dd id="v5-ev">-</dd></div>
-              <div><dt>MFE / MAE attesi (60m)</dt><dd id="v5-excursion">-</dd></div>
-              <div><dt>EV per commissioni</dt><dd id="v5-vip-ev">-</dd></div>
+              <div><dt>Esperti attivi / congelati</dt><dd id="v5-excursion">-</dd></div>
+              <div><dt>EV dopo costi Binance</dt><dd id="v5-vip-ev">-</dd></div>
               <div><dt>Modello Alpha</dt><dd id="v5-alpha-status">-</dd></div>
               <div><dt>Target</dt><dd id="v5-target">-</dd></div>
               <div><dt>Stop dinamico</dt><dd id="v5-stop">-</dd></div>
@@ -164,7 +164,7 @@
               <div><dt>Stato execution</dt><dd id="v5-execution-status">-</dd></div>
               <div><dt>Size / notional</dt><dd id="v5-size">-</dd></div>
               <div><dt>Risk check</dt><dd id="v5-risk">-</dd></div>
-              <div><dt>Anchored VWAP Binance</dt><dd id="v5-anchor-state">-</dd></div>
+              <div><dt>VWAP operativo</dt><dd id="v5-anchor-state">-</dd></div>
               <div><dt>Controllo setup</dt><dd id="v5-gates">-</dd></div>
               <div><dt>Orizzonti previsione</dt><dd id="v5-horizons">5 / 15 / 30 / 60 min</dd></div>
             </dl>
@@ -198,10 +198,10 @@
 
           <article class="panel wide musca-v5-only hidden">
             <div class="panel-heading">
-              <div><p class="eyebrow">TRADE SIGNALS</p><h2>Quattro setup valutati adesso</h2></div>
+              <div><p class="eyebrow">EXPERT SELECTOR</p><h2>Esperti valutati sull'ultima candela chiusa</h2></div>
               <span id="v5-setup-status" class="pill">0 / 4</span>
             </div>
-            <p class="decision-copy">Un setup completo diventa soltanto un candidato. L'ordine paper nasce dopo quote Binance valida, Alpha economica positiva e approvazione del Risk Engine; il fill avviene sul primo book successivo, mai sul prezzo che ha generato il segnale.</p>
+            <p class="decision-copy">FLAT e neutro: non guadagna e non perde. Un ordine paper nasce soltanto quando il miglior esperto attivo ha EV calibrato netto positivo, il book Binance e valido e il Risk Engine approva; il fill usa il primo book successivo al segnale.</p>
             <div class="table-wrap">
               <table class="v5-setup-table">
                 <thead><tr><th>Setup</th><th>Lato</th><th>Gate</th><th>Stato</th><th>Primo blocco</th><th>Controlli osservati</th></tr></thead>
@@ -267,13 +267,13 @@
               <li class="legacy-musca-v4-only hidden"><span>Leverage cap</span><strong>10× simulated</strong></li>
               <li class="legacy-musca-v4-only hidden"><span>Execution</span><strong>Shadow only</strong></li>
               <li class="musca-v5-only hidden"><span>Test</span><strong>Binance Alpha · Binance USD-M Paper</strong></li>
-              <li class="musca-v5-only hidden"><span>Setups</span><strong>Impulse · VWAP pullback · restart causale</strong></li>
-              <li class="musca-v5-only hidden"><span>Valutazione</span><strong>Alpha ed esecuzione Binance</strong></li>
-              <li class="musca-v5-only hidden"><span>Orizzonti</span><strong>Breakout 3 / 6 / 12 / 24 / 48 barre da 5m</strong></li>
+              <li class="musca-v5-only hidden"><span>Policy</span><strong id="frozen-expert-count">Esperti congelati caricati dal bundle</strong></li>
+              <li class="musca-v5-only hidden"><span>Valutazione</span><strong>Ogni candela Binance 1m completata</strong></li>
+              <li class="musca-v5-only hidden"><span>Orizzonti</span><strong>1 ora e 6 ore, scelti dall'esperto attivo</strong></li>
               <li class="musca-v5-only hidden"><span>Entry</span><strong>Primo book Binance successivo al segnale causale</strong></li>
               <li class="musca-v5-only hidden"><span>Exit</span><strong>50% a 1,5R · stop protetto dai costi · trailing · max 6h</strong></li>
               <li class="musca-v5-only hidden"><span>Re-entry</span><strong>Only after the observed prior exit</strong></li>
-              <li class="musca-v5-only hidden"><span>Selector</span><strong>Policy V8 congelata; ML negativo escluso dagli ordini</strong></li>
+              <li class="musca-v5-only hidden"><span>Selector</span><strong>Miglior EV calibrato positivo; altrimenti FLAT neutro</strong></li>
               <li class="musca-v5-only hidden"><span>Costs</span><strong>Fee account Binance + profondità + riserva + funding</strong></li>
               <li class="musca-v5-only hidden"><span>Conto paper</span><strong>$10.000 · margine 10% · leva massima 10x</strong></li>
               <li class="musca-v5-only hidden"><span>Execution</span><strong>Paper exchange persistente · denaro reale disabilitato</strong></li>
@@ -290,7 +290,7 @@
 
           <article class="panel fills-panel wide musca-v5-only hidden">
             <div class="panel-heading">
-              <div><p class="eyebrow">BINANCE USD-M PAPER</p><h2 id="forward-protocol-name">Ordini e posizioni Musca V5</h2></div>
+              <div><p class="eyebrow">BINANCE USD-M PAPER</p><h2 id="forward-protocol-name">Ordini e posizioni MUSCA BTC</h2></div>
               <span id="forward-trade-count" class="muted">0 completed</span>
             </div>
             <div class="table-wrap">

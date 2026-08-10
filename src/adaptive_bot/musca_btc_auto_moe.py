@@ -31,6 +31,8 @@ AUDIT_TRADES = ROOT / "audit_trades.parquet"
 REPORT = Path(f"data/reports/musca_{base.ASSET_SLUG}_auto_moe.json")
 STATUS = Path(f"data/reports/musca_{base.ASSET_SLUG}_auto_moe.status.json")
 BUNDLE = Path(f"data/models/musca_{base.ASSET_SLUG}_auto_moe/research_bundle.joblib")
+LIVE_ALPHA_MAX_AGE_SECONDS = 125.0
+TRAINED_ROUND_TRIP_COST_BPS = base.ROUND_TRIP_COST_BPS
 
 DISCOVERY_FIT_END = pd.Timestamp("2026-01-01T00:00:00Z")
 LIBRARY_FREEZE_END = pd.Timestamp("2026-03-01T00:00:00Z")
@@ -51,11 +53,7 @@ EXPERT_VALIDATION_PROFIT_FACTOR = 1.02
 MAX_PROFIT_FACTOR_FEATURE = 100.0
 LIVE_OFFICIAL_DERIVATIVE_FEATURES = frozenset(
     {"basis_bps", "funding_z"}
-    | (
-        {"oi_change_1h", "return_oi_interaction_raw"}
-        if base.REQUIRE_OPEN_INTEREST
-        else set()
-    )
+    | ({"oi_change_1h", "return_oi_interaction_raw"} if base.REQUIRE_OPEN_INTEREST else set())
 )
 MODEL_FEATURES = base.FEATURES
 GATE_CONTEXT = base.GATING_CONTEXT
@@ -550,11 +548,7 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
                 ),
                 5
                 + 45
-                * (
-                    action_number
-                    - 0.5
-                    + 0.5 * trees_used / MAX_TREES_PER_ACTION
-                )
+                * (action_number - 0.5 + 0.5 * trees_used / MAX_TREES_PER_ACTION)
                 / len(actions),
             )
             if batch_new == 0:
@@ -898,9 +892,7 @@ def _live_micro_features(
         else evaluated_at.tz_convert("UTC")
     )
     frame["trade_close"] = frame["aggregate_trades"].map(
-        lambda trades: (
-            float(trades[-1][0]) if isinstance(trades, list) and trades else float("nan")
-        )
+        lambda trades: float(trades[-1][0]) if isinstance(trades, list) and trades else float("nan")
     )
     frame["bucket"] = pd.to_datetime(
         frame["exchange_second"].astype(np.int64), unit="s", utc=True
@@ -934,18 +926,14 @@ def _live_micro_features(
     if not np.isfinite(baseline) or baseline <= 0:
         return None
     ofi_1m = imbalance(12)
-    price_velocity_1m = float(
-        (buckets["close"].iloc[-1] / buckets["close"].iloc[-13] - 1) * 10_000
-    )
+    price_velocity_1m = float((buckets["close"].iloc[-1] / buckets["close"].iloc[-13] - 1) * 10_000)
     result = {
         "ofi_15s": imbalance(3),
         "ofi_1m": ofi_1m,
         "ofi_5m": imbalance(60),
         "ofi_persistence_1m": float(np.sign(signed.iloc[-12:]).mean()),
         "trade_intensity_15s": float(buckets["trade_count"].iloc[-3:].sum() / baseline),
-        "trade_intensity_1m": float(
-            buckets["trade_count"].iloc[-12:].sum() / (12 * baseline)
-        ),
+        "trade_intensity_1m": float(buckets["trade_count"].iloc[-12:].sum() / (12 * baseline)),
         "absorption_1m": float(abs(ofi_1m) / (abs(price_velocity_1m) + 0.1)),
         "price_velocity_15s": float(
             (buckets["close"].iloc[-1] / buckets["close"].iloc[-4] - 1) * 10_000
@@ -955,14 +943,29 @@ def _live_micro_features(
     return result if np.isfinite(np.fromiter(result.values(), dtype=float)).all() else None
 
 
-def live_candidate(
+def evaluate_live_actions(
     context: pd.DataFrame,
     l2_records: pd.DataFrame,
     evaluated_at: pd.Timestamp,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     bundle = _paper_bundle()
+    library = cast(dict[str, Any], bundle["expert_library"])
+    experts = cast(list[dict[str, Any]], library["experts"])
+    horizons = sorted({int(item["horizon_seconds"]) // 60 for item in experts})
+    base_result: dict[str, Any] = {
+        "status": "DATA_UNAVAILABLE",
+        "reason": "UNKNOWN",
+        "candidate": None,
+        "feature_coverage": {"complete": False, "missing": []},
+        "frozen_expert_count": len(experts),
+        "active_expert_count": 0,
+        "horizons_minutes": horizons,
+        "best_action": None,
+        "alternatives": [],
+    }
     if context.empty or l2_records.empty:
-        return None
+        base_result["reason"] = "EMPTY_ALPHA_CONTEXT" if context.empty else "EMPTY_L2_CONTEXT"
+        return base_result
     latest = context.sort_values("available_at").iloc[-1]
     available_at = pd.Timestamp(latest["available_at"])
     available_at = (
@@ -970,14 +973,19 @@ def live_candidate(
         if available_at.tzinfo is None
         else available_at.tz_convert("UTC")
     )
-    if available_at > evaluated_at or evaluated_at - available_at > pd.Timedelta(seconds=90):
-        return None
+    if available_at > evaluated_at:
+        base_result["reason"] = "ALPHA_AVAILABLE_IN_FUTURE"
+        return base_result
+    if evaluated_at - available_at > pd.Timedelta(seconds=LIVE_ALPHA_MAX_AGE_SECONDS):
+        base_result["reason"] = "STALE_ALPHA_CONTEXT"
+        return base_result
     l2 = l2_records.copy()
     l2["available_at"] = pd.to_datetime(l2["available_at"], utc=True, format="mixed")
     l2 = l2.loc[l2["available_at"].le(evaluated_at)].copy()
     micro = _live_micro_features(l2, available_at)
     if micro is None:
-        return None
+        base_result["reason"] = "INSUFFICIENT_CAUSAL_L2_HISTORY"
+        return base_result
     timestamp = available_at
     features: dict[str, float] = {}
     for name in MODEL_FEATURES:
@@ -997,18 +1005,25 @@ def live_candidate(
             features[name] = float(latest.get(name, float("nan")))
     values = np.array([features[name] for name in MODEL_FEATURES], dtype=np.float32)
     if not np.isfinite(values).all():
-        return None
-    library = cast(dict[str, Any], bundle["expert_library"])
+        base_result["reason"] = "NONFINITE_MODEL_FEATURES"
+        base_result["feature_coverage"] = {
+            "complete": False,
+            "missing": [name for name, value in features.items() if not np.isfinite(value)],
+        }
+        return base_result
+    base_result["feature_coverage"] = {"complete": True, "missing": []}
+    base_result["available_at"] = available_at.isoformat()
+    base_result["micro_features"] = micro
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for expert in library["experts"]:
+    for expert in experts:
         grouped[f"{expert['side']}:{expert['horizon_seconds']}"].append(expert)
     action_rows: list[dict[str, Any]] = []
     x = values.reshape(1, -1)
-    for key, experts in grouped.items():
+    for key, grouped_experts in grouped.items():
         generator = library["generators"][key]
         leaves = np.asarray(generator.apply(x), dtype=np.int32)[0]
         generator_score = float(np.asarray(generator.predict(x), dtype=float)[0])
-        for expert in experts:
+        for expert in grouped_experts:
             if leaves[int(expert["tree_index"])] != int(expert["leaf_id"]):
                 continue
             side = int(expert["side"])
@@ -1030,36 +1045,53 @@ def live_candidate(
                     row[name] = expert[name]
             action_rows.append(row)
     if not action_rows:
-        return None
+        base_result["status"] = "READY_FLAT"
+        base_result["reason"] = "NO_ACTIVE_EXPERT"
+        return base_result
     scored = _score(
         pd.DataFrame(action_rows),
         cast(dict[str, Any], bundle["meta_model"]),
         cast(dict[str, Any], bundle["calibrators"]),
     ).sort_values(["calibrated_ev_bps", "raw_ev_bps", "expert_id"], ascending=[False, False, True])
+    expert_by_id = {str(item["expert_id"]): item for item in experts}
+    alternatives: list[dict[str, Any]] = []
+    for _, scored_row in scored.head(5).iterrows():
+        item = expert_by_id[str(scored_row["expert_id"])]
+        alternatives.append(
+            {
+                "expert_id": str(scored_row["expert_id"]),
+                "direction": "LONG" if int(item["side"]) > 0 else "SHORT",
+                "horizon_minutes": int(item["horizon_seconds"]) // 60,
+                "raw_ev_bps": float(scored_row["raw_ev_bps"]),
+                "calibrated_ev_bps": float(scored_row["calibrated_ev_bps"]),
+                "probability_net_positive": float(scored_row["probability_net_positive"]),
+            }
+        )
+    base_result["active_expert_count"] = len(action_rows)
+    base_result["alternatives"] = alternatives
+    base_result["best_action"] = alternatives[0]
     winner = scored.iloc[0]
     if float(winner["calibrated_ev_bps"]) <= 0:
-        return None
-    expert = next(
-        item for item in library["experts"] if item["expert_id"] == winner["expert_id"]
-    )
+        base_result["status"] = "READY_FLAT"
+        base_result["reason"] = "NO_POSITIVE_CALIBRATED_EV"
+        return base_result
+    expert = expert_by_id[str(winner["expert_id"])]
     side = int(expert["side"])
     decision_second = int(available_at.timestamp())
     decision_books = l2.loc[
         pd.to_numeric(l2["exchange_second"], errors="coerce").lt(decision_second)
     ].sort_values("exchange_second")
     if decision_books.empty:
-        return None
+        base_result["reason"] = "NO_CAUSAL_ENTRY_BOOK"
+        return base_result
     latest_book = decision_books.iloc[-1]
     price = (
         float(latest_book["mid"])
         if "mid" in latest_book and pd.notna(latest_book["mid"])
-        else (
-            float(latest_book["bids"][0][0]) + float(latest_book["asks"][0][0])
-        )
-        / 2
+        else (float(latest_book["bids"][0][0]) + float(latest_book["asks"][0][0])) / 2
     )
     direction = "LONG" if side > 0 else "SHORT"
-    return {
+    candidate = {
         "setup": "AUTO_MOE_VWAP_CONTROLLER",
         "candidate": True,
         "setup_active": True,
@@ -1079,13 +1111,28 @@ def live_candidate(
         "partial_target_fraction": 0.5,
         "target_probability": float(winner["probability_net_positive"]),
         "expected_net_ev_bps": float(winner["calibrated_ev_bps"]),
-        "robust_expected_gross_bps": float(winner["calibrated_ev_bps"])
-        + base.ROUND_TRIP_COST_BPS,
+        "robust_expected_gross_bps": float(winner["calibrated_ev_bps"]) + base.ROUND_TRIP_COST_BPS,
         "passed_checks": 1,
         "total_checks": 1,
         "first_failed_check": None,
         "checks": [{"name": "auto_moe_calibrated_ev", "passed": True}],
     }
+    base_result["status"] = "READY_CANDIDATE"
+    base_result["reason"] = "POSITIVE_CALIBRATED_EV"
+    base_result["candidate"] = candidate
+    return base_result
+
+
+def live_candidate(
+    context: pd.DataFrame,
+    l2_records: pd.DataFrame,
+    evaluated_at: pd.Timestamp,
+) -> dict[str, Any] | None:
+    """Compatibility wrapper for callers that only need the approved Alpha candidate."""
+    return cast(
+        dict[str, Any] | None,
+        evaluate_live_actions(context, l2_records, evaluated_at)["candidate"],
+    )
 
 
 def _library_spa(actions: pd.DataFrame) -> float | None:
@@ -1146,9 +1193,7 @@ def _trade_breakdown(trades: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def _policy_metrics(
-    trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
-) -> dict[str, Any]:
+def _policy_metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[str, Any]:
     metrics = base._metrics(trades, start, end)
     calendar = pd.date_range(start.floor("D"), end.floor("D") - pd.Timedelta(days=1), freq="1D")
     daily = (
@@ -1211,9 +1256,7 @@ def _prequential_audit(
         calibration = actions.loc[
             timestamp.ge(calibration_start) & timestamp.lt(test_start - base.PURGE)
         ].copy()
-        test = actions.loc[
-            timestamp.ge(test_start) & timestamp.lt(test_end - base.PURGE)
-        ].copy()
+        test = actions.loc[timestamp.ge(test_start) & timestamp.lt(test_end - base.PURGE)].copy()
         if fit.empty or calibration.empty or test.empty:
             continue
         latest_model = _fit_gate(fit, (champion,))[champion]
@@ -1312,12 +1355,9 @@ def train(*, force: bool = False) -> dict[str, Any]:
     gate_fit = actions.loc[timestamp.lt(GATE_FIT_END - base.PURGE)].copy()
     trades, prequential, _, _ = _prequential_audit(actions, champion)
     forward_calibration_start = HISTORICAL_AUDIT_END - pd.offsets.MonthBegin(1)
-    forward_fit = actions.loc[
-        timestamp.lt(forward_calibration_start - base.PURGE)
-    ].copy()
+    forward_fit = actions.loc[timestamp.lt(forward_calibration_start - base.PURGE)].copy()
     forward_calibration = actions.loc[
-        timestamp.ge(forward_calibration_start)
-        & timestamp.lt(HISTORICAL_AUDIT_END - base.PURGE)
+        timestamp.ge(forward_calibration_start) & timestamp.lt(HISTORICAL_AUDIT_END - base.PURGE)
     ].copy()
     champion_model = _fit_gate(forward_fit, (champion,))[champion]
     calibrators = _fit_calibrators(forward_calibration, champion_model)

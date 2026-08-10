@@ -153,10 +153,7 @@ def test_public_derivatives_features_recreate_the_historical_contract() -> None:
         for index in range(41)
     ]
     close_time = int(
-        (
-            candle + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)
-        ).timestamp()
-        * 1000
+        (candle + pd.Timedelta(minutes=1) - pd.Timedelta(milliseconds=1)).timestamp() * 1000
     )
     mark = [[int(candle.timestamp() * 1000), "0", "0", "0", "60012", "0", close_time]]
     spot = [[int(candle.timestamp() * 1000), "0", "0", "0", "60000", "0", close_time]]
@@ -242,6 +239,94 @@ def test_missing_binance_book_fails_closed() -> None:
     )
     assert assessment["decision"] == "WAIT"
     assert assessment["reason"] == "BINANCE_DATA_FAIL_CLOSED"
+
+
+def test_fresh_binance_data_without_positive_expert_is_neutral_flat() -> None:
+    now = pd.Timestamp("2026-08-09T12:00:00Z")
+    evaluation = {
+        "status": "READY_FLAT",
+        "reason": "NO_POSITIVE_CALIBRATED_EV",
+        "feature_coverage": {"complete": True, "missing": []},
+        "frozen_expert_count": 45,
+        "active_expert_count": 3,
+        "horizons_minutes": [60, 360],
+        "best_action": {
+            "expert_id": "best-negative",
+            "direction": "SHORT",
+            "horizon_minutes": 60,
+            "calibrated_ev_bps": -0.75,
+            "probability_net_positive": 0.47,
+        },
+        "alternatives": [],
+    }
+
+    assessment = binance.build_assessment(
+        candidate=None,
+        context=_context(now),
+        book=_book(now),
+        funding=_funding(now),
+        fees=binance.FeeSchedule(2.0, 4.0, "TEST"),
+        config=_config(),
+        equity=10_000,
+        evaluated_at=now,
+        model_evaluation=evaluation,
+    )
+
+    assert assessment["decision"] == "FLAT"
+    assert assessment["reason"] == "FLAT_NO_POSITIVE_AUTO_MOE_ACTION"
+    assert assessment["expected_net_ev_bps"] == pytest.approx(-0.75)
+    assert assessment["direction"] == "SHORT"
+    assert assessment["model_evaluation"]["active_expert_count"] == 3
+    assert assessment["outcome_horizons_minutes"] == [60, 360]
+
+
+def test_missing_model_inputs_waits_even_when_binance_sources_are_fresh() -> None:
+    now = pd.Timestamp("2026-08-09T12:00:00Z")
+    assessment = binance.build_assessment(
+        candidate=None,
+        context=_context(now),
+        book=_book(now),
+        funding=_funding(now),
+        fees=binance.FeeSchedule(2.0, 4.0, "TEST"),
+        config=_config(),
+        equity=10_000,
+        evaluated_at=now,
+        model_evaluation={
+            "status": "DATA_UNAVAILABLE",
+            "reason": "INSUFFICIENT_CAUSAL_L2_HISTORY",
+            "feature_coverage": {"complete": False, "missing": []},
+            "horizons_minutes": [60, 360],
+        },
+    )
+
+    assert assessment["decision"] == "WAIT"
+    assert assessment["reason"] == "MODEL_INPUT_FAIL_CLOSED"
+    assert assessment["probability_status"] == "AUTO_MOE_INPUT_FAIL_CLOSED"
+
+
+def test_binance_chart_uses_closed_official_ohlcv_without_fake_execution_line() -> None:
+    context = pd.DataFrame(
+        [
+            {
+                "available_at": pd.Timestamp("2026-08-10T12:01:00Z"),
+                "open": 60_000.0,
+                "high": 60_020.0,
+                "low": 59_990.0,
+                "close": 60_010.0,
+                "volume": 12.5,
+                "rolling_vwap": 60_005.0,
+            }
+        ]
+    )
+
+    point = binance._chart(context, {"anchored_vwap": 60_001.0})[0]
+
+    assert point["open"] == 60_000.0
+    assert point["high"] == 60_020.0
+    assert point["low"] == 59_990.0
+    assert point["volume"] == 12.5
+    assert point["execution_price"] is None
+    assert point["anchored_vwap"] is None
 
 
 def test_latest_book_ignores_records_received_after_the_decision(

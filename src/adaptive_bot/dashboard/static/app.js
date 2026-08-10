@@ -46,6 +46,8 @@ const gateNames = {
   taker_flow_confirmation: "taker flow concorde",
   vwap_pullback: "pullback nella zona VWAP",
   causal_restart: "ripartenza causale confermata",
+  auto_moe_calibrated_ev_positive: "EV calibrato netto del singolo esperto positivo",
+  auto_moe_input_contract: "tutte le feature causali del modello disponibili",
 };
 const featureNames = {
   anchor_age_seconds: "eta dell'anchor",
@@ -61,8 +63,6 @@ const featureNames = {
 const humanGate = (value) => gateNames[value] || String(value || "nessuno").replaceAll("_", " ");
 let liveCandles = [];
 let liveTicks = [];
-let socket;
-let pingTimer;
 const savedProfile = (() => { try { return localStorage.getItem("strategy-profile"); } catch { return null; } })();
 const allowedProfiles = ["musca-v5-binance", "musca-v2"];
 let selectedProfile = new URLSearchParams(location.search).get("profile") || savedProfile || "musca-v5-binance";
@@ -148,12 +148,15 @@ function render(data, live, research, ml) {
   document.querySelectorAll(".musca-v5-only").forEach((element) => element.classList.toggle("hidden", !muscaV5));
   document.querySelectorAll(".legacy-musca-v4-only").forEach((element) => element.classList.toggle("hidden", !muscaV4));
   if (muscaV5) {
-    setText("center-label", "Live rolling VWAP (diagnostic)");
-    setText("anchor-label", "Live anchored VWAP (diagnostic)");
+    setText("center-label", "Rolling VWAP (model feature)");
+    setText("anchor-label", "Operating VWAP");
     setText("price-legend", "Binance Alpha price");
     setText("center-legend", "Rolling VWAP shown for live context");
     setText("anchor-legend", "Anchored VWAP shown for live context");
     setText("strategy-chart-title", "Binance Alpha · Binance execution · order plan");
+    $("calc-anchor")?.parentElement?.classList.add("hidden");
+    document.querySelector(".execution-line")?.parentElement?.classList.add("hidden");
+    document.querySelector(".anchor-line")?.parentElement?.classList.add("hidden");
   } else if (muscaV4) {
     setText("center-label", "Bitunix rolling VWAP (5m)");
     setText("anchor-label", "Execution anchored VWAP (Bitunix)");
@@ -161,13 +164,15 @@ function render(data, live, research, ml) {
     setText("center-legend", "Bitunix rolling VWAP 5m");
     setText("anchor-legend", "Bitunix anchored VWAP");
     setText("strategy-chart-title", "Bitunix price · rolling VWAP · anchored VWAP · piano ordine");
+    $("calc-anchor")?.parentElement?.classList.remove("hidden");
+    document.querySelector(".anchor-line")?.parentElement?.classList.remove("hidden");
   } else {
     setText("price-legend", "Price");
     setText("center-legend", "VWAP");
     setText("anchor-legend", "Anchored VWAP");
   }
   setText("bot-title", muscaLiquidity ? "MUSCA VWAP LIQUIDITY" : muscaV5 ? "MUSCA · BTC VWAP ALPHA" : muscaV4 ? "MUSCA V4" : muscaV2 ? "MUSCA V2" : v14Shadow ? "V14 VWAP SHADOW" : musca ? "MUSCA BOT" : "Adaptive Range Bot");
-  setText("entry-score-label", muscaV5 ? "Target probability" : muscaLiquidity ? "Flow/depth vote" : muscaV2 || muscaV4 ? "Stress EV (bps)" : musca ? "Momentum score" : "MR score");
+  setText("entry-score-label", muscaV5 ? "P(net+) best expert" : muscaLiquidity ? "Flow/depth vote" : muscaV2 || muscaV4 ? "Stress EV (bps)" : musca ? "Momentum score" : "MR score");
   setText("atr-label", muscaV5 ? "Planned stop" : "ATR (14)");
   document.title = muscaLiquidity ? "MUSCA VWAP — Liquidity Shadow" : muscaV5 ? "MUSCA BTC Auto-MoE — Binance Paper Simulation" : muscaV4 ? "MUSCA V4 — Multi-Anchor VWAP Shadow" : muscaV2 ? "MUSCA V2 — Adaptive VWAP Shadow" : v14Shadow ? "V14 VWAP — BTC Shadow" : musca ? "MUSCA BOT — BTC Shadow" : "Adaptive Range Bot — Operations";
   if (muscaV5) setText("bot-title", `MUSCA BTC AUTO-MoE · ${summary.fee_profile || "BINANCE"}`);
@@ -218,28 +223,39 @@ function render(data, live, research, ml) {
 
   const paperAssessment = selectedV5Assessment(summary.forward_audit || {});
   const paperMarket = paperAssessment.market_inputs?.binance || {};
+  const paperChart = summary.forward_audit?.market_chart || [];
+  const paperLatestCandle = paperChart.at(-1) || {};
+  const paperReadiness = summary.forward_audit?.live_readiness || {};
   const profileLive = muscaV5 && summary.profile_id === "musca-v5-binance"
     ? {
       available: true,
       status: paperMarket.book_synced ? "live" : "waiting",
       activity: `${paperAssessment.decision || "WAIT"} · ${paperAssessment.reason || "attesa dati"}`,
       latest: {
-        close: paperMarket.price,
-        open: paperMarket.price,
-        high: paperMarket.price,
-        low: paperMarket.price,
-        volume: null,
-        timestamp: paperAssessment.observed_at,
+        close: paperLatestCandle.close ?? paperMarket.price,
+        open: paperLatestCandle.open,
+        high: paperLatestCandle.high,
+        low: paperLatestCandle.low,
+        volume: paperLatestCandle.volume,
+        timestamp: paperLatestCandle.timestamp ?? paperAssessment.observed_at,
       },
       quote: {
         best_bid: paperMarket.best_bid,
         best_ask: paperMarket.best_ask,
         spread_bps: paperMarket.spread_bps,
       },
-      bars: summary.forward_audit?.market_chart?.length || 0,
-      warmup_bars: 288,
+      bars: paperReadiness.official_closed_minutes_loaded || paperChart.length,
+      valid_model_rows: paperReadiness.model_ready_rows,
+      warmup_ready: paperReadiness.ready,
       age_seconds: paperAssessment.sources?.execution?.age_seconds,
-      candles: [],
+      candles: paperChart,
+      server_stream: {
+        fresh: Boolean(paperAssessment.sources?.execution?.valid),
+        mark_price: paperMarket.mark_price,
+        index_price: paperMarket.index_price,
+        funding_rate: paperMarket.funding_rate,
+        observed_at: paperAssessment.sources?.execution?.observed_at,
+      },
     }
     : live;
   renderLive(profileLive);
@@ -352,10 +368,10 @@ function renderForwardSummary(audit) {
   const venue = paperVenue(audit);
   const cost = audit.cost_interpretation || {};
   const pending = paper.pending_order ? 1 : 0;
-  setText("equity-label", "V5 virtual balance");
+  setText("equity-label", "Binance paper balance");
   setText("equity", money(paper.final_equity ?? 10000));
   setText("equity-change", `Partito da ${money(paper.initial_equity ?? 10000)} · margine max ${percent(paper.margin_fraction ?? .10)} · leva ${number(paper.max_leverage ?? 10, 0)}x`);
-  setText("net-pnl-label", "Net P&L · stress costs");
+  setText("net-pnl-label", "Net P&L after costs");
   setText("net-pnl", money(paper.net_pnl ?? 0));
   $("net-pnl").className = Number(paper.net_pnl || 0) >= 0 ? "safe" : "negative";
   setText("drawdown-label", "Virtual drawdown");
@@ -399,16 +415,21 @@ function renderForwardAssessment(audit) {
   const venue = paperVenue(audit);
   const alpha = audit.alpha || {};
   const frozenBase = String(state.policy_source || "").startsWith("MUSCA_V8_FROZEN_BASE");
+  const autoMoe = state.setup === "AUTO_MOE_VWAP_CONTROLLER";
+  const modelEvaluation = state.model_evaluation || {};
+  const bestAction = modelEvaluation.best_action || {};
   const sourceAt = state.evaluated_at ? new Date(state.evaluated_at).getTime() : null;
   const elapsed = sourceAt == null ? 0 : Math.max(0, (Date.now() - sourceAt) / 1000);
   const sourceView = (source = {}) => {
     const reportedAge = Number(source.age_seconds);
     const age = Number.isFinite(reportedAge) ? reportedAge + elapsed : null;
-    const fresh = Boolean(source.valid) && age != null && age <= Number(source.max_age_seconds);
+    // The worker already applies the strict source limit before making a decision.
+    // The UI only needs to detect a stalled worker between its five-second refreshes.
+    const fresh = Boolean(source.valid) && elapsed <= 15;
     const currentState = fresh
       ? "FRESH"
-      : source.valid && age > Number(source.max_age_seconds) ? "STALE" : source.state || "MISSING";
-    return { ...source, age, fresh, state: currentState };
+      : source.valid && elapsed > 15 ? "WORKER STALE" : source.state || "MISSING";
+    return { ...source, reportedAge, age, fresh, state: currentState };
   };
   const alphaSource = sourceView(state.sources?.alpha);
   const executionSource = sourceView(state.sources?.execution);
@@ -417,9 +438,15 @@ function renderForwardAssessment(audit) {
   const decision = dataFresh ? reportedDecision : "WAIT";
   const rawReason = String(state.reason || "In attesa di dati sincronizzati.");
   const blockedPrefix = "Closest setup blocked at: ";
-  const readableReason = rawReason.startsWith(blockedPrefix)
-    ? `Setup piu vicino bloccato da: ${humanGate(rawReason.slice(blockedPrefix.length))}`
-    : rawReason;
+  const readableReason = rawReason === "FLAT_NO_POSITIVE_AUTO_MOE_ACTION"
+    ? `FLAT neutro: ${modelEvaluation.active_expert_count || 0} esperti attivi; miglior EV netto ${number(bestAction.calibrated_ev_bps)} bps, deve essere > 0.`
+    : rawReason === "MODEL_INPUT_FAIL_CLOSED"
+      ? `WAIT: input del modello incompleto (${modelEvaluation.reason || "causa non disponibile"}).`
+      : rawReason === "BINANCE_DATA_FAIL_CLOSED"
+        ? "WAIT: almeno una fonte Binance non era valida al momento della decisione."
+        : rawReason.startsWith(blockedPrefix)
+          ? `Setup piu vicino bloccato da: ${humanGate(rawReason.slice(blockedPrefix.length))}`
+          : rawReason;
   const missingFeatures = (state.model_feature_coverage?.missing || []).map(
     (feature) => featureNames[feature] || feature.replaceAll("_", " "),
   );
@@ -433,7 +460,9 @@ function renderForwardAssessment(audit) {
   );
   setText(
     "v5-model-context",
-    frozenBase && !state.candidate_complete
+    autoMoe
+      ? `${modelEvaluation.active_expert_count || 0}/${modelEvaluation.frozen_expert_count || 0} esperti attivi · ${state.candidate_complete ? "candidato positivo completo" : state.model_feature_coverage?.complete ? "modello completo, scelta FLAT" : "input modello incompleto"}`
+      : frozenBase && !state.candidate_complete
       ? "Base congelata attiva: attende impulso, pullback VWAP e ripartenza confermata. Il challenger ML generico non puo autorizzare ordini."
       : `${state.candidate_complete
       ? "Candidato completo valutato"
@@ -447,9 +476,18 @@ function renderForwardAssessment(audit) {
   setText("v5-direction", state.direction || "-");
   setText("v5-probability", state.target_probability == null
     ? (state.probability_status || "NOT_TRAINED")
-    : `target ${percent(state.target_probability)} · stop ${percent(state.stop_probability)} · timeout ${percent(state.timeout_probability)}`);
-  setText("v5-ev", state.expected_net_ev_bps == null ? (frozenBase ? "Calcolato sul prossimo evento completo" : "Non disponibile prima del training") : `${number(state.expected_net_ev_bps)} bps`);
-  setText("v5-excursion", state.expected_mfe_60m_bps == null ? "-" : `MFE ${number(state.expected_mfe_60m_bps)} · MAE ${number(state.expected_mae_60m_bps)} bps`);
+    : autoMoe
+      ? `${percent(state.target_probability)} per ${bestAction.expert_id || state.expert_id || "miglior esperto"}`
+      : `target ${percent(state.target_probability)} · stop ${percent(state.stop_probability)} · timeout ${percent(state.timeout_probability)}`);
+  setText("v5-ev", state.expected_net_ev_bps == null
+    ? autoMoe ? "Nessun esperto attivo in questo minuto" : frozenBase ? "Calcolato sul prossimo evento completo" : "Non disponibile"
+    : `${number(state.expected_net_ev_bps)} bps`);
+  setText(
+    "v5-excursion",
+    autoMoe
+      ? `${modelEvaluation.active_expert_count || 0} / ${modelEvaluation.frozen_expert_count || 0} · migliore ${bestAction.expert_id || "nessuno"}`
+      : state.expected_mfe_60m_bps == null ? "-" : `MFE ${number(state.expected_mfe_60m_bps)} · MAE ${number(state.expected_mae_60m_bps)} bps`,
+  );
   const vip = state.vip_ev_bps || {};
   setText("v5-vip-ev", Object.keys(vip).length ? Object.entries(vip).map(([level, value]) => `${level} ${number(value)} bps`).join(" · ") : "-");
   setText("v5-alpha-status", `${alpha.status || "NOT_TRAINED"} · profilo simulato ${selectedV5Profile(audit)}`);
@@ -472,20 +510,21 @@ function renderForwardAssessment(audit) {
     : state.risk_approved ? "APPROVATO" : "RIFIUTATO";
   setText("v5-risk", `${riskState} · ${state.risk_reason || "-"}${state.risk_budget == null ? "" : ` · budget ${money(state.risk_budget)}`}`);
   const anchor = state.anchor || {};
-  setText(
-    "v5-anchor-state",
-    `${anchor.state || "NONE"} · ${money(anchor.price)} · eta ${ageText(anchor.age_seconds)} · ${anchor.direction || "nessuna direzione"}`,
-  );
+  setText("v5-anchor-state", autoMoe
+    ? `${money(anchor.price)} · rolling VWAP causale usato nelle feature`
+    : `${anchor.state || "NONE"} · ${money(anchor.price)} · eta ${ageText(anchor.age_seconds)} · ${anchor.direction || "nessuna direzione"}`);
   const setup = (state.setups || []).find((item) => item.setup === state.setup) || {};
   setText("v5-gates", `${setup.passed_checks || 0}/${setup.total_checks || 0} superati${setup.first_failed_check ? ` · manca: ${humanGate(setup.first_failed_check)}` : ""}`);
-  setText("v5-horizons", frozenBase ? "Breakout 3 / 6 / 12 / 24 / 48 barre da 5m · gestione fino a 360 min" : `${(state.outcome_horizons_minutes || [5, 15, 30, 60]).join(" / ")} min · non sono frequenze di entrata`);
+  setText("v5-horizons", `${(state.outcome_horizons_minutes || [60, 360]).join(" / ")} min · decisione ogni candela 1m chiusa`);
   setText("activity", `${decision} · ${dataFresh ? readableReason : "fonti non correnti"}`);
   setText("regime", state.probability_status || "NOT_TRAINED");
   setText("calc-close", money(state.price));
   setText("calc-center", money(state.rolling_vwap));
   setText("calc-anchor", money(state.anchored_vwap));
   setText("calc-atr", state.stop_bps == null ? "-" : `${number(state.stop_bps)} bps stop`);
-  setText("calc-entry-score", state.target_probability == null ? "Non addestrata" : percent(state.target_probability));
+  setText("calc-entry-score", state.target_probability == null
+    ? autoMoe ? "Nessun esperto attivo" : "Non disponibile"
+    : percent(state.target_probability));
   setText("calc-spread", `${number(state.spread_bps, 3)} bps`);
   setText("v5-alpha-status", `${alpha.status || "NOT_TRAINED"} · ${selectedV5Profile(audit)}`);
 
@@ -494,10 +533,13 @@ function renderForwardAssessment(audit) {
     $(`${prefix}-state`).className = source.fresh ? "pill safe-pill" : "pill danger";
     setText(`${prefix}-purpose`, source.purpose || "Dato non disponibile");
     setText(`${prefix}-time`, dateTime(source.observed_at));
-    setText(`${prefix}-age`, `${ageText(source.age)} · limite ${ageText(source.max_age_seconds)}`);
+    setText(`${prefix}-age`, autoMoe
+      ? `${ageText(source.reportedAge)} al calcolo · limite engine ${ageText(source.max_age_seconds)} · heartbeat ${ageText(elapsed)}`
+      : `${ageText(source.age)} · limite ${ageText(source.max_age_seconds)}`);
   };
   applySource("v5-alpha-source", alphaSource);
   applySource("v5-execution-source", executionSource);
+  setText("frozen-expert-count", `${modelEvaluation.frozen_expert_count || 0} esperti congelati scoperti automaticamente`);
   setText("v5-data-status", dataFresh ? "FRESH" : "FAIL CLOSED");
   $("v5-data-status").className = dataFresh ? "pill safe-pill" : "pill danger";
   setText(
@@ -531,7 +573,25 @@ function renderForwardAssessment(audit) {
     ["Funding", venue, percent(execution.funding_rate), "Costo se attraversa il settlement"],
     ["Book sincronizzato", venue, execution.book_synced ? "SI" : "NO", "Gate di esecuzione"],
   ];
-  if (frozenBase) {
+  if (autoMoe) {
+    inputs = [
+      ["Prezzo perpetual", "Binance", money(binance.price), "Stato di mercato"],
+      ["Rolling VWAP", "Binance", money(binance.rolling_vwap), "Centro e distanza causale"],
+      ["Distanza VWAP", "Binance", `${number(binance.vwap_distance_bps)} bps`, "Feature del selettore"],
+      ["Rendimenti 1m / 5m / 15m / 30m", "Binance", `${number(binance.return_1m_bps)} / ${number(binance.return_5m_bps)} / ${number(binance.return_15m_bps)} / ${number(binance.return_30m_bps)} bps`, "Momentum multi-orizzonte"],
+      ["Taker imbalance 60s", "Binance", number(binance.taker_imbalance_60s, 3), "Order flow storico/live coerente"],
+      ["OFI 1m / 5m", "Binance L2", `${number(binance.ofi_1m, 3)} / ${number(binance.ofi_5m, 3)}`, "Order flow live causale"],
+      ["Intensita trade 1m", "Binance L2", number(binance.trade_intensity_1m, 3), "Regime microstrutturale"],
+      ["Open interest 1h", "Binance", percent(binance.oi_change_1h), "Conferma derivati"],
+      ["Basis mark/spot", "Binance", `${number(binance.basis_bps, 3)} bps`, "Conferma perpetual/spot"],
+      ["Funding z-score", "Binance", number(binance.funding_z, 3), "Regime e costo"],
+      ["Best bid / ask", venue, `${money(execution.best_bid)} / ${money(execution.best_ask)}`, "Quote eseguibile paper"],
+      ["Spread", venue, `${number(execution.spread_bps, 3)} bps`, "Costo osservato"],
+      ["Mark / index", venue, `${money(execution.mark_price)} / ${money(execution.index_price)}`, "Controllo perpetual"],
+      ["Funding corrente", venue, percent(execution.funding_rate), "Addebito al settlement"],
+      ["Esperti attivi", "Policy", `${modelEvaluation.active_expert_count || 0} / ${modelEvaluation.frozen_expert_count || 0}`, "Scelta dell'azione"],
+    ];
+  } else if (frozenBase) {
     inputs = [
       ["Prezzo Alpha", "Binance", money(binance.price), "Prezzo causale perpetual"],
       ...inputs.slice(-5),
@@ -545,12 +605,29 @@ function renderForwardAssessment(audit) {
     <td data-label="Uso">${escapeHtml(use)}</td>
   </tr>`).join("");
 
-  const allSetups = state.setups || [];
+  const allSetups = autoMoe && (modelEvaluation.alternatives || []).length
+    ? modelEvaluation.alternatives.map((item, index) => ({
+      setup: item.expert_id,
+      direction: item.direction,
+      candidate: Boolean(state.candidate_complete && index === 0),
+      passed_checks: item.calibrated_ev_bps > 0 ? 1 : 0,
+      total_checks: 1,
+      first_failed_check: item.calibrated_ev_bps > 0 ? null : "auto_moe_calibrated_ev_positive",
+      checks: [{
+        name: "auto_moe_calibrated_ev_positive",
+        passed: item.calibrated_ev_bps > 0,
+        actual: item.calibrated_ev_bps,
+        requirement: `> 0 bps netti · orizzonte ${item.horizon_minutes} min · P(net+) ${percent(item.probability_net_positive)}`,
+      }],
+    }))
+    : state.setups || [];
   const setups = frozenBase
     ? allSetups.filter((item) => String(item.policy_source || "").startsWith("MUSCA_V8_FROZEN_BASE"))
     : allSetups;
   const completed = setups.filter((item) => item.candidate).length;
-  setText("v5-setup-status", `${completed} / ${setups.length || 3} completi`);
+  setText("v5-setup-status", autoMoe
+    ? `${modelEvaluation.active_expert_count || 0} attivi · ${completed ? "1 TRADE" : "FLAT"}`
+    : `${completed} / ${setups.length || 3} completi`);
   $("v5-setup-status").className = completed ? "pill safe-pill" : "pill";
   const setupBody = $("v5-setups-body");
   setupBody.innerHTML = setups.length ? setups.map((item) => {
@@ -562,7 +639,7 @@ function renderForwardAssessment(audit) {
       <td data-label="Setup"><strong>${escapeHtml(String(item.setup).replaceAll("_", " "))}</strong></td>
       <td data-label="Lato">${escapeHtml(item.direction || "-")}</td>
       <td data-label="Gate">${item.passed_checks || 0}/${item.total_checks || 0}</td>
-      <td data-label="Stato" class="${item.candidate ? "safe" : "negative"}">${item.candidate ? "CANDIDATO" : "BLOCCATO"}</td>
+      <td data-label="Stato" class="${item.candidate ? "safe" : autoMoe ? "" : "negative"}">${item.candidate ? "CANDIDATO" : autoMoe ? "FLAT" : "BLOCCATO"}</td>
       <td data-label="Primo blocco">${escapeHtml(humanGate(item.first_failed_check))}</td>
       <td data-label="Controlli"><div class="check-list">${checks}</div></td>
     </tr>`;
@@ -724,8 +801,13 @@ function renderLive(live) {
   const latest = live.latest;
   setText("live-close", money(latest.close));
   setText("live-time", dateTime(latest.timestamp));
-  setText("live-age", `${live.age_seconds} seconds`);
-  setText("live-warmup", `${live.bars}/${live.warmup_bars} bars`);
+  setText("live-age", ageText(live.age_seconds));
+  setText(
+    "live-warmup",
+    live.warmup_ready
+      ? `READY · ${live.bars} candele ufficiali · ${live.valid_model_rows || 0} righe modello valide`
+      : `${live.bars}/${live.warmup_bars || "?"} bars`,
+  );
   setText("live-open", money(latest.open));
   setText("live-high", money(latest.high));
   setText("live-low", money(latest.low));
@@ -733,8 +815,22 @@ function renderLive(live) {
   setText("live-bid", money(live.quote?.best_bid));
   setText("live-ask", money(live.quote?.best_ask));
   setText("live-spread", `${number(live.quote?.spread_bps, 3)} bps`);
-  liveCandles = live.candles;
+  liveCandles = live.candles || [];
   drawCandlesticks(liveCandles);
+  if (live.server_stream) {
+    const stream = live.server_stream;
+    const streamBadge = $("ws-status");
+    streamBadge.textContent = stream.fresh ? "BINANCE LIVE" : "WAITING";
+    streamBadge.className = stream.fresh ? "pill safe-pill" : "pill danger";
+    setText("realtime-price", money(stream.mark_price));
+    setText("realtime-time", `Collector aggiornato ${dateTime(stream.observed_at)}`);
+    setText("index-price", money(stream.index_price));
+    setText("funding-rate", percent(stream.funding_rate));
+    if (Number.isFinite(Number(stream.mark_price))) {
+      liveTicks = [...liveTicks.slice(-199), Number(stream.mark_price)];
+      drawRealtime();
+    }
+  }
 }
 
 function renderLatest(latest) {
@@ -1048,45 +1144,6 @@ function drawRealtime() {
   drawSeries(context, liveTicks, boundsOf([liveTicks]), width, height, "#4fd1c5", 2);
 }
 
-function connectBinance() {
-  const badge = $("ws-status");
-  badge.textContent = "CONNECTING";
-  badge.className = "pill";
-  socket = new WebSocket("wss://fstream.binance.com/stream?streams=btcusdt@markPrice@1s/btcusdt@kline_5m");
-  socket.addEventListener("message", ({ data }) => {
-    let message;
-    try { message = JSON.parse(data); } catch { return; }
-    const payload = message.data;
-    if (!payload) return;
-    badge.textContent = "STREAMING";
-    badge.className = "pill safe-pill";
-    if (payload.e === "kline" && payload.k) {
-      const candle = { timestamp: new Date(payload.k.t).toISOString(), open: payload.k.o, high: payload.k.h, low: payload.k.l, close: payload.k.c };
-      liveCandles = liveCandles.at(-1)?.timestamp === candle.timestamp
-        ? [...liveCandles.slice(0, -1), candle]
-        : [...liveCandles.slice(-59), candle];
-      drawCandlesticks(liveCandles);
-    }
-    if (payload.e === "markPriceUpdate") {
-      const mark = Number(payload.p);
-      if (!Number.isFinite(mark)) return;
-      liveTicks = [...liveTicks.slice(-199), mark];
-      setText("realtime-price", money(mark));
-      setText("realtime-time", `Updated ${new Date(payload.E).toLocaleTimeString("en-US")}`);
-      setText("index-price", money(payload.i));
-      setText("funding-rate", percent(payload.r));
-      drawRealtime();
-    }
-  });
-  socket.addEventListener("close", () => {
-    clearInterval(pingTimer);
-    badge.textContent = "RECONNECTING";
-    badge.className = "pill danger";
-    setTimeout(connectBinance, 3000);
-  });
-  socket.addEventListener("error", () => socket.close());
-}
-
 window.addEventListener("resize", () => refresh());
 $("adx-profile").addEventListener("change", (event) => {
   selectedProfile = event.target.value;
@@ -1096,4 +1153,3 @@ $("adx-profile").addEventListener("change", (event) => {
 ["research-family", "research-state", "research-horizon"].forEach((id) => $(id).addEventListener("change", renderResearch));
 refresh();
 setInterval(refresh, 5000);
-connectBinance();

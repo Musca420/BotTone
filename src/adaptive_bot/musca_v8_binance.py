@@ -40,19 +40,13 @@ STRATEGY_PROFILE = "musca_btc_auto_moe_vwap"
 PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
 COMMISSION_URL = "https://fapi.binance.com/fapi/v1/commissionRate"
 OPEN_INTEREST_HISTORY_URL = (
-    "https://fapi.binance.com/futures/data/openInterestHist"
-    "?symbol=BTCUSDT&period=5m&limit=30"
+    "https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=30"
 )
-FUNDING_HISTORY_URL = (
-    "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=200"
-)
+FUNDING_HISTORY_URL = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=200"
 MARK_KLINES_URL = (
-    "https://fapi.binance.com/fapi/v1/markPriceKlines"
-    "?symbol=BTCUSDT&interval=1m&limit=5"
+    "https://fapi.binance.com/fapi/v1/markPriceKlines?symbol=BTCUSDT&interval=1m&limit=5"
 )
-SPOT_KLINES_URL = (
-    "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=5"
-)
+SPOT_KLINES_URL = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=5"
 _FUNDING_CACHE: tuple[float, dict[str, Any]] | None = None
 _CONTEXT_CACHE: tuple[float, pd.DataFrame] | None = None
 
@@ -271,9 +265,7 @@ def derivatives_alpha_features(
         or float(oi["open_interest"].iloc[0]) <= 0
     ):
         raise ValueError("Binance open-interest 1h coverage is stale or incomplete")
-    oi_change_1h = float(
-        oi["open_interest"].iloc[-1] / oi["open_interest"].iloc[0] - 1
-    )
+    oi_change_1h = float(oi["open_interest"].iloc[-1] / oi["open_interest"].iloc[0] - 1)
 
     if not isinstance(funding_payload, list):
         raise ValueError("Binance funding history returned an invalid response")
@@ -310,12 +302,8 @@ def derivatives_alpha_features(
         raise ValueError("Binance funding history has zero dispersion")
     funding_z = float((float(minute_rates.iloc[-1]) - float(history.mean())) / funding_std)
 
-    mark_close, mark_closed_at = _closed_kline_close(
-        mark_payload, candle_timestamp, observed_at
-    )
-    spot_close, spot_closed_at = _closed_kline_close(
-        spot_payload, candle_timestamp, observed_at
-    )
+    mark_close, mark_closed_at = _closed_kline_close(mark_payload, candle_timestamp, observed_at)
+    spot_close, spot_closed_at = _closed_kline_close(spot_payload, candle_timestamp, observed_at)
     basis_bps = (mark_close / spot_close - 1) * 10_000
     values = np.array(
         [oi_change_1h, funding_z, basis_bps, return_5m_bps * oi_change_1h],
@@ -342,9 +330,10 @@ def derivatives_alpha_features(
 def market_context() -> pd.DataFrame:
     global _CONTEXT_CACHE
     now = time.monotonic()
-    if _CONTEXT_CACHE is not None and now - _CONTEXT_CACHE[0] < 50:
+    if _CONTEXT_CACHE is not None and now - _CONTEXT_CACHE[0] < 20:
         return _CONTEXT_CACHE[1]
     minutes = binance_l2_dataset.load_recent_official_minutes()
+    official_minute_rows = len(minutes)
     context = btc_vwap_alpha.canonical_minute_market_features(minutes)
     context = context.loc[context["feature_contract_valid"].fillna(False)].copy()
     if context.empty:
@@ -364,9 +353,8 @@ def market_context() -> pd.DataFrame:
         "derivatives_feature_available_at",
     ):
         context.at[context.index[-1], name] = derivatives[name]
-    context.attrs["derivatives_source_timestamps"] = derivatives[
-        "derivatives_source_timestamps"
-    ]
+    context.attrs["derivatives_source_timestamps"] = derivatives["derivatives_source_timestamps"]
+    context.attrs["official_minute_rows"] = official_minute_rows
     _CONTEXT_CACHE = (now, context)
     return context
 
@@ -456,6 +444,7 @@ def build_assessment(
     config: BinancePaperConfig,
     equity: float,
     evaluated_at: pd.Timestamp,
+    model_evaluation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     latest = context.iloc[-1]
     book_row = book.iloc[-1] if not book.empty else pd.Series(dtype=object)
@@ -464,7 +453,7 @@ def build_assessment(
         "Alpha: closed BTCUSDT perpetual/spot candles and causal VWAP event",
         latest.get("available_at"),
         evaluated_at,
-        maximum_age_seconds=90,
+        maximum_age_seconds=musca_btc_auto_moe.LIVE_ALPHA_MAX_AGE_SECONDS,
         structurally_valid=bool(latest.get("feature_contract_valid", False))
         and bool(latest.get("derivatives_feature_valid", False)),
     )
@@ -487,13 +476,33 @@ def build_assessment(
     sources_valid = all(
         source["valid"] for source in (alpha_source, execution_source, funding_source)
     )
-    direction = candidate.get("direction") if candidate else None
+    model_evaluation = model_evaluation or {
+        "status": "READY_CANDIDATE" if candidate else "READY_FLAT",
+        "reason": "LEGACY_CALL",
+        "feature_coverage": {"complete": True, "missing": []},
+        "frozen_expert_count": None,
+        "active_expert_count": int(candidate is not None),
+        "horizons_minutes": [360],
+        "best_action": None,
+        "alternatives": [],
+    }
+    model_ready = str(model_evaluation.get("status", "")).startswith("READY_")
+    best_action = model_evaluation.get("best_action")
+    if not isinstance(best_action, dict):
+        best_action = {}
+    direction = candidate.get("direction") if candidate else best_action.get("direction")
     sign = 1 if direction == "LONG" else -1 if direction == "SHORT" else 0
     stop_bps: float | None = None
     quote = risk = None
     expected_funding_bps = 0.0
     expected_cost_bps = config.modeled_round_trip_cost_bps
-    expected_net_ev_bps: float | None = None
+    expected_net_ev_bps: float | None = (
+        float(best_action["calibrated_ev_bps"])
+        + musca_btc_auto_moe.TRAINED_ROUND_TRIP_COST_BPS
+        - expected_cost_bps
+        if best_action.get("calibrated_ev_bps") is not None
+        else None
+    )
     target_bps: float | None = None
     if candidate and not book.empty and sign:
         mid = float(book_row["mid"])
@@ -564,14 +573,16 @@ def build_assessment(
         and expected_net_ev_bps > 0
         and target_bps is not None
     )
-    decision = "TRADE" if approved else "FLAT" if candidate and sources_valid else "WAIT"
+    decision = "TRADE" if approved else "FLAT" if sources_valid and model_ready else "WAIT"
     reason = (
         "BASE_ALPHA_NET_POSITIVE"
         if approved
-        else "WAIT_NO_POSITIVE_AUTO_MOE_ACTION"
-        if candidate is None
         else "BINANCE_DATA_FAIL_CLOSED"
         if not sources_valid
+        else "MODEL_INPUT_FAIL_CLOSED"
+        if not model_ready
+        else "FLAT_NO_POSITIVE_AUTO_MOE_ACTION"
+        if candidate is None
         else "INVALID_STRUCTURAL_STOP"
         if stop_bps is None or not 0 < stop_bps <= 200
         else "INSUFFICIENT_BINANCE_DEPTH"
@@ -583,14 +594,25 @@ def build_assessment(
     entry = float(quote.entry.execution_vwap) if quote is not None else None
     setup = candidate or {
         "setup": "AUTO_MOE_VWAP_CONTROLLER",
-        "direction": None,
+        "direction": best_action.get("direction"),
         "candidate": False,
-        "setup_active": False,
+        "setup_active": bool(model_evaluation.get("active_expert_count", 0)),
         "passed_checks": 0,
-        "total_checks": 7,
-        "first_failed_check": "no_expert_with_positive_calibrated_ev",
-        "checks": [],
+        "total_checks": 1,
+        "first_failed_check": (
+            "auto_moe_input_contract" if not model_ready else "auto_moe_calibrated_ev_positive"
+        ),
+        "checks": [
+            {
+                "name": "auto_moe_calibrated_ev_positive",
+                "passed": False,
+                "actual": best_action.get("calibrated_ev_bps"),
+                "requirement": "> 0 bps netti",
+            }
+        ],
         "policy_source": "BTC_AUTO_MOE_RESEARCH_PAPER_MONITOR",
+        "expert_id": best_action.get("expert_id"),
+        "maximum_hold_minutes": best_action.get("horizon_minutes", 360),
     }
     context_observed = pd.Timestamp(latest["available_at"]).isoformat()
     return {
@@ -610,14 +632,28 @@ def build_assessment(
         "partial_target_fraction": setup.get("partial_target_fraction", 0.5),
         "maximum_hold_minutes": int(setup.get("maximum_hold_minutes", 360)),
         "candidate_complete": candidate is not None,
-        "model_context": "COMPLETE_CANDIDATE" if candidate else "NO_POSITIVE_EXPERT_ACTION",
-        "model_feature_coverage": {"complete": sources_valid, "missing": []},
-        "probability_status": (
-            "AUTO_MOE_PREQUENTIAL_CALIBRATION"
+        "model_context": (
+            "COMPLETE_CANDIDATE"
             if candidate
-            else "AUTO_MOE_WAITING_POSITIVE_EV"
+            else "READY_FLAT_NO_POSITIVE_EV"
+            if model_ready
+            else "MODEL_INPUT_INCOMPLETE"
         ),
-        "target_probability": candidate.get("target_probability") if candidate else None,
+        "model_feature_coverage": model_evaluation.get(
+            "feature_coverage", {"complete": False, "missing": []}
+        ),
+        "probability_status": (
+            "AUTO_MOE_CALIBRATED_ENTRY"
+            if candidate
+            else "AUTO_MOE_READY_FLAT"
+            if model_ready
+            else "AUTO_MOE_INPUT_FAIL_CLOSED"
+        ),
+        "target_probability": (
+            candidate.get("target_probability")
+            if candidate
+            else best_action.get("probability_net_positive")
+        ),
         "stop_probability": None,
         "timeout_probability": None,
         "expected_net_ev_bps": expected_net_ev_bps,
@@ -628,7 +664,9 @@ def build_assessment(
         "price": float(book_row["mid"]) if not book.empty else float(latest["close"]),
         "execution_price": float(book_row["mid"]) if not book.empty else None,
         "rolling_vwap": float(latest["rolling_vwap"]),
-        "anchored_vwap": candidate.get("operating_vwap") if candidate else None,
+        "anchored_vwap": (
+            candidate.get("operating_vwap") if candidate else float(latest["rolling_vwap"])
+        ),
         "spread_bps": float(book_row["spread_bps"]) if not book.empty else None,
         "flow_vote": float(latest["taker_imbalance_60s"]),
         "binance_return_1m_bps": float(latest["return_1m_bps"]),
@@ -668,12 +706,14 @@ def build_assessment(
             else None
         ),
         "anchor": {
-            "state": "VALID" if candidate else "NONE",
-            "valid": candidate is not None,
+            "state": "OPERATING_VWAP",
+            "valid": True,
             "detected_at": candidate.get("impulse_anchor_at") if candidate else None,
             "age_seconds": None,
             "direction": direction,
-            "price": candidate.get("operating_vwap") if candidate else None,
+            "price": (
+                candidate.get("operating_vwap") if candidate else float(latest["rolling_vwap"])
+            ),
         },
         "sources": {
             "alpha": alpha_source,
@@ -695,6 +735,14 @@ def build_assessment(
                 "oi_change_1h": float(latest["oi_change_1h"]),
                 "basis_bps": float(latest["basis_bps"]),
                 "funding_z": float(latest["funding_z"]),
+                "ofi_1m": model_evaluation.get("micro_features", {}).get("ofi_1m"),
+                "ofi_5m": model_evaluation.get("micro_features", {}).get("ofi_5m"),
+                "trade_intensity_1m": model_evaluation.get("micro_features", {}).get(
+                    "trade_intensity_1m"
+                ),
+                "price_velocity_1m": model_evaluation.get("micro_features", {}).get(
+                    "price_velocity_1m"
+                ),
                 "mid": float(book_row["mid"]) if not book.empty else None,
                 "mark_price": funding["mark_price"],
                 "index_price": funding["index_price"],
@@ -707,10 +755,21 @@ def build_assessment(
             }
         },
         "setups": [setup],
+        "model_evaluation": {
+            key: model_evaluation.get(key)
+            for key in (
+                "status",
+                "reason",
+                "frozen_expert_count",
+                "active_expert_count",
+                "best_action",
+                "alternatives",
+            )
+        },
         "evaluation_frequency": (
             "Auto-MoE decision on completed Binance 1m context; execution on next Binance book"
         ),
-        "outcome_horizons_minutes": [360],
+        "outcome_horizons_minutes": model_evaluation.get("horizons_minutes", [360]),
     }
 
 
@@ -756,15 +815,19 @@ def _chart(context: pd.DataFrame, assessment: dict[str, Any]) -> list[dict[str, 
     return [
         {
             "timestamp": pd.Timestamp(row["available_at"]).isoformat(),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
             "close": float(row["close"]),
-            "execution_price": float(row["close"]),
+            "volume": float(row["volume"]),
+            "execution_price": None,
             "center": float(row["rolling_vwap"]),
-            "anchored_vwap": assessment.get("anchored_vwap"),
+            "anchored_vwap": None,
             "break_even": assessment.get("break_even_price"),
             "stop": assessment.get("stop_price"),
             "target": assessment.get("target_price"),
         }
-        for _, row in context.tail(360).iloc[::3].iterrows()
+        for _, row in context.tail(360).iterrows()
     ]
 
 
@@ -795,7 +858,7 @@ def _shadow(audit: dict[str, Any]) -> dict[str, Any]:
     return {
         "mode": "paper",
         "instrument": "BTCUSDT",
-        "timeframe_minutes": 5,
+        "timeframe_minutes": 1,
         "strategy_profile": STRATEGY_PROFILE,
         "benchmark_venue": "Binance BTCUSDT perpetual/spot Alpha",
         "execution_venue": "Binance USD-M BTCUSDT observed L2",
@@ -824,20 +887,15 @@ def _shadow(audit: dict[str, Any]) -> dict[str, Any]:
         "equity_curve": account.get("equity_curve", []),
         "telemetry": [
             {
-                "timestamp": assessment["observed_at"],
+                **point,
                 "activity": assessment["decision"],
                 "decision_reason": assessment["reason"],
-                "close": assessment["price"],
-                "center": assessment["rolling_vwap"],
-                "anchored_vwap": assessment["anchored_vwap"],
                 "entry_score": assessment["expected_net_ev_bps"],
                 "win_probability": assessment["target_probability"],
                 "spread_bps": assessment["spread_bps"],
-                "target": assessment["target_price"],
-                "stop": assessment["stop_price"],
-                "break_even": assessment["break_even_price"],
                 "regime": assessment["probability_status"],
             }
+            for point in audit["market_chart"]
         ],
         "shadow_closed_trades": len(trades),
         "shadow_position": account.get("open_position"),
@@ -855,7 +913,8 @@ def refresh(config_path: Path = CONFIG) -> dict[str, Any]:
     book = latest_book(evaluated_at, config)
     cost = 2 * fees.taker_bps + config.non_fee_reserve_bps
     recent_l2 = binance_l2_dataset.load_recent_records(max_lines=7_200)
-    candidate = musca_btc_auto_moe.live_candidate(context, recent_l2, evaluated_at)
+    model_evaluation = musca_btc_auto_moe.evaluate_live_actions(context, recent_l2, evaluated_at)
+    candidate = cast(dict[str, Any] | None, model_evaluation["candidate"])
     account = _load_account(fees)
     assessment = build_assessment(
         candidate=candidate,
@@ -866,6 +925,7 @@ def refresh(config_path: Path = CONFIG) -> dict[str, Any]:
         config=config,
         equity=float(account.get("final_equity", 10_000)),
         evaluated_at=evaluated_at,
+        model_evaluation=model_evaluation,
     )
     advance_account(account, assessment, book)
     _atomic_json(
@@ -903,6 +963,15 @@ def refresh(config_path: Path = CONFIG) -> dict[str, Any]:
                 list(binance_l2_dataset.ROOT.glob("btcusdt_????-??-??.jsonl"))
             ),
             "execution_venue": "BINANCE",
+        },
+        "live_readiness": {
+            "ready": bool(model_evaluation.get("feature_coverage", {}).get("complete")),
+            "official_closed_minutes_loaded": int(
+                context.attrs.get("official_minute_rows", len(context))
+            ),
+            "model_ready_rows": len(context),
+            "decision_cadence_minutes": 1,
+            "chart_rows": min(len(context), 360),
         },
         "current_market_assessment": assessment,
         "current_market_assessments": {PROFILE: assessment},

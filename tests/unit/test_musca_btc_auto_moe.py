@@ -124,6 +124,88 @@ def test_flat_is_neutral_when_every_expert_has_negative_ev() -> None:
     assert auto._execute(rows).empty
 
 
+def test_live_evaluation_explains_why_ready_policy_is_flat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Generator:
+        def apply(self, _values: np.ndarray) -> np.ndarray:
+            return np.array([[7]])
+
+        def predict(self, _values: np.ndarray) -> np.ndarray:
+            return np.array([2.0])
+
+    expert = {
+        "expert_id": "short-60m",
+        "side": -1,
+        "horizon_seconds": 3_600,
+        "tree_index": 0,
+        "leaf_id": 7,
+        "target_1_bps": 20.0,
+        "target_2_bps": 35.0,
+        "stop_bps": 18.0,
+        "trailing_bps": 12.0,
+        "fit_expectancy_bps": 1.0,
+        "validation_expectancy_bps": 1.0,
+        "validation_profit_factor": 1.1,
+        "validation_activation_rate": 0.1,
+    }
+    monkeypatch.setattr(
+        auto,
+        "_paper_bundle",
+        lambda: {
+            "expert_library": {
+                "experts": [expert],
+                "generators": {"-1:3600": Generator()},
+            },
+            "meta_model": {},
+            "calibrators": {},
+        },
+    )
+    monkeypatch.setattr(
+        auto,
+        "_live_micro_features",
+        lambda *_: {name: 0.1 for name in previous.MICRO_FEATURES},
+    )
+
+    def negative_score(
+        rows: pd.DataFrame, _model: dict[str, object], _calibrators: dict[str, object]
+    ) -> pd.DataFrame:
+        scored = rows.copy()
+        scored["raw_ev_bps"] = -0.5
+        scored["calibrated_ev_bps"] = -1.25
+        scored["probability_net_positive"] = 0.45
+        return scored
+
+    monkeypatch.setattr(auto, "_score", negative_score)
+    now = pd.Timestamp("2026-08-10T12:01:05Z")
+    context = pd.DataFrame(
+        [
+            {
+                **{name: 0.1 for name in auto.MODEL_FEATURES},
+                "available_at": now - pd.Timedelta(seconds=5),
+                "rolling_vwap": 60_000.0,
+            }
+        ]
+    )
+    l2 = pd.DataFrame(
+        [
+            {
+                "exchange_second": int((now - pd.Timedelta(seconds=6)).timestamp()),
+                "available_at": now - pd.Timedelta(seconds=5),
+            }
+        ]
+    )
+
+    result = auto.evaluate_live_actions(context, l2, now)
+
+    assert result["status"] == "READY_FLAT"
+    assert result["reason"] == "NO_POSITIVE_CALIBRATED_EV"
+    assert result["candidate"] is None
+    assert result["active_expert_count"] == 1
+    assert result["best_action"]["expert_id"] == "short-60m"
+    assert result["best_action"]["calibrated_ev_bps"] == -1.25
+
+
 def test_trade_breakdown_keeps_gross_costs_and_net_separate() -> None:
     trades = pd.DataFrame(
         {
@@ -214,9 +296,7 @@ def test_live_micro_features_match_the_historical_feature_definition() -> None:
             records.append(
                 {
                     "exchange_second": int((bucket_at + pd.Timedelta(seconds=second)).timestamp()),
-                    "available_at": (
-                        bucket_at + pd.Timedelta(seconds=second, milliseconds=100)
-                    ),
+                    "available_at": (bucket_at + pd.Timedelta(seconds=second, milliseconds=100)),
                     "buy_quote": 2.0,
                     "sell_quote": 1.0,
                     "trade_count": 1,
@@ -256,8 +336,5 @@ def test_live_micro_features_fail_closed_on_a_recent_missing_second() -> None:
         if second != 600
     ]
     assert (
-        auto._live_micro_features(
-            pd.DataFrame(records), start + pd.Timedelta(seconds=605)
-        )
-        is None
+        auto._live_micro_features(pd.DataFrame(records), start + pd.Timedelta(seconds=605)) is None
     )

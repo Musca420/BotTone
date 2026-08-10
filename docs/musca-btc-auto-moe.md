@@ -161,3 +161,25 @@ powershell -ExecutionPolicy Bypass -File scripts/run_musca_runtime.ps1
 La pagina operativa resta su `http://127.0.0.1:8080/?profile=musca-v5-binance`;
 il valore interno del profilo è mantenuto per compatibilità con i bookmark, ma
 l'interfaccia lo identifica come `MUSCA BTC · AUTO-MoE PAPER`.
+
+## Contratto runtime Binance verificato il 10 agosto 2026
+
+Il paper runtime usa Binance come unica venue di mercato e di esecuzione simulata:
+
+- candele USD-M chiuse a un minuto per lo stato Alpha;
+- book USD-M e aggTrades dal collector WebSocket supervisionato;
+- mark price, index price, funding e open interest dagli endpoint ufficiali;
+- fee account dall'endpoint firmato quando le credenziali sono configurate, altrimenti
+  il fallback Binance dichiarato nella configurazione;
+- ingresso a mercato sul primo book valido successivo al segnale;
+- uscita reduce-only simulata sul book osservato, con TP parziale, secondo target,
+  trailing non allargabile, time stop e funding al settlement.
+
+La UI distingue ora esplicitamente `TRADE`, `FLAT` e `WAIT`. `FLAT` significa dati
+completi ma nessun esperto attivo con EV calibrato netto positivo; non e una perdita e
+non viene contato come ordine. `WAIT` e riservato a dati o feature fail-closed. La UI
+non apre piu un collegamento Binance dal browser: grafici, mark, index e funding
+arrivano dal processo supervisionato, quindi funzionano anche via Tailscale/mobile.
+
+Il conto paper persistente e i dati di training non vengono azzerati dai riavvii. Il
+runtime resta intenzionalmente incapace di inviare ordini con denaro reale.
