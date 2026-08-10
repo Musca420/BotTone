@@ -12,6 +12,7 @@ def test_protocol_trades_only_altcoins_and_keeps_btc_as_context() -> None:
     assert policy.PROTOCOL["context_symbol"] == "BTCUSDT"
     assert policy.MONTHS[-1] == "2026-06"
     assert pd.Timestamp("2026-07-01T00:00:00Z") == policy.HOLDOUT_START
+    assert policy.PROTOCOL["event_cooldown_minutes"] == 3
 
 
 def test_dynamic_levels_cover_cost_and_remain_bounded() -> None:

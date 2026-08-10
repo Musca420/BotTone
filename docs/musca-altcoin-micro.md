@@ -55,6 +55,12 @@ Le feature dell'altcoin includono rendimenti multi-orizzonte, ATR/volatilità, t
 volume relativo, trade intensity, VWAP giornaliero e rolling, distanza e pendenza VWAP. Le feature
 BTC sono affiancate a beta, correlazione e rendimenti residui.
 
+Il modello non valuta ogni minuto. Genera una decisione soltanto sul fronte iniziale di uno di
+questi eventi causali: attraversamento, touch o rifiuto del rolling VWAP; restart momentum con
+flow; shock BTC con correlazione osservata; inversione del rendimento residuo; impulso di volume.
+Eventi entro tre minuti vengono accorpati. Questo evita di diluire il segnale con minuti privi di
+setup e conserva comunque una frontiera abbastanza ampia per cercare più trade quotidiani.
+
 Azioni LONG e SHORT preregistrate:
 
 | Piano | Orizzonte | Stop causale | Target minimo |
@@ -93,4 +99,3 @@ Gate per autorizzare un profilo paper:
 Un asset che fallisce resta `RESEARCH_ONLY_FLAT` senza impedire agli altri di passare. Testnet
 serve a verificare API e stato degli ordini; la redditività è valutata con dati reali Binance e
 un simulatore conservativo. Nessun risultato apre automaticamente l'holdout o autorizza live.
-

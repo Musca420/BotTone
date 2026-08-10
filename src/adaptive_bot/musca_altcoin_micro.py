@@ -52,7 +52,7 @@ PLANS = (
 )
 MAX_HORIZON_MINUTES = max(plan.horizon_minutes for plan in PLANS)
 
-FEATURES = (
+BASE_FEATURES = (
     "return_1m_bps",
     "return_3m_bps",
     "return_5m_bps",
@@ -93,9 +93,20 @@ FEATURES = (
     "weekday_cos",
 )
 ACTION_FEATURES = ("side", "target_bps", "stop_bps", "horizon_minutes")
+EVENT_FEATURES = (
+    "event_vwap_cross",
+    "event_vwap_touch",
+    "event_vwap_rejection",
+    "event_momentum_restart",
+    "event_btc_shock",
+    "event_residual_turn",
+    "event_volume_impulse",
+    "event_count",
+)
+FEATURES = (*BASE_FEATURES, *EVENT_FEATURES)
 
 PROTOCOL = {
-    "name": "musca_altcoin_micro_binance_v1",
+    "name": "musca_altcoin_micro_binance_v2_event_driven",
     "action_symbols": list(SYMBOLS),
     "context_symbol": "BTCUSDT",
     "data": "Binance USD-M official checksum-verified one-minute klines",
@@ -103,6 +114,8 @@ PROTOCOL = {
     "holdout_start": HOLDOUT_START.isoformat(),
     "features": list(FEATURES),
     "plans": [asdict(plan) for plan in PLANS],
+    "events": list(EVENT_FEATURES[:-1]),
+    "event_cooldown_minutes": 3,
     "directions": ["LONG", "SHORT"],
     "cost_bps": COST_BPS,
     "entry": "next one-minute open after feature availability",
@@ -258,6 +271,80 @@ def plan_levels(atr_bps: np.ndarray, plan: Plan, cost_bps: float) -> tuple[np.nd
     return target, stop
 
 
+def event_candidates(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    cost = COST_BPS[symbol]
+    distance = frame["rolling_vwap_distance_bps"]
+    zone = pd.Series(
+        np.maximum(0.5 * cost, 0.5 * frame["atr_1m_bps"]), index=frame.index
+    )
+    residual_std = (
+        frame["residual_return_1m_bps"].shift(1).rolling(240, min_periods=60).std()
+    )
+    momentum_threshold = pd.Series(
+        np.maximum(cost, 2 * frame["volatility_5m_bps"]), index=frame.index
+    )
+    residual_threshold = pd.Series(
+        np.maximum(cost, 2 * residual_std * np.sqrt(15)), index=frame.index
+    )
+    states = {
+        "event_vwap_cross": (
+            np.sign(distance).ne(np.sign(distance.shift(1)))
+            & frame["return_1m_bps"].abs().ge(0.5 * frame["atr_1m_bps"])
+            & frame["relative_volume"].ge(0.75)
+        ),
+        "event_vwap_touch": (
+            distance.abs().le(zone)
+            & distance.shift(1).abs().gt(zone.shift(1))
+            & np.sign(frame["return_1m_bps"]).eq(-np.sign(distance.shift(1)))
+            & (frame["flow_1m"] * np.sign(frame["return_1m_bps"])).gt(0)
+        ),
+        "event_vwap_rejection": (
+            distance.shift(1).abs().le(zone.shift(1))
+            & distance.abs().gt(zone)
+            & np.sign(frame["return_1m_bps"]).eq(np.sign(distance))
+            & (frame["flow_1m"] * np.sign(distance)).gt(0)
+        ),
+        "event_momentum_restart": (
+            frame["return_5m_bps"].abs().ge(momentum_threshold)
+            & np.sign(frame["return_1m_bps"]).eq(np.sign(frame["return_5m_bps"]))
+            & np.sign(frame["flow_1m"]).eq(np.sign(frame["return_5m_bps"]))
+            & frame["relative_volume"].ge(1)
+        ),
+        "event_btc_shock": (
+            frame["btc_shock_5m"].ge(3)
+            & frame["relative_volume"].ge(1)
+            & frame["btc_correlation_1h"].abs().ge(0.25)
+        ),
+        "event_residual_turn": (
+            frame["residual_return_15m_bps"].abs().ge(residual_threshold)
+            & np.sign(frame["residual_return_1m_bps"]).eq(
+                -np.sign(frame["residual_return_15m_bps"])
+            )
+        ),
+        "event_volume_impulse": (
+            frame["relative_volume"].ge(2)
+            & frame["return_1m_bps"].abs().ge(0.75 * frame["atr_1m_bps"])
+            & np.sign(frame["flow_1m"]).eq(np.sign(frame["return_1m_bps"]))
+        ),
+    }
+    edges = {
+        name: state & ~state.shift(1, fill_value=False) for name, state in states.items()
+    }
+    event_values = pd.DataFrame(edges, index=frame.index).astype(float)
+    active = event_values.any(axis=1).to_numpy()
+    keep = np.zeros(len(frame), dtype=bool)
+    previous = -3
+    for position, is_active in enumerate(active):
+        if is_active and position - previous >= 3:
+            keep[position] = True
+            previous = position
+    result = frame.copy()
+    for name in EVENT_FEATURES[:-1]:
+        result[name] = event_values[name]
+    result["event_count"] = event_values.sum(axis=1)
+    return result.loc[keep].copy()
+
+
 def barrier_outcomes(
     raw: pd.DataFrame,
     atr_bps: np.ndarray,
@@ -335,6 +422,7 @@ def build_matrix(symbol: str, *, resume: bool = True) -> pd.DataFrame:
             matrix[f"{stem}_exit_minutes"] = exit_minutes[:maximum_rows]
             matrix[f"{stem}_target_bps"] = target[:maximum_rows]
             matrix[f"{stem}_stop_bps"] = stop[:maximum_rows]
+    matrix = event_candidates(matrix, symbol)
     finite = np.isfinite(matrix.loc[:, FEATURES].to_numpy(float)).all(axis=1)
     label_columns = [
         column
@@ -658,7 +746,7 @@ def train_symbol(
         "policy_selection": _period(matrix, "2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z"),
         "audit": _period(matrix, "2026-05-01T00:00:00Z", "2026-07-01T00:00:00Z"),
     }
-    if min(len(rows) for rows in split.values()) < 10_000:
+    if min(len(rows) for rows in split.values()) < 1_000:
         raise ValueError(f"{symbol} has insufficient complete causal minutes")
     candidates: dict[str, dict[str, Any]] = {}
     for number, kind in enumerate(("ridge", "xgboost"), start=1):
