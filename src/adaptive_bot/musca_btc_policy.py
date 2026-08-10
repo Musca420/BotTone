@@ -1493,6 +1493,15 @@ def walk_forward(
         candidate_metrics: dict[str, dict[str, float]] = {}
         for kind_number, kind in enumerate(kinds, start=1):
             internal = "xgboost" if kind == "xgboost_cuda" else kind
+            _status(
+                "model_fit",
+                f"fold {number}/{len(folds)} {kind_number}/{len(kinds)} {kind}",
+                42 + 36 * ((number - 1) + (kind_number - 1) / len(kinds)) / len(folds),
+                fold=f"{number}/{len(folds)}",
+                model=kind,
+                fit_rows=len(fit),
+                gpu=_gpu_info(),
+            )
             head = fit_probability_head(internal, fit)
             calibration_head = fit_calibration(head, inner)
             scored_inner = score_actions(inner, head, calibration_head)
