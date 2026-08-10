@@ -346,6 +346,12 @@ def _read_protocol_parquet(path: Path) -> pd.DataFrame:
     return pd.read_parquet(path)
 
 
+def _attach_protocol(rows: pd.DataFrame) -> None:
+    rows["protocol_hash"] = pd.Categorical.from_codes(
+        np.zeros(len(rows), dtype=np.int8), categories=pd.Index([PROTOCOL_HASH])
+    )
+
+
 def _load_source() -> pd.DataFrame:
     rows = pd.read_parquet(SOURCE)
     rows["timestamp"] = pd.to_datetime(rows["timestamp"], utc=True)
@@ -624,7 +630,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     ].to_numpy(np.float32)
     matrix = matrix.loc[np.isfinite(numeric).all(axis=1)].copy()
     matrix.loc[:, numeric_columns] = matrix.loc[:, numeric_columns].astype(np.float32)
-    matrix["protocol_hash"] = PROTOCOL_HASH
+    _attach_protocol(matrix)
     MATRIX.parent.mkdir(parents=True, exist_ok=True)
     temporary = MATRIX.with_suffix(".parquet.tmp")
     matrix.to_parquet(temporary, index=False)
@@ -1393,7 +1399,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     oof = _read_protocol_parquet(oof_path)
     if oof.empty:
         oof = _oof_actions(matrix, funding)
-        oof["protocol_hash"] = PROTOCOL_HASH
+        _attach_protocol(oof)
         oof_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = oof_path.with_suffix(".parquet.tmp")
         oof.to_parquet(temporary, index=False)
@@ -1414,7 +1420,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     if future_actions.empty:
         future_predictions = _predict_experts(future_rows, final_pool)
         future_actions = _action_rows(future_rows, future_predictions, funding)
-        future_actions["protocol_hash"] = PROTOCOL_HASH
+        _attach_protocol(future_actions)
         temporary = future_actions_path.with_suffix(".parquet.tmp")
         future_actions.to_parquet(temporary, index=False)
         temporary.replace(future_actions_path)
