@@ -378,6 +378,32 @@ def _load_micro_source() -> pd.DataFrame:
     return rows
 
 
+def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
+    months: dict[str, Any] = {}
+    file_hashes: list[str] = []
+    source_month = source["timestamp"].dt.strftime("%Y-%m")
+    for month in MICRO_MONTHS:
+        path = MICRO_ROOT / f"BTCUSDT-aggTrades-5s-{month}.parquet"
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(8 * 1024 * 1024):
+                digest.update(chunk)
+        sha256 = digest.hexdigest()
+        file_hashes.append(sha256)
+        mask = source_month.eq(month)
+        months[month] = {
+            "rows_5s": int(mask.sum()),
+            "parquet_bytes": path.stat().st_size,
+            "parquet_sha256": sha256,
+        }
+    return {
+        "provider": "Binance official public data",
+        "download_archive_checksum_verified": True,
+        "months": months,
+        "combined_parquet_sha256": hashlib.sha256("".join(file_hashes).encode()).hexdigest(),
+    }
+
+
 def _forward_extreme(values: np.ndarray, steps: int, operation: str) -> np.ndarray:
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=steps)
     future = pd.Series(values).shift(-1).rolling(indexer, min_periods=steps)
@@ -1115,6 +1141,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     _status("start", "BTCUSDT Mixture of Experts", 0)
     matrix = build_matrix(force=force_matrix)
     source = _load_micro_source()
+    source_manifest = _micro_manifest(source)
     oof_path = CHECKPOINTS / "oof_actions.parquet"
     if oof_path.exists():
         oof = pd.read_parquet(oof_path)
@@ -1245,6 +1272,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "protocol_hash": PROTOCOL_HASH,
         "created_at": datetime.now(UTC).isoformat(),
         "symbol": SYMBOL,
+        "source_manifest": source_manifest,
         "matrix_rows": len(matrix),
         "oof_action_rows": len(oof),
         "meta_fit_action_rows": len(meta_fit),
@@ -1295,6 +1323,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "protocol": PROTOCOL,
         "protocol_hash": PROTOCOL_HASH,
         "expert_pool": final_pool,
+        "source_manifest": source_manifest,
         "meta_model": meta_models[ev_champion],
         "ranker": active_ranker,
         "calibrators": calibrators,
