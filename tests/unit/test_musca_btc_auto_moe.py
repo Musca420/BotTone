@@ -109,8 +109,8 @@ def test_flat_is_neutral_when_every_expert_has_negative_ev() -> None:
 
 def test_chronology_keeps_discovery_gate_and_audit_separate() -> None:
     assert auto.DISCOVERY_FIT_END < auto.LIBRARY_FREEZE_END
-    assert auto.LIBRARY_FREEZE_END < auto.GATE_FIT_END
-    assert auto.GATE_FIT_END < auto.MODEL_AUDIT_END
-    assert auto.MODEL_AUDIT_END < auto.CALIBRATION_END
+    assert auto.LIBRARY_FREEZE_END < auto.GATE_TUNE_END
+    assert auto.GATE_TUNE_END < auto.GATE_FIT_END
+    assert auto.GATE_FIT_END < auto.CALIBRATION_END
     assert auto.CALIBRATION_END < auto.HISTORICAL_AUDIT_END
     assert auto.HISTORICAL_AUDIT_END < auto.FUTURE_HOLDOUT_START

@@ -29,11 +29,11 @@ REPORT = Path("data/reports/musca_btc_auto_moe.json")
 STATUS = Path("data/reports/musca_btc_auto_moe.status.json")
 BUNDLE = Path("data/models/musca_btc_auto_moe/research_bundle.joblib")
 
-DISCOVERY_FIT_END = pd.Timestamp("2025-10-01T00:00:00Z")
-LIBRARY_FREEZE_END = pd.Timestamp("2026-01-01T00:00:00Z")
-GATE_FIT_END = pd.Timestamp("2026-03-01T00:00:00Z")
-MODEL_AUDIT_END = pd.Timestamp("2026-04-01T00:00:00Z")
-CALIBRATION_END = pd.Timestamp("2026-05-01T00:00:00Z")
+DISCOVERY_FIT_END = pd.Timestamp("2026-01-01T00:00:00Z")
+LIBRARY_FREEZE_END = pd.Timestamp("2026-03-01T00:00:00Z")
+GATE_TUNE_END = pd.Timestamp("2026-04-01T00:00:00Z")
+GATE_FIT_END = pd.Timestamp("2026-05-01T00:00:00Z")
+CALIBRATION_END = pd.Timestamp("2026-06-01T00:00:00Z")
 HISTORICAL_AUDIT_END = base.HISTORICAL_AUDIT_END
 FUTURE_HOLDOUT_START = base.FUTURE_HOLDOUT_START
 
@@ -78,7 +78,7 @@ PROTOCOL = {
         "maximum_signal_jaccard": MAX_SIGNAL_JACCARD,
         "validation_profit_factor": 1.05,
         "validation_cost_stress": 1.5,
-        "positive_validation_months": "at least 2 of 3",
+        "positive_validation_months": "both January and February 2026",
     },
     "phase_2": {
         "inputs": "forward-OOS expert activations, frozen expert metadata and regime context",
@@ -97,8 +97,8 @@ PROTOCOL = {
     "chronology": {
         "discovery_fit_end": DISCOVERY_FIT_END.isoformat(),
         "library_freeze_end": LIBRARY_FREEZE_END.isoformat(),
+        "gate_tune_end": GATE_TUNE_END.isoformat(),
         "gate_fit_end": GATE_FIT_END.isoformat(),
-        "model_audit_end": MODEL_AUDIT_END.isoformat(),
         "calibration_end": CALIBRATION_END.isoformat(),
         "historical_audit_end": HISTORICAL_AUDIT_END.isoformat(),
         "future_holdout_start": FUTURE_HOLDOUT_START.isoformat(),
@@ -558,57 +558,61 @@ def _timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
     return np.asarray(1.0 / counts, dtype=float)
 
 
-def _fit_gate(rows: pd.DataFrame) -> dict[str, Any]:
+def _fit_gate(
+    rows: pd.DataFrame, candidates: tuple[str, ...] = ("ridge", "xgboost")
+) -> dict[str, Any]:
     x = _gate_x(rows)
     y = rows["net_bps"].to_numpy(np.float32)
     positive = (y > 0).astype(int)
     weights = _timestamp_weights(rows)
-    ridge_reg = make_pipeline(StandardScaler(), Ridge(alpha=20.0)).fit(
-        x, y, ridge__sample_weight=weights
-    )
-    ridge_cls = make_pipeline(
-        StandardScaler(), LogisticRegression(C=0.1, max_iter=2_000, random_state=20260820)
-    ).fit(x, positive, logisticregression__sample_weight=weights)
-    xgb_reg: list[Any] = []
-    xgb_cls: list[Any] = []
-    for number, seed in enumerate(GATE_SEEDS, start=1):
-        xgb_reg.append(
-            XGBRegressor(
-                objective="reg:squarederror",
-                tree_method="hist",
-                device="cuda",
-                n_estimators=220,
-                learning_rate=0.03,
-                max_depth=5,
-                min_child_weight=100,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_lambda=30.0,
-                n_jobs=4,
-                random_state=seed,
-            ).fit(x, y, sample_weight=weights, verbose=False)
+    models: dict[str, Any] = {}
+    if "ridge" in candidates:
+        ridge_reg = make_pipeline(StandardScaler(), Ridge(alpha=20.0)).fit(
+            x, y, ridge__sample_weight=weights
         )
-        xgb_cls.append(
-            XGBClassifier(
-                objective="binary:logistic",
-                tree_method="hist",
-                device="cuda",
-                n_estimators=220,
-                learning_rate=0.03,
-                max_depth=5,
-                min_child_weight=100,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_lambda=30.0,
-                n_jobs=4,
-                random_state=seed,
-            ).fit(x, positive, sample_weight=weights, verbose=False)
-        )
-        _status("gating", f"XGBoost challenger {number}/{len(GATE_SEEDS)}", 76 + 3 * number)
-    return {
-        "ridge": {"regressors": [ridge_reg], "classifiers": [ridge_cls]},
-        "xgboost": {"regressors": xgb_reg, "classifiers": xgb_cls},
-    }
+        ridge_cls = make_pipeline(
+            StandardScaler(), LogisticRegression(C=0.1, max_iter=2_000, random_state=20260820)
+        ).fit(x, positive, logisticregression__sample_weight=weights)
+        models["ridge"] = {"regressors": [ridge_reg], "classifiers": [ridge_cls]}
+    if "xgboost" in candidates:
+        xgb_reg: list[Any] = []
+        xgb_cls: list[Any] = []
+        for number, seed in enumerate(GATE_SEEDS, start=1):
+            xgb_reg.append(
+                XGBRegressor(
+                    objective="reg:squarederror",
+                    tree_method="hist",
+                    device="cuda",
+                    n_estimators=220,
+                    learning_rate=0.03,
+                    max_depth=5,
+                    min_child_weight=100,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_lambda=30.0,
+                    n_jobs=4,
+                    random_state=seed,
+                ).fit(x, y, sample_weight=weights, verbose=False)
+            )
+            xgb_cls.append(
+                XGBClassifier(
+                    objective="binary:logistic",
+                    tree_method="hist",
+                    device="cuda",
+                    n_estimators=220,
+                    learning_rate=0.03,
+                    max_depth=5,
+                    min_child_weight=100,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    reg_lambda=30.0,
+                    n_jobs=4,
+                    random_state=seed,
+                ).fit(x, positive, sample_weight=weights, verbose=False)
+            )
+            _status("gating", f"XGBoost challenger {number}/{len(GATE_SEEDS)}", 76 + 3 * number)
+        models["xgboost"] = {"regressors": xgb_reg, "classifiers": xgb_cls}
+    return models
 
 
 def _raw_gate(rows: pd.DataFrame, model: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
@@ -753,19 +757,19 @@ def train(*, force: bool = False) -> dict[str, Any]:
         _status("complete", cast(str, report["verdict"]), 100)
         return report
     timestamp = pd.to_datetime(actions["entry_timestamp"], utc=True)
-    gate_fit = actions.loc[timestamp.lt(GATE_FIT_END - base.PURGE)].copy()
+    gate_tune = actions.loc[timestamp.lt(GATE_TUNE_END - base.PURGE)].copy()
     model_audit = actions.loc[
-        timestamp.ge(GATE_FIT_END) & timestamp.lt(MODEL_AUDIT_END - base.PURGE)
+        timestamp.ge(GATE_TUNE_END) & timestamp.lt(GATE_FIT_END - base.PURGE)
     ].copy()
     calibration = actions.loc[
-        timestamp.ge(MODEL_AUDIT_END) & timestamp.lt(CALIBRATION_END - base.PURGE)
+        timestamp.ge(GATE_FIT_END) & timestamp.lt(CALIBRATION_END - base.PURGE)
     ].copy()
     historical_audit = actions.loc[
         timestamp.ge(CALIBRATION_END) & timestamp.lt(HISTORICAL_AUDIT_END - base.PURGE)
     ].copy()
-    models = _fit_gate(gate_fit)
+    candidate_models = _fit_gate(gate_tune)
     candidate_metrics = {
-        name: _gate_metrics(model_audit, models[name]) for name in ("ridge", "xgboost")
+        name: _gate_metrics(model_audit, candidate_models[name]) for name in ("ridge", "xgboost")
     }
     ridge = candidate_metrics["ridge"]
     xgb = candidate_metrics["xgboost"]
@@ -777,8 +781,10 @@ def train(*, force: bool = False) -> dict[str, Any]:
         )
         else "ridge"
     )
-    calibrators = _fit_calibrators(calibration, models[champion])
-    audit_scored = _score(historical_audit, models[champion], calibrators)
+    gate_fit = actions.loc[timestamp.lt(GATE_FIT_END - base.PURGE)].copy()
+    champion_model = _fit_gate(gate_fit, (champion,))[champion]
+    calibrators = _fit_calibrators(calibration, champion_model)
+    audit_scored = _score(historical_audit, champion_model, calibrators)
     trades = _execute(audit_scored)
     metrics = base._metrics(trades, CALIBRATION_END, HISTORICAL_AUDIT_END)
     gates = base._audit_gates(metrics)
@@ -786,11 +792,12 @@ def train(*, force: bool = False) -> dict[str, Any]:
     report.update(
         {
             "forward_action_rows": len(actions),
+            "gate_tune_rows": len(gate_tune),
             "gate_fit_rows": len(gate_fit),
             "model_audit_rows": len(model_audit),
             "calibration_rows": len(calibration),
             "historical_audit_rows": len(historical_audit),
-            "library_spa_pvalue": _library_spa(actions.loc[timestamp.lt(GATE_FIT_END)]),
+            "library_spa_pvalue": _library_spa(gate_tune),
             "candidate_metrics": candidate_metrics,
             "gating_champion": champion,
             "historical_audit": {"metrics": metrics, "gates": gates},
@@ -805,7 +812,7 @@ def train(*, force: bool = False) -> dict[str, Any]:
         "protocol": PROTOCOL,
         "protocol_hash": PROTOCOL_HASH,
         "expert_library": library,
-        "meta_model": models[champion],
+        "meta_model": champion_model,
         "calibrators": calibrators,
         "gating_champion": champion,
         "historical_pass": historical_pass,
