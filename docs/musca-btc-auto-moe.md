@@ -34,7 +34,7 @@ Un candidato viene congelato soltanto se:
 - expectancy terminale netta positiva sia nel fit sia nella validazione;
 - profit factor di validazione almeno 1,05;
 - expectancy non negativa con costi 1,5×;
-- almeno due dei tre mesi di validazione hanno expectancy positiva;
+- entrambi i mesi di validazione hanno expectancy positiva;
 - non duplica un esperto già scelto e ha Jaccard dei segnali inferiore a 0,90 rispetto agli esperti
   dello stesso lato e orizzonte.
 
@@ -63,16 +63,18 @@ più alta; se la migliore EV non è positiva, l'azione è `FLAT`, con valore neu
 
 ## Cronologia sigillata
 
-- generazione degli alberi: gennaio–settembre 2025;
-- selezione e congelamento libreria: ottobre–dicembre 2025;
-- fit del gate: gennaio–febbraio 2026;
-- confronto Ridge/XGBoost: marzo 2026;
-- calibrazione: aprile 2026;
-- audit storico: maggio–luglio 2026;
+- generazione degli alberi: tutto il 2025;
+- selezione e congelamento libreria: gennaio–febbraio 2026;
+- primo fit del gate: marzo 2026;
+- confronto Ridge/XGBoost: aprile 2026;
+- refit del champion su marzo–aprile 2026;
+- calibrazione: maggio 2026;
+- audit storico mensile e aggregato: giugno–luglio 2026;
 - holdout futuro intoccabile: dal 10 agosto 2026.
 
-Il purge è pari a sei ore. Nessun risultato successivo può cambiare la libreria, i modelli, la
-soglia `EV > 0` o le regole di gestione.
+Il purge è pari a sei ore. I mesi usati per provare la libreria non partecipano alla generazione
+degli esperti; aprile confronta i modelli ma non modifica la libreria; giugno e luglio non possono
+cambiare libreria, champion, calibrazione, soglia `EV > 0` o regole di gestione.
 
 ## Economia e gate
 
