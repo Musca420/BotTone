@@ -287,35 +287,51 @@ def _jaccard(left: np.ndarray, right: np.ndarray) -> float:
     return intersection / union if union else 1.0
 
 
+def _packed_jaccard(
+    left: np.ndarray, right: np.ndarray, left_count: int, right_count: int
+) -> float:
+    intersection = int(np.bitwise_count(np.bitwise_and(left, right)).sum())
+    union = left_count + right_count - intersection
+    return intersection / union if union else 1.0
+
+
 def _select_diverse(
     candidates: list[dict[str, Any]], signals: dict[str, np.ndarray]
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
     selected: list[dict[str, Any]] = []
+    selected_by_action: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
     rejected: Counter[str] = Counter()
     seen_signatures: set[str] = set()
+    packed = {key: np.packbits(signal) for key, signal in signals.items()}
+    counts = {key: int(signal.sum()) for key, signal in signals.items()}
     for candidate in sorted(
         candidates, key=lambda value: float(value["robust_score"]), reverse=True
     ):
         signature = cast(str, candidate["signal_signature"])
+        expert_id = cast(str, candidate["expert_id"])
         if signature in seen_signatures:
             rejected["duplicate_signal"] += 1
             continue
-        peers = [
-            expert
-            for expert in selected
-            if expert["side"] == candidate["side"]
-            and expert["horizon_seconds"] == candidate["horizon_seconds"]
-        ]
-        if any(
-            _jaccard(
-                signals[cast(str, peer["expert_id"])], signals[cast(str, candidate["expert_id"])]
-            )
-            >= MAX_SIGNAL_JACCARD
-            for peer in peers
-        ):
+        action = (int(candidate["side"]), int(candidate["horizon_seconds"]))
+        correlated = False
+        for peer in selected_by_action[action]:
+            peer_id = cast(str, peer["expert_id"])
+            smaller, larger = sorted((counts[peer_id], counts[expert_id]))
+            if not larger or smaller / larger < MAX_SIGNAL_JACCARD:
+                continue
+            if (
+                _packed_jaccard(
+                    packed[peer_id], packed[expert_id], counts[peer_id], counts[expert_id]
+                )
+                >= MAX_SIGNAL_JACCARD
+            ):
+                correlated = True
+                break
+        if correlated:
             rejected["correlated_signal"] += 1
             continue
         selected.append(candidate)
+        selected_by_action[action].append(candidate)
         seen_signatures.add(signature)
     return selected, rejected
 
@@ -384,6 +400,11 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
                     break
             else:
                 empty_batches = 0
+        _status(
+            "expert_diversity",
+            f"azione {action_number}/{len(actions)}: {len(action_candidates)} regole valide",
+            5 + 45 * (action_number - 0.25) / len(actions),
+        )
         selected, _ = _select_diverse(action_candidates, action_signals)
         signals.update(action_signals)
         saturation[key] = {
