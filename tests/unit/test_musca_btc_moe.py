@@ -185,5 +185,23 @@ def test_gate_accepts_normal_losing_trades_when_aggregate_is_positive() -> None:
     assert all(moe._audit_gates(value).values())
 
 
+def test_negative_economics_cannot_create_operational_policy() -> None:
+    value = {
+        "trades": 500,
+        "trades_per_day": 5.0,
+        "expectancy_bps": -0.01,
+        "profit_factor": 1.3,
+        "positive_calendar_days": 0.6,
+        "max_drawdown": 0.08,
+        "bootstrap_lcb_95_bps": -0.2,
+        "spa_pvalue": 0.01,
+        "risk_budget_violations": 0,
+    }
+    gates = moe._audit_gates(value)
+    assert not gates["expectancy"]
+    assert not gates["bootstrap_lcb"]
+    assert not all(gates.values())
+
+
 def test_final_holdout_starts_after_historical_audit() -> None:
     assert moe.HISTORICAL_AUDIT_END < moe.FUTURE_HOLDOUT_START
