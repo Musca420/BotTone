@@ -124,7 +124,7 @@ def test_target_probability_means_target_before_stop() -> None:
         def predict(self, values: np.ndarray) -> np.ndarray:
             return values
 
-    rows = pd.DataFrame({name: [0.0] for name in policy.ALPHA_FEATURES})
+    rows = pd.DataFrame({name: [0.0] for name in policy.MODEL_FEATURES})
     head: dict[str, Any] = {
         "classifier": Classifier(),
         "conditional": {0: Regressor(10), 1: Regressor(-10), 2: Regressor(0)},
@@ -236,6 +236,7 @@ def test_every_chronological_boundary_can_purge_by_actual_exit() -> None:
 def test_flat_fold_is_not_mislabeled_as_calibration_failure() -> None:
     economics = {"has_positive_unconditional_action": True, "oracle_mean_net_bps": 1.0}
     metrics = {
+        "trades": policy.MINIMUM_OOS_TRADES,
         "expectancy_bps": 1.0,
         "daily_lcb_95": 0.0001,
         "weekly_lcb_95": 0.0001,
@@ -289,6 +290,139 @@ def test_four_week_selection_does_not_require_twenty_week_bootstrap() -> None:
     }
     assert all(policy.selection_gates(metrics).values())
     assert not policy.policy_gates(metrics)["lower_confidence_bound_positive"]
+
+
+def test_fold_experts_are_filtered_only_after_managed_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(policy, "MINIMUM_EXPERT_OPPORTUNITIES", 2)
+    leaves = np.asarray([[1], [1], [2], [2]])
+    net = np.asarray([10.0, 5.0, -10.0, -5.0])
+    event = np.asarray([policy.OUTCOME_TARGET, policy.OUTCOME_TARGET, policy.OUTCOME_STOP, 2])
+    _, catalog = policy._leaf_statistics(
+        leaves,
+        net,
+        event,
+        fold_scope="fold-a",
+        side=1,
+        horizon=300,
+    )
+    losing = next(item for item in catalog if item["leaf"] == 2)
+    assert losing["managed_outcomes_evaluated"] is True
+    assert losing["managed_expectancy_bps"] < 0
+    assert losing["eligible_after_managed_evaluation"] is True
+    assert losing["elimination_reason"] is None
+    assert all(item["terminal_return_prefilter"] is False for item in catalog)
+
+
+def test_side_specific_threshold_does_not_let_blocked_long_hide_short() -> None:
+    entry = pd.Timestamp("2026-01-01T10:00:00Z")
+    common = {
+        "actual_entry_timestamp": [entry, entry],
+        "exit_timestamp": [entry + pd.Timedelta(minutes=1)] * 2,
+        "p_target": [0.6, 0.6],
+        "expert_id": [policy.expert_id(1, 60), policy.expert_id(-1, 60)],
+        "horizon_seconds": [60, 60],
+        "stop_bps": [50.0, 50.0],
+        "net_bps": [20.0, 10.0],
+        "funding_bps": [0.0, 0.0],
+        "stress_1_5x_bps": [16.0, 6.0],
+        "stress_2x_bps": [12.0, 2.0],
+        "time_to_target_seconds": [-1, -1],
+        "exit_seconds": [60, 60],
+        "outcome": ["TARGET", "TARGET"],
+    }
+    scored = pd.DataFrame(
+        common | {"calibrated_ev_bps": [5.0, 3.0], "side": [1, -1]}
+    )
+    trades, _ = policy.sequential_replay(scored, {1: 10.0, -1: 0.0}, 8.0)
+    assert len(trades) == 1
+    assert trades.iloc[0]["side"] == -1
+
+
+def test_model_features_exclude_legacy_terminal_expert_outputs() -> None:
+    assert not set(policy.MODEL_FEATURES).intersection(policy.base.EXPERT_COLUMNS)
+    assert set(policy.FOLD_EXPERT_FEATURES).issubset(policy.MODEL_FEATURES)
+
+
+def test_fold_expert_application_does_not_read_future_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Generator:
+        def apply(self, values: np.ndarray) -> np.ndarray:
+            return np.where(values[:, :1] >= 0, 1, 2)
+
+        def predict(self, values: np.ndarray) -> np.ndarray:
+            return values[:, 0]
+
+    monkeypatch.setattr(policy, "MINIMUM_EXPERT_OPPORTUNITIES", 2)
+    leaves = np.asarray([[1], [1], [2], [2]])
+    statistics, _ = policy._leaf_statistics(
+        leaves,
+        np.asarray([10.0, 5.0, -10.0, -5.0]),
+        np.asarray([0, 0, 1, 2]),
+        fold_scope="fold-a",
+        side=1,
+        horizon=300,
+    )
+    rows = pd.DataFrame({name: [1.0, -1.0] for name in policy.base.GATING_CONTEXT})
+    rows["side"] = 1
+    rows["horizon_seconds"] = 300
+    rows["expert_id"] = policy.expert_id(1, 300)
+    library = {
+        "fold_scope": "fold-a",
+        "groups": {
+            (1, 300): {
+                "model": Generator(),
+                "statistics": statistics,
+                "fallback": {
+                    "mean": 0.0,
+                    "q90": 0.0,
+                    "lcb": 0.0,
+                    "positive_fraction": 0.5,
+                    "target_rate": 0.5,
+                    "stop_rate": 0.5,
+                    "count": 4,
+                },
+            }
+        },
+    }
+    transformed = policy.apply_fold_expert_library(rows, library)
+    assert transformed["managed_expert_mean_bps"].tolist() == [7.5, -7.5]
+    assert np.isfinite(transformed.loc[:, policy.FOLD_EXPERT_FEATURES]).all().all()
+
+
+def test_policy_selection_allows_losing_trades_when_net_equity_is_positive() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    entries = [start, start + pd.Timedelta(minutes=2)]
+    scored = pd.DataFrame(
+        {
+            "actual_entry_timestamp": entries,
+            "exit_timestamp": [value + pd.Timedelta(minutes=1) for value in entries],
+            "calibrated_ev_bps": [5.0, 5.0],
+            "p_target": [0.4, 0.7],
+            "expert_id": [policy.expert_id(1, 60)] * 2,
+            "side": [1, 1],
+            "horizon_seconds": [60, 60],
+            "stop_bps": [50.0, 50.0],
+            "net_bps": [-10.0, 20.0],
+            "funding_bps": [0.0, 0.0],
+            "stress_1_5x_bps": [-14.0, 16.0],
+            "stress_2x_bps": [-18.0, 12.0],
+            "time_to_target_seconds": [-1, 30],
+            "exit_seconds": [60, 60],
+            "outcome": ["STOP", "TARGET"],
+        }
+    )
+    fee = policy.FeeContract(2.0, 4.0, 0.0, "test")
+    threshold, frontier = policy._choose_frequency_threshold(
+        scored, fee, start, start + pd.Timedelta(days=1)
+    )
+    assert threshold == 0.0
+    selected = next(item for item in frontier if item["threshold_bps"] == threshold)
+    assert selected["metrics"]["trades"] == 2
+    assert selected["metrics"]["win_rate"] == 0.5
+    assert selected["final_statistical_gates_applied"] is False
 
 
 def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:

@@ -1,5 +1,33 @@
 # Musca BTC Binance — canonical policy challenger
 
+## Eight-point correction (canonical, no new version)
+
+This challenger now implements the complete structural correction requested for the final Binance
+BTC run:
+
+1. every outer-fold fit generates thousands of context experts from all XGBRF tree leaves for
+   each LONG/SHORT and managed horizon; no terminal-return economics filter is used;
+2. every leaf is evaluated on the exact one-second TP1/TP2/stop/trailing/timeout outcome already
+   used by replay;
+3. exclusion happens only after managed evaluation and only when support is below 100 fit
+   opportunities; losing experts remain valid candidates because they can describe regimes to
+   avoid;
+4. probability, conditional-return and calibration heads are trained independently for LONG and
+   SHORT;
+5. each decision identifies a fold-local expert, side, horizon and dynamic management plan;
+6. the four-week selection window maximizes compounded net equity subject only to the Risk Engine
+   and the 8% drawdown ceiling; it does not apply final PF, LCB or positive-day gates;
+7. LCB, PF, drawdown, active-day, SPA/Reality Check, PBO and DSR controls are applied only to the
+   concatenated, untouched outer tests;
+8. losing trades and losing days are permitted. An entry needs positive calibrated EV and risk
+   approval, not certainty that the individual trade will win.
+
+The selector no longer reads the old `expert_*` columns derived from terminal outcomes. Fold
+catalogs and resumable models are written under `data/ml/musca_btc_policy/fold_experts/`.
+
+Promotion requires at least 300 aggregate OOS trades and at least 100 OOS trades for an enabled
+side. These are sample-size safeguards, not a claim that crypto returns must be perfectly stable.
+
 ## Scope and status
 
 This is the only active challenger after the frozen Auto-MoE discovery control. It trades only
@@ -58,11 +86,11 @@ Risk Engine veto. Individual losing trades and losing days are allowed.
 ## Validation
 
 Every outer fold has an expanding fit, two weeks of inner probability calibration, a subsequent
-two-week model audit, four weeks of final calibration, four weeks of policy/frequency selection
-and four weeks of test. Every boundary purges on the actual managed exit timestamp. Thresholds
-are preregistered; the policy chooses the highest frequency that passes the economic gates on the
-selection window, without a trade quota. A fold that selects no entry threshold is a valid FLAT
-period and is judged through the aggregate stability gates, not mislabeled as a calibration error.
+two-week model audit, four weeks of final calibration, four weeks of policy/equity selection and
+four weeks of test. Every boundary purges on the actual managed exit timestamp. Thresholds are
+preregistered. LONG and SHORT choose their thresholds independently by maximum compounded net
+equity while respecting risk; no final statistical gate or trade quota is imposed on this short
+selection window. A fold that selects no positive-utility threshold is a valid FLAT period.
 
 The report includes daily and weekly block-bootstrap lower bounds, the complete threshold
 frontier, SPA/Reality Check over that frontier, PBO across chronological slices and DSR adjusted
@@ -102,6 +130,9 @@ are atomic checkpoints, so `--resume` does not repeat completed work.
 - `data/reports/musca_btc_policy.status.json` — live progress;
 - `data/models/musca_btc_policy/research_bundle.joblib` — research-paper model, calibrators and
   selected threshold.
+
+Fold-local expert checkpoints and their complete managed-outcome catalogs are stored in
+`data/ml/musca_btc_policy/fold_experts/`.
 
 ## Anti-repetition ledger
 

@@ -73,9 +73,36 @@ GLOBAL_PROTOCOL_FLOOR = 53
 GLOBAL_EXPERT_FLOOR = 7_691
 INNER_CALIBRATION_WEEKS = 2
 INNER_MODEL_AUDIT_WEEKS = 2
+MINIMUM_EXPERT_OPPORTUNITIES = 100
+MINIMUM_OOS_TRADES = 300
+MINIMUM_SIDE_OOS_TRADES = 100
+EXPERT_CATALOG_ROOT = ROOT / "fold_experts"
 LEGACY_LABEL_PROTOCOL_HASHES = {"a20eb033eb076bfd9d0019e0bbb3e3956037b9ffdd28f618400f991494fac258"}
 
-ALPHA_FEATURES = base.META_FEATURES
+ALPHA_FEATURES = (
+    *base.GATING_CONTEXT,
+    "side",
+    "horizon_fraction",
+    "target_1_bps",
+    "target_2_bps",
+    "stop_bps",
+    "trailing_bps",
+    "predicted_favorable_q50_bps",
+    "predicted_favorable_q75_bps",
+    "predicted_adverse_q75_bps",
+)
+FOLD_EXPERT_FEATURES = (
+    "managed_expert_mean_bps",
+    "managed_expert_q90_bps",
+    "managed_expert_best_lcb_bps",
+    "managed_expert_dispersion_bps",
+    "managed_expert_positive_fraction",
+    "managed_expert_target_rate",
+    "managed_expert_stop_rate",
+    "managed_expert_log_opportunities",
+    "managed_generator_score_bps",
+)
+MODEL_FEATURES = (*ALPHA_FEATURES, *FOLD_EXPERT_FEATURES)
 STATE_FEATURES = (
     "daily_pnl_fraction",
     "risk_remaining_fraction",
@@ -117,6 +144,7 @@ PROTOCOL = {
         "path_resolution_seconds": 1,
         "features": str(base.SOURCE),
         "parent_actions": [str(path) for path in PARENT_ACTIONS],
+        "legacy_terminal_expert_outputs_used_by_selector": False,
         "feature_availability": "available_at <= decision; entry at first later trade",
     },
     "execution": {
@@ -146,6 +174,14 @@ PROTOCOL = {
         "challenger": "XGBoost CUDA",
         "challenger_rule": "strictly better Brier, EV calibration, EV MAE and decision regret",
     },
+    "fold_local_experts": {
+        "generator": "XGBRFRegressor CUDA trained on exact managed net_bps",
+        "candidate": "every tree leaf for LONG/SHORT and every horizon",
+        "terminal_prefilter": False,
+        "minimum_support_after_managed_evaluation": MINIMUM_EXPERT_OPPORTUNITIES,
+        "compression": "active-leaf managed statistics plus deterministic winning expert",
+        "training_scope": "outer-fold fit only",
+    },
     "controller": {
         "actions": ["WAIT", "ENTER_LONG", "ENTER_SHORT", "HOLD", "CLOSE", "TIGHTEN_STOP"],
         "maximum_positions": 1,
@@ -167,9 +203,11 @@ PROTOCOL = {
         "purge": "actual exit timestamp",
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
-        "frequency": "highest sustainable frequency on policy-selection data; no quota",
+        "frequency": "maximum net log-equity utility on policy-selection data; no quota",
     },
     "gates": {
+        "minimum_oos_trades": MINIMUM_OOS_TRADES,
+        "minimum_side_oos_trades": MINIMUM_SIDE_OOS_TRADES,
         "expectancy_net_bps": 0,
         "bootstrap_lcb_bps": 0,
         "profit_factor": 1.15,
@@ -398,6 +436,24 @@ def expert_id(side: int, horizon_seconds: int) -> str:
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:20]
     return f"btc-{'long' if side > 0 else 'short'}-{horizon_seconds}s-{digest}"
+
+
+def fold_expert_id(
+    fold_scope: str, side: int, horizon_seconds: int, tree: int, leaf: int
+) -> str:
+    """Identify a fold-local expert without using any OOS outcome."""
+    identity = {
+        "protocol_hash": PROTOCOL_HASH,
+        "fold_scope": fold_scope,
+        "side": int(side),
+        "horizon_seconds": int(horizon_seconds),
+        "tree": int(tree),
+        "leaf": int(leaf),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:20]
+    return f"btc-{'long' if side > 0 else 'short'}-{horizon_seconds}s-leaf-{digest}"
 
 
 def _one_second_path(month: str) -> Path:
@@ -1068,10 +1124,296 @@ def _gpu_info() -> dict[str, Any]:
 
 
 def _x(rows: pd.DataFrame) -> np.ndarray:
-    values = rows.loc[:, ALPHA_FEATURES].to_numpy(np.float32)
+    values = rows.loc[:, MODEL_FEATURES].to_numpy(np.float32)
     if not np.isfinite(values).all():
         raise ValueError("model features must be finite")
     return values
+
+
+def _generator_x(rows: pd.DataFrame) -> np.ndarray:
+    values = rows.loc[:, base.GATING_CONTEXT].to_numpy(np.float32)
+    if not np.isfinite(values).all():
+        raise ValueError("fold-local generator features must be finite")
+    return values
+
+
+def _leaf_matrix(model: Any, values: np.ndarray) -> np.ndarray:
+    leaves = np.asarray(model.apply(values), dtype=np.int32)
+    if leaves.ndim == 1:
+        leaves = leaves[:, None]
+    if leaves.ndim != 2 or len(leaves) != len(values):
+        raise ValueError("invalid expert leaf matrix")
+    return leaves
+
+
+def _new_expert_generator(seed: int) -> Any:
+    return discovery._generator(seed)
+
+
+def _fold_scope(fold_number: int | str, fit: pd.DataFrame) -> str:
+    timestamp = pd.to_datetime(fit["actual_entry_timestamp"], utc=True)
+    identity = {
+        "protocol_hash": PROTOCOL_HASH,
+        "fold": str(fold_number),
+        "fit_start": timestamp.min().isoformat(),
+        "fit_end": timestamp.max().isoformat(),
+        "fit_rows": len(fit),
+    }
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:20]
+
+
+def _leaf_statistics(
+    leaves: np.ndarray,
+    net_bps: np.ndarray,
+    event_class: np.ndarray,
+    *,
+    fold_scope: str,
+    side: int,
+    horizon: int,
+) -> tuple[list[dict[str, np.ndarray]], list[dict[str, Any]]]:
+    statistics: list[dict[str, np.ndarray]] = []
+    catalog: list[dict[str, Any]] = []
+    for tree in range(leaves.shape[1]):
+        tree_leaves = leaves[:, tree]
+        maximum_leaf = int(tree_leaves.max(initial=0))
+        arrays = {
+            name: np.full(maximum_leaf + 1, np.nan, dtype=float)
+            for name in (
+                "count",
+                "mean",
+                "q90",
+                "lcb",
+                "positive_fraction",
+                "target_rate",
+                "stop_rate",
+                "eligible",
+            )
+        }
+        for leaf in np.unique(tree_leaves):
+            active = tree_leaves == leaf
+            values = net_bps[active]
+            count = len(values)
+            mean = float(values.mean())
+            standard_deviation = float(values.std(ddof=1)) if count > 1 else 0.0
+            lcb = mean - 1.645 * standard_deviation / math.sqrt(max(count, 1))
+            eligible = count >= MINIMUM_EXPERT_OPPORTUNITIES
+            leaf_index = int(leaf)
+            arrays["count"][leaf_index] = count
+            arrays["mean"][leaf_index] = mean
+            arrays["q90"][leaf_index] = float(np.quantile(values, 0.90))
+            arrays["lcb"][leaf_index] = lcb
+            arrays["positive_fraction"][leaf_index] = float(np.mean(values > 0))
+            arrays["target_rate"][leaf_index] = float(
+                np.mean(event_class[active] == OUTCOME_TARGET)
+            )
+            arrays["stop_rate"][leaf_index] = float(
+                np.mean(event_class[active] == OUTCOME_STOP)
+            )
+            arrays["eligible"][leaf_index] = float(eligible)
+            catalog.append(
+                {
+                    "expert_id": fold_expert_id(
+                        fold_scope, side, horizon, tree, leaf_index
+                    ),
+                    "fold_scope": fold_scope,
+                    "side": side,
+                    "horizon_seconds": horizon,
+                    "tree": tree,
+                    "leaf": leaf_index,
+                    "managed_outcomes_evaluated": True,
+                    "opportunities": count,
+                    "managed_expectancy_bps": mean,
+                    "managed_q90_bps": arrays["q90"][leaf_index],
+                    "managed_lcb_bps": lcb,
+                    "managed_positive_fraction": arrays["positive_fraction"][leaf_index],
+                    "managed_target_rate": arrays["target_rate"][leaf_index],
+                    "managed_stop_rate": arrays["stop_rate"][leaf_index],
+                    "eligible_after_managed_evaluation": eligible,
+                    "elimination_reason": None if eligible else "INSUFFICIENT_MANAGED_SUPPORT",
+                    "terminal_return_prefilter": False,
+                }
+            )
+        statistics.append(arrays)
+    return statistics, catalog
+
+
+def fit_fold_expert_library(
+    fit: pd.DataFrame,
+    fold_number: int | str,
+    *,
+    resume: bool = False,
+    progress: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Generate all leaf experts on exact managed labels from the fold fit only."""
+    scope = _fold_scope(fold_number, fit)
+    cache = EXPERT_CATALOG_ROOT / f"{scope}.joblib"
+    catalog_path = EXPERT_CATALOG_ROOT / f"{scope}.parquet"
+    if resume and cache.exists() and catalog_path.exists():
+        library = cast(dict[str, Any], joblib.load(cache))
+        if library.get("protocol_hash") == PROTOCOL_HASH:
+            return library
+    groups: dict[tuple[int, int], dict[str, Any]] = {}
+    catalog_rows: list[dict[str, Any]] = []
+    actions = sorted(
+        (int(side), int(horizon))
+        for side, horizon in fit.loc[:, ["side", "horizon_seconds"]]
+        .drop_duplicates()
+        .itertuples(index=False, name=None)
+    )
+    for action_number, (side, horizon) in enumerate(actions, start=1):
+        active = fit.loc[
+            fit["side"].eq(side) & fit["horizon_seconds"].eq(horizon)
+        ].copy()
+        model = _new_expert_generator(20261001 + action_number)
+        values = _generator_x(active)
+        model.fit(values, active["net_bps"].to_numpy(float))
+        leaves = _leaf_matrix(model, values)
+        statistics, catalog = _leaf_statistics(
+            leaves,
+            active["net_bps"].to_numpy(float),
+            active["event_class"].to_numpy(int),
+            fold_scope=scope,
+            side=side,
+            horizon=horizon,
+        )
+        catalog_rows.extend(catalog)
+        groups[(side, horizon)] = {
+            "model": model,
+            "statistics": statistics,
+            "fallback": {
+                "mean": float(active["net_bps"].mean()),
+                "q90": float(active["net_bps"].quantile(0.90)),
+                "lcb": float(active["net_bps"].mean()),
+                "positive_fraction": float(active["net_bps"].gt(0).mean()),
+                "target_rate": float(active["event_class"].eq(OUTCOME_TARGET).mean()),
+                "stop_rate": float(active["event_class"].eq(OUTCOME_STOP).mean()),
+                "count": len(active),
+            },
+        }
+        if progress is not None:
+            completed, total = progress
+            _status(
+                "fold_expert_generation",
+                f"fold {fold_number} action {action_number}/{len(actions)}: "
+                f"{'LONG' if side > 0 else 'SHORT'} {horizon}s",
+                42 + 20 * (completed + action_number / len(actions)) / max(total, 1),
+                fold=str(fold_number),
+                action=f"{side}:{horizon}",
+                candidates_generated=len(catalog_rows),
+                gpu=_gpu_info(),
+            )
+    catalog_frame = pd.DataFrame(catalog_rows)
+    EXPERT_CATALOG_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary_catalog = catalog_path.with_suffix(f".parquet.{os.getpid()}.tmp")
+    catalog_frame.to_parquet(temporary_catalog, index=False)
+    _atomic_replace(temporary_catalog, catalog_path)
+    library = {
+        "protocol_hash": PROTOCOL_HASH,
+        "fold_scope": scope,
+        "groups": groups,
+        "catalog_path": str(catalog_path),
+        "candidates_evaluated": len(catalog_frame),
+        "candidates_eligible": int(
+            catalog_frame["eligible_after_managed_evaluation"].sum()
+        ),
+        "terminal_prefilter_rejections": 0,
+    }
+    _atomic_joblib(cache, library)
+    return library
+
+
+def apply_fold_expert_library(rows: pd.DataFrame, library: dict[str, Any]) -> pd.DataFrame:
+    """Map every state-action to the active managed experts without reading future outcomes."""
+    output = rows.copy()
+    size = len(output)
+    columns = {name: np.full(size, np.nan, dtype=float) for name in FOLD_EXPERT_FEATURES}
+    best_tree = np.full(size, -1, dtype=np.int16)
+    best_leaf = np.full(size, -1, dtype=np.int16)
+    for (side, horizon), group in library["groups"].items():
+        positions = np.flatnonzero(
+            output["side"].eq(side).to_numpy()
+            & output["horizon_seconds"].eq(horizon).to_numpy()
+        )
+        if not len(positions):
+            continue
+        active = output.iloc[positions]
+        values = _generator_x(active)
+        model = group["model"]
+        leaves = _leaf_matrix(model, values)
+        count = np.zeros(len(active), dtype=float)
+        mean_sum = np.zeros(len(active), dtype=float)
+        mean_square_sum = np.zeros(len(active), dtype=float)
+        q90_sum = np.zeros(len(active), dtype=float)
+        positive_sum = np.zeros(len(active), dtype=float)
+        target_sum = np.zeros(len(active), dtype=float)
+        stop_sum = np.zeros(len(active), dtype=float)
+        log_opportunity_sum = np.zeros(len(active), dtype=float)
+        winning_lcb = np.full(len(active), -np.inf, dtype=float)
+        winning_tree = np.full(len(active), -1, dtype=np.int16)
+        winning_leaf = np.full(len(active), -1, dtype=np.int16)
+        for tree, statistics in enumerate(group["statistics"]):
+            leaf = leaves[:, tree]
+            within = leaf < len(statistics["eligible"])
+            eligible = np.zeros(len(active), dtype=bool)
+            eligible[within] = statistics["eligible"][leaf[within]] == 1
+            if not eligible.any():
+                continue
+            indexes = leaf[eligible]
+            managed_mean = statistics["mean"][indexes]
+            count[eligible] += 1
+            mean_sum[eligible] += managed_mean
+            mean_square_sum[eligible] += managed_mean**2
+            q90_sum[eligible] += statistics["q90"][indexes]
+            positive_sum[eligible] += statistics["positive_fraction"][indexes]
+            target_sum[eligible] += statistics["target_rate"][indexes]
+            stop_sum[eligible] += statistics["stop_rate"][indexes]
+            log_opportunity_sum[eligible] += np.log1p(statistics["count"][indexes])
+            lcb = statistics["lcb"][indexes]
+            better = np.zeros(len(active), dtype=bool)
+            better[eligible] = lcb > winning_lcb[eligible]
+            winning_lcb[better] = statistics["lcb"][leaf[better]]
+            winning_tree[better] = tree
+            winning_leaf[better] = leaf[better]
+        fallback = group["fallback"]
+        missing = count == 0
+        divisor = np.maximum(count, 1)
+        managed_mean = mean_sum / divisor
+        managed_mean[missing] = fallback["mean"]
+        dispersion = np.sqrt(np.maximum(0.0, mean_square_sum / divisor - managed_mean**2))
+        q90 = q90_sum / divisor
+        positive = positive_sum / divisor
+        target = target_sum / divisor
+        stop = stop_sum / divisor
+        log_opportunities = log_opportunity_sum / divisor
+        q90[missing] = fallback["q90"]
+        positive[missing] = fallback["positive_fraction"]
+        target[missing] = fallback["target_rate"]
+        stop[missing] = fallback["stop_rate"]
+        log_opportunities[missing] = math.log1p(fallback["count"])
+        winning_lcb[missing] = fallback["lcb"]
+        columns["managed_expert_mean_bps"][positions] = managed_mean
+        columns["managed_expert_q90_bps"][positions] = q90
+        columns["managed_expert_best_lcb_bps"][positions] = winning_lcb
+        columns["managed_expert_dispersion_bps"][positions] = dispersion
+        columns["managed_expert_positive_fraction"][positions] = positive
+        columns["managed_expert_target_rate"][positions] = target
+        columns["managed_expert_stop_rate"][positions] = stop
+        columns["managed_expert_log_opportunities"][positions] = log_opportunities
+        columns["managed_generator_score_bps"][positions] = np.asarray(
+            model.predict(values), dtype=float
+        )
+        best_tree[positions] = winning_tree
+        best_leaf[positions] = winning_leaf
+    for name, values in columns.items():
+        if not np.isfinite(values).all():
+            raise ValueError(f"missing fold-local expert feature: {name}")
+        output[name] = values
+    output["fold_expert_scope"] = str(library["fold_scope"])
+    output["expert_tree_index"] = best_tree
+    output["expert_leaf_id"] = best_leaf
+    return output
 
 
 def _timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
@@ -1306,23 +1648,59 @@ def _leverage(stop_bps: np.ndarray, round_trip_cost_bps: float) -> np.ndarray:
 
 def sequential_replay(
     scored: pd.DataFrame,
-    threshold_bps: float,
+    threshold_bps: float | dict[int, float],
     round_trip_cost_bps: float,
     *,
     record_decisions: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if scored.empty:
         return scored.copy(), pd.DataFrame(columns=["timestamp", "action", "reason"])
+    ranked = scored.copy()
+    if isinstance(threshold_bps, dict):
+        ranked["required_ev_bps"] = ranked["side"].map(threshold_bps).fillna(float("inf"))
+    else:
+        ranked["required_ev_bps"] = float(threshold_bps)
+    ranked["passes_ev_threshold"] = ranked["calibrated_ev_bps"].gt(
+        ranked["required_ev_bps"]
+    )
     candidates = (
-        scored.sort_values(
-            ["actual_entry_timestamp", "calibrated_ev_bps", "p_target", "expert_id"],
-            ascending=[True, False, False, True],
+        ranked.sort_values(
+            [
+                "actual_entry_timestamp",
+                "passes_ev_threshold",
+                "calibrated_ev_bps",
+                "p_target",
+                "expert_id",
+            ],
+            ascending=[True, False, False, False, True],
             kind="stable",
         )
         .drop_duplicates("actual_entry_timestamp", keep="first")
         .sort_values("actual_entry_timestamp")
         .reset_index(drop=True)
     )
+    if {
+        "fold_expert_scope",
+        "expert_tree_index",
+        "expert_leaf_id",
+    }.issubset(candidates.columns):
+        candidates["expert_id"] = [
+            (
+                fold_expert_id(
+                    str(scope), int(side), int(horizon), int(tree), int(leaf)
+                )
+                if int(tree) >= 0 and int(leaf) >= 0
+                else expert_id(int(side), int(horizon))
+            )
+            for scope, side, horizon, tree, leaf in zip(
+                candidates["fold_expert_scope"],
+                candidates["side"],
+                candidates["horizon_seconds"],
+                candidates["expert_tree_index"],
+                candidates["expert_leaf_id"],
+                strict=True,
+            )
+        ]
     selected_rows: list[int] = []
     leverages: list[float] = []
     portfolio_returns: list[float] = []
@@ -1399,7 +1777,7 @@ def sequential_replay(
                     }
                 )
             continue
-        if float(row.calibrated_ev_bps) < threshold_bps:
+        if not bool(row.passes_ev_threshold):
             if record_decisions:
                 decisions.append(
                     {
@@ -1579,8 +1957,11 @@ def policy_metrics(
     }
 
 
-def policy_gates(metrics: dict[str, Any]) -> dict[str, bool]:
+def policy_gates(
+    metrics: dict[str, Any], *, minimum_trades: int = MINIMUM_OOS_TRADES
+) -> dict[str, bool]:
     return {
+        "minimum_oos_trades": int(metrics.get("trades", 0)) >= minimum_trades,
         "expectancy_positive": float(metrics.get("expectancy_bps") or 0) > 0,
         "lower_confidence_bound_positive": min(
             float(metrics.get("daily_lcb_95") or -1),
@@ -1595,7 +1976,7 @@ def policy_gates(metrics: dict[str, Any]) -> dict[str, bool]:
 
 
 def selection_gates(metrics: dict[str, Any]) -> dict[str, bool]:
-    """Four-week tuning can validate days, but cannot manufacture 20 independent weeks."""
+    """Legacy diagnostic only; final statistical gates are never used for fold selection."""
     return {
         "expectancy_positive": float(metrics.get("expectancy_bps") or 0) > 0,
         "daily_lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -1) > 0,
@@ -1613,13 +1994,37 @@ def _choose_frequency_threshold(
     for threshold in THRESHOLDS_BPS:
         trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps, record_decisions=False)
         metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
-        frontier.append(
-            {"threshold_bps": threshold, "metrics": metrics, "gates": selection_gates(metrics)}
+        returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
+        net_log_equity = (
+            float(np.log1p(returns).sum())
+            if len(returns) and np.all(returns > -1)
+            else float("-inf")
         )
-    sustainable = [item for item in frontier if all(item["gates"].values())]
+        risk_approved = (
+            int(metrics.get("risk_violations", 1)) == 0
+            and float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN
+        )
+        eligible = risk_approved and net_log_equity > 0
+        frontier.append(
+            {
+                "threshold_bps": threshold,
+                "metrics": metrics,
+                "selection_utility": net_log_equity,
+                "risk_approved": risk_approved,
+                "eligible": eligible,
+                "final_statistical_gates_applied": False,
+            }
+        )
+    sustainable = [item for item in frontier if item["eligible"]]
     if not sustainable:
         return float("inf"), frontier
-    selected = max(sustainable, key=lambda item: float(item["metrics"]["trades_per_day"]))
+    selected = max(
+        sustainable,
+        key=lambda item: (
+            float(item["selection_utility"]),
+            float(item["metrics"]["trades_per_day"]),
+        ),
+    )
     return float(selected["threshold_bps"]), frontier
 
 
@@ -1660,7 +2065,7 @@ def _xgb_available() -> bool:
 
 
 def walk_forward(
-    matrix: pd.DataFrame, fee: FeeContract
+    matrix: pd.DataFrame, fee: FeeContract, *, resume: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     folds = _folds(matrix)
     if not folds:
@@ -1690,64 +2095,89 @@ def walk_forward(
             == 0
         ):
             continue
+        library = fit_fold_expert_library(
+            fit,
+            number,
+            resume=resume,
+            progress=(number - 1, len(folds)),
+        )
+        fit = apply_fold_expert_library(fit, library)
+        inner_calibration = apply_fold_expert_library(inner_calibration, library)
+        model_audit = apply_fold_expert_library(model_audit, library)
+        calibration = apply_fold_expert_library(calibration, library)
+        selection = apply_fold_expert_library(selection, library)
+        test = apply_fold_expert_library(test, library)
         kinds = ["ridge"] + (["xgboost_cuda"] if _xgb_available() else [])
-        candidate_heads: dict[str, Any] = {}
-        candidate_calibration: dict[str, Any] = {}
-        candidate_metrics: dict[str, dict[str, float]] = {}
-        for kind_number, kind in enumerate(kinds, start=1):
-            internal = "xgboost" if kind == "xgboost_cuda" else kind
-            _status(
-                "model_fit",
-                f"fold {number}/{len(folds)} {kind_number}/{len(kinds)} {kind}",
-                42 + 36 * ((number - 1) + (kind_number - 1) / len(kinds)) / len(folds),
-                fold=f"{number}/{len(folds)}",
-                model=kind,
-                fit_rows=len(fit),
-                gpu=_gpu_info(),
+        model_metrics: dict[str, dict[str, dict[str, float]]] = {}
+        champions: dict[int, str] = {}
+        scored_selection_pieces: list[pd.DataFrame] = []
+        scored_test_pieces: list[pd.DataFrame] = []
+        model_counter = 0
+        total_models = 2 * len(kinds)
+        for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+            side_fit = fit.loc[fit["side"].eq(side)]
+            side_inner = inner_calibration.loc[inner_calibration["side"].eq(side)]
+            side_audit = model_audit.loc[model_audit["side"].eq(side)]
+            side_calibration = calibration.loc[calibration["side"].eq(side)]
+            side_selection = selection.loc[selection["side"].eq(side)]
+            side_test = test.loc[test["side"].eq(side)]
+            side_metrics: dict[str, dict[str, float]] = {}
+            for kind in kinds:
+                model_counter += 1
+                internal = "xgboost" if kind == "xgboost_cuda" else kind
+                _status(
+                    "model_fit",
+                    f"fold {number}/{len(folds)} {side_name} "
+                    f"{model_counter}/{total_models} {kind}",
+                    62
+                    + 16
+                    * ((number - 1) + model_counter / total_models)
+                    / len(folds),
+                    fold=f"{number}/{len(folds)}",
+                    side=side_name,
+                    model=kind,
+                    fit_rows=len(side_fit),
+                    gpu=_gpu_info(),
+                )
+                candidate_head = fit_probability_head(internal, side_fit)
+                candidate_calibration = fit_calibration(candidate_head, side_inner)
+                scored_inner = score_actions(side_audit, candidate_head, candidate_calibration)
+                side_metrics[kind] = head_metrics(scored_inner)
+            champion = choose_champion(side_metrics)
+            champions[side] = champion
+            model_metrics[side_name] = side_metrics
+            internal = "xgboost" if champion == "xgboost_cuda" else champion
+            side_refit = pd.concat([side_fit, side_inner, side_audit], ignore_index=True)
+            head = fit_probability_head(internal, side_refit)
+            calibrated = fit_calibration(head, side_calibration)
+            scored_selection_pieces.append(score_actions(side_selection, head, calibrated))
+            scored_test_pieces.append(score_actions(side_test, head, calibrated))
+        scored_selection = pd.concat(scored_selection_pieces, ignore_index=True)
+        scored_test = pd.concat(scored_test_pieces, ignore_index=True)
+        thresholds: dict[int, float] = {}
+        frontiers: dict[str, list[dict[str, Any]]] = {}
+        for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+            threshold, side_frontier = _choose_frequency_threshold(
+                scored_selection.loc[scored_selection["side"].eq(side)],
+                fee,
+                fold["selection_start"],
+                fold["test_start"],
             )
-            head = fit_probability_head(internal, fit)
-            calibration_head = fit_calibration(head, inner_calibration)
-            scored_inner = score_actions(model_audit, head, calibration_head)
-            candidate_heads[kind] = head
-            candidate_calibration[kind] = calibration_head
-            candidate_metrics[kind] = head_metrics(scored_inner)
-            _status(
-                "model_comparison",
-                f"fold {number}/{len(folds)} {kind_number}/{len(kinds)} {kind}",
-                42 + 36 * ((number - 1) + kind_number / len(kinds)) / len(folds),
-                fold=f"{number}/{len(folds)}",
-                model=kind,
-                gpu=_gpu_info(),
-            )
-        champion = choose_champion(candidate_metrics)
-        model_metrics = candidate_metrics
-        internal = "xgboost" if champion == "xgboost_cuda" else champion
-        _status(
-            "policy_refit",
-            f"fold {number}/{len(folds)} champion={champion}",
-            42 + 36 * (number - 0.05) / len(folds),
-            fold=f"{number}/{len(folds)}",
-            model=champion,
-            candidate_metrics=model_metrics,
-            gpu=_gpu_info(),
-        )
-        refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
-        head = fit_probability_head(internal, refit)
-        calibrated = fit_calibration(head, calibration)
-        scored_selection = score_actions(selection, head, calibrated)
-        threshold, frontier = _choose_frequency_threshold(
-            scored_selection, fee, fold["selection_start"], fold["test_start"]
-        )
+            thresholds[side] = threshold
+            frontiers[side_name] = side_frontier
         _status(
             "policy_replay",
-            f"fold {number}/{len(folds)} selected threshold "
-            f"{threshold if math.isfinite(threshold) else 'NONE'} bps",
-            42 + 36 * (number - 0.02) / len(folds),
+            f"fold {number}/{len(folds)} LONG="
+            f"{thresholds[1] if math.isfinite(thresholds[1]) else 'OFF'} bps; SHORT="
+            f"{thresholds[-1] if math.isfinite(thresholds[-1]) else 'OFF'} bps",
+            62 + 16 * number / len(folds),
             fold=f"{number}/{len(folds)}",
-            selected_threshold_bps=threshold if math.isfinite(threshold) else None,
+            selected_thresholds_bps={
+                "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
+                "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
+            },
             gpu=_gpu_info(),
         )
-        scored_test = score_actions(test, head, calibrated)
         test_frontier: list[dict[str, Any]] = []
         test_daily: dict[str, list[float]] = {}
         for candidate_threshold in THRESHOLDS_BPS:
@@ -1770,12 +2200,11 @@ def walk_forward(
             test_daily[str(candidate_threshold)] = _daily_returns(
                 candidate_trades, fold["test_start"], fold["test_end"]
             ).tolist()
-        if math.isfinite(threshold):
-            trades, decisions = sequential_replay(scored_test, threshold, fee.round_trip_bps)
+        trades, decisions = sequential_replay(scored_test, thresholds, fee.round_trip_bps)
+        if not trades.empty:
             trade_pieces.append(trades)
+        if not decisions.empty:
             decision_pieces.append(decisions)
-        else:
-            trades, decisions = scored_test.iloc[:0].copy(), pd.DataFrame()
         metrics = policy_metrics(
             trades, fold["test_start"], fold["test_end"], weekly_bootstrap=False
         )
@@ -1790,12 +2219,25 @@ def walk_forward(
                 "selection_rows": len(selection),
                 "test_rows": len(test),
                 "candidate_metrics": model_metrics,
-                "champion": champion,
-                "selected_threshold_bps": threshold if math.isfinite(threshold) else None,
-                "frequency_pnl_frontier": frontier,
+                "champions": {
+                    "LONG": champions[1],
+                    "SHORT": champions[-1],
+                },
+                "selected_thresholds_bps": {
+                    "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
+                    "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
+                },
+                "frequency_pnl_frontiers": frontiers,
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
                 "test_metrics": metrics,
+                "fold_experts": {
+                    "fold_scope": library["fold_scope"],
+                    "catalog_path": library["catalog_path"],
+                    "candidates_evaluated": library["candidates_evaluated"],
+                    "candidates_eligible": library["candidates_eligible"],
+                    "terminal_prefilter_rejections": 0,
+                },
             }
         )
     risk_violations = sum(int(piece.attrs.get("risk_violations", 0)) for piece in trade_pieces)
@@ -1894,6 +2336,8 @@ def fit_forward_bundle(
     matrix: pd.DataFrame,
     fee: FeeContract,
     folds: list[dict[str, Any]],
+    *,
+    resume: bool = False,
 ) -> dict[str, Any]:
     end = pd.to_datetime(matrix["actual_entry_timestamp"], utc=True).max().ceil("D")
     selection_start = end - pd.Timedelta(weeks=WINDOW_WEEKS)
@@ -1901,24 +2345,58 @@ def fit_forward_bundle(
     fit = _period(matrix, None, calibration_start, purge_exit=True)
     calibration = _period(matrix, calibration_start, selection_start, purge_exit=True)
     selection = _period(matrix, selection_start, end, purge_exit=True)
-    champions = [str(item["champion"]) for item in folds]
-    champion = (
-        "xgboost_cuda" if champions.count("xgboost_cuda") > champions.count("ridge") else "ridge"
-    )
-    internal = "xgboost" if champion == "xgboost_cuda" else champion
-    head = fit_probability_head(internal, fit)
-    calibrated = fit_calibration(head, calibration)
-    scored_selection = score_actions(selection, head, calibrated)
-    threshold, frontier = _choose_frequency_threshold(scored_selection, fee, selection_start, end)
+    library = fit_fold_expert_library(fit, "forward", resume=resume)
+    fit = apply_fold_expert_library(fit, library)
+    calibration = apply_fold_expert_library(calibration, library)
+    selection = apply_fold_expert_library(selection, library)
+    champions: dict[str, str] = {}
+    heads: dict[int, dict[str, Any]] = {}
+    calibrations: dict[int, dict[str, Any]] = {}
+    thresholds: dict[int, float] = {}
+    frontiers: dict[str, list[dict[str, Any]]] = {}
+    for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+        observed = [str(item["champions"][side_name]) for item in folds]
+        champion = (
+            "xgboost_cuda"
+            if observed.count("xgboost_cuda") > observed.count("ridge")
+            else "ridge"
+        )
+        champions[side_name] = champion
+        internal = "xgboost" if champion == "xgboost_cuda" else champion
+        head = fit_probability_head(internal, fit.loc[fit["side"].eq(side)])
+        calibrated = fit_calibration(
+            head, calibration.loc[calibration["side"].eq(side)]
+        )
+        scored_selection = score_actions(
+            selection.loc[selection["side"].eq(side)], head, calibrated
+        )
+        threshold, frontier = _choose_frequency_threshold(
+            scored_selection, fee, selection_start, end
+        )
+        heads[side] = head
+        calibrations[side] = calibrated
+        thresholds[side] = threshold
+        frontiers[side_name] = frontier
     return {
-        "champion": champion,
-        "head": head,
-        "calibration": calibrated,
-        "threshold_bps": threshold if math.isfinite(threshold) else None,
+        "champions": champions,
+        "heads": heads,
+        "calibrations": calibrations,
+        "expert_library": library,
+        "thresholds_bps": {
+            "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
+            "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
+        },
         "fit_end": calibration_start.isoformat(),
         "calibration_period": [calibration_start.isoformat(), selection_start.isoformat()],
         "policy_selection_period": [selection_start.isoformat(), end.isoformat()],
-        "frequency_pnl_frontier": frontier,
+        "frequency_pnl_frontiers": frontiers,
+        "fold_experts": {
+            "fold_scope": library["fold_scope"],
+            "catalog_path": library["catalog_path"],
+            "candidates_evaluated": library["candidates_evaluated"],
+            "candidates_eligible": library["candidates_eligible"],
+            "terminal_prefilter_rejections": 0,
+        },
     }
 
 
@@ -1942,7 +2420,10 @@ def _side_metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) 
         active = trades.loc[trades["side"].eq(side)].copy()
         active.attrs.update(trades.attrs)
         metrics = policy_metrics(active, start, end)
-        output[name] = {"metrics": metrics, "gates": policy_gates(metrics)}
+        output[name] = {
+            "metrics": metrics,
+            "gates": policy_gates(metrics, minimum_trades=MINIMUM_SIDE_OOS_TRADES),
+        }
     return output
 
 
@@ -1956,12 +2437,15 @@ def _verdict(
         return "NO_ECONOMIC_ACTION_SET"
     if not folds or sum(int(item["test_metrics"]["trades"]) for item in folds) == 0:
         return "NO_PREDICTABLE_EDGE"
-    audited = [
-        value
-        for item in folds
-        for model in item.get("candidate_metrics", {}).values()
-        for value in model.values()
-    ]
+    audited: list[float] = []
+    for item in folds:
+        candidate_metrics = item.get("candidate_metrics", {})
+        for candidate in candidate_metrics.values():
+            if candidate and all(isinstance(value, (int, float)) for value in candidate.values()):
+                audited.extend(float(value) for value in candidate.values())
+            else:
+                for model in candidate.values():
+                    audited.extend(float(value) for value in model.values())
     if not audited or not all(math.isfinite(float(value)) for value in audited):
         return "NO_CALIBRATED_POLICY"
     side_enabled = any(all(result["gates"].values()) for result in sides.values())
@@ -2001,7 +2485,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         decisions = pd.DataFrame()
         folds: list[dict[str, Any]] = []
     else:
-        trades, decisions, folds = walk_forward(matrix, fee)
+        trades, decisions, folds = walk_forward(matrix, fee, resume=resume)
     audit_start = min(
         (pd.Timestamp(item["test_start"]) for item in folds), default=HISTORICAL_START
     )
@@ -2012,18 +2496,48 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     forward_bundle: dict[str, Any] | None = None
     if folds:
         _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
-        forward_bundle = fit_forward_bundle(matrix, fee, folds)
-        if verdict == "RESEARCH_PAPER_READY" and forward_bundle["threshold_bps"] is None:
+        forward_bundle = fit_forward_bundle(matrix, fee, folds, resume=resume)
+        if verdict == "RESEARCH_PAPER_READY" and not any(
+            value is not None for value in forward_bundle["thresholds_bps"].values()
+        ):
             verdict = "NO_CALIBRATED_POLICY"
     daily = _daily_returns(trades, audit_start, audit_end)
+    generated_expert_candidates = sum(
+        int(item.get("fold_experts", {}).get("candidates_evaluated", 0)) for item in folds
+    )
+    if forward_bundle is not None:
+        generated_expert_candidates += int(
+            forward_bundle["fold_experts"]["candidates_evaluated"]
+        )
+    generated_experts_eligible = sum(
+        int(item.get("fold_experts", {}).get("candidates_eligible", 0)) for item in folds
+    )
+    if forward_bundle is not None:
+        generated_experts_eligible += int(
+            forward_bundle["fold_experts"]["candidates_eligible"]
+        )
+    registry["registered_fold_local_expert_candidates"] = generated_expert_candidates
+    registry["registered_fold_local_experts_eligible_after_management"] = (
+        generated_experts_eligible
+    )
+    registry["total_registered_expert_attempts"] = (
+        int(registry["registered_auto_moe_experts"]) + generated_expert_candidates
+    )
+    _atomic_json(REGISTRY, registry)
     multiple_comparison = {
         "global_protocols": int(registry["protocol_count_observed"]),
-        "global_experts": int(registry["registered_auto_moe_experts"]),
+        "global_experts": int(registry["registered_auto_moe_experts"])
+        + generated_expert_candidates,
+        "fold_local_expert_candidates": generated_expert_candidates,
+        "fold_local_experts_eligible_after_management": generated_experts_eligible,
+        "terminal_prefilter_rejections": 0,
         "spa_reality_check": _spa_reality_check(folds),
         "pbo": _pbo(folds),
         "deflated_sharpe_probability": _deflated_sharpe_probability(
             daily,
-            int(registry["protocol_count_observed"]) + int(registry["registered_auto_moe_experts"]),
+            int(registry["protocol_count_observed"])
+            + int(registry["registered_auto_moe_experts"])
+            + generated_expert_candidates,
         ),
     }
     AUDIT_TRADES.parent.mkdir(parents=True, exist_ok=True)
@@ -2047,6 +2561,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "label_partitions": partitions,
             "state_action_rows": len(matrix),
             "future_holdout_rows_read": 0,
+            "fold_expert_catalog_root": str(EXPERT_CATALOG_ROOT),
         },
         "registry": registry,
         "frozen_auto_moe_report_sha256": frozen_hash_after,
@@ -2062,7 +2577,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             else {
                 name: value
                 for name, value in forward_bundle.items()
-                if name not in {"head", "calibration"}
+                if name not in {"heads", "calibrations", "expert_library"}
             }
         ),
         "verdict": verdict,
@@ -2083,9 +2598,18 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "future_holdout_opened": False,
             "real_capital_allowed": False,
             "alpha_features": ALPHA_FEATURES,
-            "model": None if forward_bundle is None else forward_bundle["head"],
-            "calibration": None if forward_bundle is None else forward_bundle["calibration"],
-            "threshold_bps": (None if forward_bundle is None else forward_bundle["threshold_bps"]),
+            "fold_expert_features": FOLD_EXPERT_FEATURES,
+            "model_features": MODEL_FEATURES,
+            "models_by_side": None if forward_bundle is None else forward_bundle["heads"],
+            "calibrations_by_side": (
+                None if forward_bundle is None else forward_bundle["calibrations"]
+            ),
+            "expert_library": (
+                None if forward_bundle is None else forward_bundle["expert_library"]
+            ),
+            "thresholds_bps": (
+                None if forward_bundle is None else forward_bundle["thresholds_bps"]
+            ),
             "enabled_sides": [
                 name for name, result in sides.items() if all(result["gates"].values())
             ],
