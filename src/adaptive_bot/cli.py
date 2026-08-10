@@ -318,6 +318,11 @@ def _parser() -> argparse.ArgumentParser:
     hybrid_v14_forward.add_argument("--config", type=Path, required=True)
     hybrid_v14_forward.add_argument("--watch", action="store_true")
     hybrid_v14_forward.add_argument("--interval", type=float, default=3600.0)
+    musca_btc_policy_train = commands.add_parser("musca-btc-policy-train")
+    musca_btc_policy_train.add_argument("--resume", action="store_true")
+    musca_btc_policy_status = commands.add_parser("musca-btc-policy-status")
+    musca_btc_policy_status.add_argument("--watch", action="store_true")
+    musca_btc_policy_status.add_argument("--interval", type=float, default=5.0)
     research_worker.add_argument("--once", action="store_true")
     research_status = commands.add_parser("research-status")
     research_status.add_argument("--config", type=Path, required=True)
@@ -1408,6 +1413,25 @@ def main(argv: list[str] | None = None) -> int:
         return _ml_hybrid_v14_freeze(arguments)
     if arguments.command == "ml-hybrid-v14-forward-status":
         return _ml_hybrid_v14_forward_status(arguments)
+    if arguments.command == "musca-btc-policy-train":
+        from adaptive_bot import musca_btc_policy
+
+        try:
+            report = musca_btc_policy.train(resume=arguments.resume)
+        except BrokenPipeError:
+            return 0
+        except Exception as error:
+            musca_btc_policy.failed_status(error)
+            raise
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    if arguments.command == "musca-btc-policy-status":
+        from adaptive_bot import musca_btc_policy
+
+        return musca_btc_policy.status(
+            watch=arguments.watch,
+            interval=arguments.interval,
+        )
     if arguments.command == "research-status":
         return _research_status(arguments)
     if arguments.command == "research-pin":
