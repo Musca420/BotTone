@@ -30,8 +30,10 @@ managed path was evaluated. The canonical pipeline removes that mismatch:
 
 No missing trade, spread, queue position or maker fill is simulated. Taker execution is the only
 baseline. The signed Binance `commissionRate` is used when account credentials are configured;
-otherwise the explicitly labelled official configuration fallback is used. Cost stress at 1.5x
-and 2x is diagnostic and never confused with 10x leverage.
+otherwise the explicitly labelled official configuration fallback is used. The decision cost is
+exactly the observed/configured taker commission for entry and exit; no unsupported fixed spread
+or slippage number is added. Cost stress at 1.5x and 2x is diagnostic and never confused with 10x
+leverage.
 
 ## Models and decisions
 
@@ -55,10 +57,12 @@ Risk Engine veto. Individual losing trades and losing days are allowed.
 
 ## Validation
 
-Every outer fold has an expanding fit, a separate inner model audit, four weeks of calibration,
-four weeks of policy/frequency selection and four weeks of test. Purge uses the actual managed
-exit timestamp. Thresholds are preregistered; the policy chooses the highest frequency that
-passes the economic gates on the selection window, without a trade quota.
+Every outer fold has an expanding fit, two weeks of inner probability calibration, a subsequent
+two-week model audit, four weeks of final calibration, four weeks of policy/frequency selection
+and four weeks of test. Every boundary purges on the actual managed exit timestamp. Thresholds
+are preregistered; the policy chooses the highest frequency that passes the economic gates on the
+selection window, without a trade quota. A fold that selects no entry threshold is a valid FLAT
+period and is judged through the aggregate stability gates, not mislabeled as a calibration error.
 
 The report includes daily and weekly block-bootstrap lower bounds, the complete threshold
 frontier, SPA/Reality Check over that frontier, PBO across chronological slices and DSR adjusted

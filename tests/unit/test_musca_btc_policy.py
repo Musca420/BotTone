@@ -169,6 +169,9 @@ def test_position_can_cross_midnight_without_forced_close() -> None:
     assert len(trades) == 1
     assert trades.loc[0, "exit_timestamp"].day == 2
     assert decisions["action"].tolist() == ["ENTER_LONG", "CLOSE"]
+    close = decisions.loc[decisions["action"].eq("CLOSE")].iloc[0]
+    assert close["position_side"] == 1
+    assert close["time_in_position_seconds"] == 300
 
 
 def test_open_position_does_not_reveal_its_future_pnl_to_risk_state() -> None:
@@ -208,7 +211,70 @@ def test_open_position_does_not_reveal_its_future_pnl_to_risk_state() -> None:
 
 def test_negative_result_has_explicit_non_operational_verdict() -> None:
     economics = {"has_positive_unconditional_action": False, "oracle_mean_net_bps": -1.0}
-    assert policy._verdict(economics, [], {}) == "NO_ECONOMIC_ACTION_SET"
+    assert policy._verdict(economics, [], {}, {}) == "NO_ECONOMIC_ACTION_SET"
+
+
+def test_every_chronological_boundary_can_purge_by_actual_exit() -> None:
+    boundary = pd.Timestamp("2026-01-02T00:00:00Z")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [
+                boundary - pd.Timedelta(hours=2),
+                boundary - pd.Timedelta(hours=1),
+            ],
+            "exit_timestamp": [
+                boundary - pd.Timedelta(minutes=1),
+                boundary + pd.Timedelta(minutes=1),
+            ],
+        }
+    )
+    purged = policy._period(rows, None, boundary, purge_exit=True)
+    assert len(purged) == 1
+    assert purged.iloc[0]["exit_timestamp"] < boundary
+
+
+def test_flat_fold_is_not_mislabeled_as_calibration_failure() -> None:
+    economics = {"has_positive_unconditional_action": True, "oracle_mean_net_bps": 1.0}
+    metrics = {
+        "expectancy_bps": 1.0,
+        "daily_lcb_95": 0.0001,
+        "weekly_lcb_95": 0.0001,
+        "profit_factor": 1.2,
+        "maximum_drawdown": 0.01,
+        "positive_active_days": 0.6,
+        "risk_violations": 0,
+    }
+    folds = [
+        {
+            "selected_threshold_bps": None,
+            "test_metrics": {"trades": 1},
+            "candidate_metrics": {
+                "ridge": {
+                    "brier": 0.5,
+                    "ev_calibration_error_bps": 1.0,
+                    "ev_mae_bps": 2.0,
+                    "decision_regret_bps": 3.0,
+                }
+            },
+        }
+    ]
+    sides = {"LONG": {"gates": {"stable": True}}}
+    assert policy._verdict(economics, folds, metrics, sides) == "RESEARCH_PAPER_READY"
+
+
+def test_decision_cost_contains_no_invented_non_fee_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Schedule:
+        maker_bps = 2.0
+        taker_bps = 4.0
+        source = "test"
+
+    monkeypatch.setattr(policy, "load_config", lambda _: object())
+    monkeypatch.setattr(policy, "fee_schedule", lambda _: Schedule())
+    fee = policy.resolve_fee_contract()
+    assert fee.reserve_round_trip_bps == 0.0
+    assert fee.round_trip_bps == 8.0
 
 
 def test_four_week_selection_does_not_require_twenty_week_bootstrap() -> None:

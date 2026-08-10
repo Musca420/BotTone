@@ -67,10 +67,13 @@ RISK_PER_TRADE = 0.01
 MAXIMUM_LEVERAGE = 10.0
 MAXIMUM_DAILY_LOSS = 0.02
 MAXIMUM_DRAWDOWN = 0.08
-EXECUTION_RESERVE_ROUND_TRIP_BPS = 1.0
+EXECUTION_RESERVE_ROUND_TRIP_BPS = 0.0
 GPU_CPU_TOLERANCE_BPS = 1e-6
 GLOBAL_PROTOCOL_FLOOR = 53
 GLOBAL_EXPERT_FLOOR = 7_691
+INNER_CALIBRATION_WEEKS = 2
+INNER_MODEL_AUDIT_WEEKS = 2
+LEGACY_LABEL_PROTOCOL_HASHES = {"a20eb033eb076bfd9d0019e0bbb3e3956037b9ffdd28f618400f991494fac258"}
 
 ALPHA_FEATURES = base.META_FEATURES
 STATE_FEATURES = (
@@ -81,6 +84,24 @@ STATE_FEATURES = (
     "unrealized_net_bps",
     "close_cost_bps",
 )
+
+LABEL_PROTOCOL = {
+    "symbol": SYMBOL,
+    "venue": VENUE,
+    "parent_protocol_hash": base.PROTOCOL_HASH,
+    "path_resolution_seconds": 1,
+    "sides": ["LONG", "SHORT"],
+    "horizons_seconds": list(base.HORIZONS),
+    "management": "TP1/TP2/initial stop/non-widening trailing/timeout",
+    "same_second": "stop wins",
+    "entry": "first observed aggregate trade after decision",
+    "terminal_return_prefilter": False,
+    "historical_start": HISTORICAL_START.isoformat(),
+    "historical_end": HISTORICAL_END.isoformat(),
+}
+LABEL_PROTOCOL_HASH = hashlib.sha256(
+    json.dumps(LABEL_PROTOCOL, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
 
 PROTOCOL = {
     "name": "musca_btc_binance_canonical_policy_challenger",
@@ -101,12 +122,14 @@ PROTOCOL = {
     "execution": {
         "baseline": "TAKER",
         "fee": "signed GET /fapi/v1/commissionRate or labelled official config fallback",
+        "non_fee_reserve_round_trip_bps": EXECUTION_RESERVE_ROUND_TRIP_BPS,
         "selection_cost_multiplier": 1.0,
         "diagnostic_cost_multipliers": [1.5, 2.0],
         "maker_enabled": False,
         "invented_spread_or_fill_labels": False,
     },
     "state_action": {
+        "label_protocol_hash": LABEL_PROTOCOL_HASH,
         "sides": ["LONG", "SHORT"],
         "horizons_seconds": list(base.HORIZONS),
         "management": "same TP1/TP2/stop/non-widening trailing path for labels and replay",
@@ -135,7 +158,8 @@ PROTOCOL = {
     "validation": {
         "nested_walk_forward": {
             "minimum_fit_weeks": MINIMUM_FIT_WEEKS,
-            "inner_model_audit_weeks": WINDOW_WEEKS,
+            "inner_calibration_weeks": INNER_CALIBRATION_WEEKS,
+            "inner_model_audit_weeks": INNER_MODEL_AUDIT_WEEKS,
             "calibration_weeks": WINDOW_WEEKS,
             "policy_selection_weeks": WINDOW_WEEKS,
             "outer_test_weeks": WINDOW_WEEKS,
@@ -310,7 +334,7 @@ def resolve_fee_contract() -> FeeContract:
     return FeeContract(
         maker_bps_per_side=float(schedule.maker_bps),
         taker_bps_per_side=float(schedule.taker_bps),
-        reserve_round_trip_bps=float(config.non_fee_reserve_bps),
+        reserve_round_trip_bps=EXECUTION_RESERVE_ROUND_TRIP_BPS,
         source=str(schedule.source),
     )
 
@@ -365,7 +389,7 @@ def build_research_registry() -> dict[str, Any]:
 
 def expert_id(side: int, horizon_seconds: int) -> str:
     identity = {
-        "protocol_hash": PROTOCOL_HASH,
+        "label_protocol_hash": LABEL_PROTOCOL_HASH,
         "side": int(side),
         "horizon_seconds": int(horizon_seconds),
         "parent_protocol_hash": base.PROTOCOL_HASH,
@@ -937,6 +961,7 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
         output["gross_bps"] + output["funding_bps"] - 1.5 * fee.round_trip_bps
     )
     output["stress_2x_bps"] = output["gross_bps"] + output["funding_bps"] - 2.0 * fee.round_trip_bps
+    output["label_protocol_hash"] = LABEL_PROTOCOL_HASH
     output["protocol_hash"] = PROTOCOL_HASH
     if not output["available_at"].le(output["actual_entry_timestamp"]).all():
         raise ValueError("canonical label entered before features were available")
@@ -952,16 +977,60 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
     for number, month in enumerate(ONE_SECOND_MONTHS, start=1):
         path = LABEL_ROOT / f"month={month}.parquet"
         cached = False
+        migrate = False
         if resume and path.exists():
-            hashes = pd.read_parquet(path, columns=["protocol_hash"])
-            cached = bool(not hashes.empty and hashes["protocol_hash"].eq(PROTOCOL_HASH).all())
+            schema = set(
+                duckdb.execute("DESCRIBE SELECT * FROM read_parquet(?)", [str(path)])
+                .df()["column_name"]
+                .astype(str)
+            )
+            identity_columns = ["protocol_hash", "round_trip_cost_bps"]
+            if "label_protocol_hash" in schema:
+                identity_columns.append("label_protocol_hash")
+            identity = pd.read_parquet(path, columns=identity_columns)
+            current_labels = bool(
+                "label_protocol_hash" in identity
+                and not identity.empty
+                and identity["label_protocol_hash"].eq(LABEL_PROTOCOL_HASH).all()
+            )
+            legacy_labels = bool(
+                "label_protocol_hash" not in identity
+                and not identity.empty
+                and identity["protocol_hash"].isin(LEGACY_LABEL_PROTOCOL_HASHES).all()
+            )
+            cached = current_labels or legacy_labels
+            migrate = cached and (
+                legacy_labels
+                or not identity["protocol_hash"].eq(PROTOCOL_HASH).all()
+                or not np.allclose(
+                    identity["round_trip_cost_bps"].to_numpy(float), fee.round_trip_bps
+                )
+            )
         if cached:
             rows = pd.read_parquet(path)
+            if migrate:
+                rows["round_trip_cost_bps"] = fee.round_trip_bps
+                rows["net_bps"] = rows["gross_bps"] + rows["funding_bps"] - fee.round_trip_bps
+                rows["stress_1_5x_bps"] = (
+                    rows["gross_bps"] + rows["funding_bps"] - 1.5 * fee.round_trip_bps
+                )
+                rows["stress_2x_bps"] = (
+                    rows["gross_bps"] + rows["funding_bps"] - 2.0 * fee.round_trip_bps
+                )
+                rows["expert_id"] = [
+                    expert_id(int(side), int(horizon))
+                    for side, horizon in zip(rows["side"], rows["horizon_seconds"], strict=True)
+                ]
+                rows["label_protocol_hash"] = LABEL_PROTOCOL_HASH
+                rows["protocol_hash"] = PROTOCOL_HASH
+                temporary = path.with_suffix(f".parquet.{os.getpid()}.tmp")
+                rows.to_parquet(temporary, index=False)
+                _atomic_replace(temporary, path)
         else:
             rows = _label_partition(month, fee)
-            temporary = path.with_suffix(".parquet.tmp")
+            temporary = path.with_suffix(f".parquet.{os.getpid()}.tmp")
             rows.to_parquet(temporary, index=False)
-            os.replace(temporary, path)
+            _atomic_replace(temporary, path)
         pieces.append(rows)
         manifest[month] = {"rows": len(rows), "path": str(path), "sha256": _sha256(path)}
         _status(
@@ -1271,6 +1340,7 @@ def sequential_replay(
     active_side = 0
     active_expert: str | None = None
     active_entry: pd.Timestamp | None = None
+    active_entry_price: float | None = None
     for row_number, raw_row in enumerate(candidates.itertuples(index=False)):
         row = cast(Any, raw_row)
         entry = pd.Timestamp(row.actual_entry_timestamp)
@@ -1285,11 +1355,21 @@ def sequential_replay(
             active_side = 0
             active_expert = None
             active_entry = None
+            active_entry_price = None
         day = entry.floor("D")
         if current_day is None or day != current_day:
             current_day = day
             day_start_equity = equity
         position_open = entry < free_at
+        current_price = float(getattr(row, "entry_price", 0.0))
+        unrealized_net_bps = (
+            active_side * (current_price / active_entry_price - 1) * 10_000 - round_trip_cost_bps
+            if position_open
+            and active_entry_price is not None
+            and active_entry_price > 0
+            and current_price > 0
+            else 0.0
+        )
         state = SequentialState(
             daily_pnl_fraction=equity / day_start_equity - 1,
             risk_remaining_fraction=max(0.0, MAXIMUM_DAILY_LOSS + equity / day_start_equity - 1),
@@ -1299,7 +1379,7 @@ def sequential_replay(
                 if position_open and active_entry is not None
                 else 0
             ),
-            unrealized_net_bps=0.0,
+            unrealized_net_bps=unrealized_net_bps,
             close_cost_bps=round_trip_cost_bps / 2,
             expert_id=active_expert if position_open else None,
             regime="OBSERVED",
@@ -1365,22 +1445,35 @@ def sequential_replay(
             )
         target_seconds = int(row.time_to_target_seconds)
         if record_decisions and 0 < target_seconds < int(row.exit_seconds):
+            tightened_state = asdict(state) | {
+                "position_side": int(row.side),
+                "time_in_position_seconds": target_seconds,
+                "unrealized_net_bps": float(getattr(row, "target_1_bps", 0.0))
+                - round_trip_cost_bps,
+                "expert_id": str(row.expert_id),
+            }
             decisions.append(
                 {
                     "timestamp": entry + pd.Timedelta(seconds=target_seconds),
                     "action": "TIGHTEN_STOP",
                     "reason": "FIRST_TARGET_FILLED_NON_WIDENING_STOP",
-                    **asdict(state),
+                    **tightened_state,
                 }
             )
         exit_at = pd.Timestamp(row.exit_timestamp)
         if record_decisions:
+            close_state = asdict(state) | {
+                "position_side": int(row.side),
+                "time_in_position_seconds": int(row.exit_seconds),
+                "unrealized_net_bps": float(row.net_bps),
+                "expert_id": str(row.expert_id),
+            }
             decisions.append(
                 {
                     "timestamp": exit_at,
                     "action": "CLOSE",
                     "reason": str(row.outcome),
-                    **asdict(state),
+                    **close_state,
                 }
             )
         free_at = exit_at
@@ -1388,6 +1481,7 @@ def sequential_replay(
         active_side = int(row.side)
         active_expert = str(row.expert_id)
         active_entry = entry
+        active_entry_price = float(getattr(row, "entry_price", 0.0)) or None
     result = candidates.iloc[selected_rows].copy().reset_index(drop=True)
     if selected_rows:
         result["leverage"] = leverages
@@ -1472,14 +1566,10 @@ def policy_metrics(
         "positive_active_days": float(active.gt(0).mean()) if len(active) else 0.0,
         "mean_daily_return": float(daily.mean()),
         "daily_lcb_95": (
-            _block_bootstrap_lcb(daily.to_numpy(float), 5, 20260831)
-            if daily_bootstrap
-            else None
+            _block_bootstrap_lcb(daily.to_numpy(float), 5, 20260831) if daily_bootstrap else None
         ),
         "weekly_lcb_95": (
-            _block_bootstrap_lcb(weekly.to_numpy(float), 3, 20260901)
-            if weekly_bootstrap
-            else None
+            _block_bootstrap_lcb(weekly.to_numpy(float), 3, 20260901) if weekly_bootstrap else None
         ),
         "stress_1_5x_expectancy_bps": float(trades["stress_1_5x_bps"].mean()),
         "stress_2x_expectancy_bps": float(trades["stress_2x_bps"].mean()),
@@ -1521,9 +1611,7 @@ def _choose_frequency_threshold(
 ) -> tuple[float, list[dict[str, Any]]]:
     frontier: list[dict[str, Any]] = []
     for threshold in THRESHOLDS_BPS:
-        trades, _ = sequential_replay(
-            scored, threshold, fee.round_trip_bps, record_decisions=False
-        )
+        trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps, record_decisions=False)
         metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
         frontier.append(
             {"threshold_bps": threshold, "metrics": metrics, "gates": selection_gates(metrics)}
@@ -1582,13 +1670,25 @@ def walk_forward(
     diagnostics: list[dict[str, Any]] = []
     for number, fold in enumerate(folds, start=1):
         fit = _period(matrix, None, fold["inner_start"], purge_exit=True)
-        inner = _period(matrix, fold["inner_start"], fold["calibration_start"], purge_exit=False)
+        inner_split = fold["inner_start"] + pd.Timedelta(weeks=INNER_CALIBRATION_WEEKS)
+        inner_calibration = _period(matrix, fold["inner_start"], inner_split, purge_exit=True)
+        model_audit = _period(matrix, inner_split, fold["calibration_start"], purge_exit=True)
         calibration = _period(
-            matrix, fold["calibration_start"], fold["selection_start"], purge_exit=False
+            matrix, fold["calibration_start"], fold["selection_start"], purge_exit=True
         )
-        selection = _period(matrix, fold["selection_start"], fold["test_start"], purge_exit=False)
-        test = _period(matrix, fold["test_start"], fold["test_end"], purge_exit=False)
-        if min(len(fit), len(inner), len(calibration), len(selection), len(test)) == 0:
+        selection = _period(matrix, fold["selection_start"], fold["test_start"], purge_exit=True)
+        test = _period(matrix, fold["test_start"], fold["test_end"], purge_exit=True)
+        if (
+            min(
+                len(fit),
+                len(inner_calibration),
+                len(model_audit),
+                len(calibration),
+                len(selection),
+                len(test),
+            )
+            == 0
+        ):
             continue
         kinds = ["ridge"] + (["xgboost_cuda"] if _xgb_available() else [])
         candidate_heads: dict[str, Any] = {}
@@ -1606,8 +1706,8 @@ def walk_forward(
                 gpu=_gpu_info(),
             )
             head = fit_probability_head(internal, fit)
-            calibration_head = fit_calibration(head, inner)
-            scored_inner = score_actions(inner, head, calibration_head)
+            calibration_head = fit_calibration(head, inner_calibration)
+            scored_inner = score_actions(model_audit, head, calibration_head)
             candidate_heads[kind] = head
             candidate_calibration[kind] = calibration_head
             candidate_metrics[kind] = head_metrics(scored_inner)
@@ -1631,7 +1731,7 @@ def walk_forward(
             candidate_metrics=model_metrics,
             gpu=_gpu_info(),
         )
-        refit = pd.concat([fit, inner], ignore_index=True)
+        refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
         head = fit_probability_head(internal, refit)
         calibrated = fit_calibration(head, calibration)
         scored_selection = score_actions(selection, head, calibrated)
@@ -1684,7 +1784,8 @@ def walk_forward(
                 "fold": number,
                 **{name: value.isoformat() for name, value in fold.items()},
                 "fit_rows": len(fit),
-                "inner_rows": len(inner),
+                "inner_calibration_rows": len(inner_calibration),
+                "model_audit_rows": len(model_audit),
                 "calibration_rows": len(calibration),
                 "selection_rows": len(selection),
                 "test_rows": len(test),
@@ -1798,8 +1899,8 @@ def fit_forward_bundle(
     selection_start = end - pd.Timedelta(weeks=WINDOW_WEEKS)
     calibration_start = selection_start - pd.Timedelta(weeks=WINDOW_WEEKS)
     fit = _period(matrix, None, calibration_start, purge_exit=True)
-    calibration = _period(matrix, calibration_start, selection_start, purge_exit=False)
-    selection = _period(matrix, selection_start, end, purge_exit=False)
+    calibration = _period(matrix, calibration_start, selection_start, purge_exit=True)
+    selection = _period(matrix, selection_start, end, purge_exit=True)
     champions = [str(item["champion"]) for item in folds]
     champion = (
         "xgboost_cuda" if champions.count("xgboost_cuda") > champions.count("ridge") else "ridge"
@@ -1846,15 +1947,25 @@ def _side_metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) 
 
 
 def _verdict(
-    economics: dict[str, Any], folds: list[dict[str, Any]], metrics: dict[str, Any]
+    economics: dict[str, Any],
+    folds: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    sides: dict[str, Any],
 ) -> str:
     if not economics["has_positive_unconditional_action"] and economics["oracle_mean_net_bps"] <= 0:
         return "NO_ECONOMIC_ACTION_SET"
     if not folds or sum(int(item["test_metrics"]["trades"]) for item in folds) == 0:
         return "NO_PREDICTABLE_EDGE"
-    if any(item["selected_threshold_bps"] is None for item in folds):
+    audited = [
+        value
+        for item in folds
+        for model in item.get("candidate_metrics", {}).values()
+        for value in model.values()
+    ]
+    if not audited or not all(math.isfinite(float(value)) for value in audited):
         return "NO_CALIBRATED_POLICY"
-    if not all(policy_gates(metrics).values()):
+    side_enabled = any(all(result["gates"].values()) for result in sides.values())
+    if not all(policy_gates(metrics).values()) or not side_enabled:
         return "NO_STABLE_OOS_POLICY"
     return "RESEARCH_PAPER_READY"
 
@@ -1897,7 +2008,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     audit_end = max((pd.Timestamp(item["test_end"]) for item in folds), default=HISTORICAL_END)
     metrics = policy_metrics(trades, audit_start, audit_end)
     sides = _side_metrics(trades, audit_start, audit_end)
-    verdict = _verdict(economics, folds, metrics)
+    verdict = _verdict(economics, folds, metrics, sides)
     forward_bundle: dict[str, Any] | None = None
     if folds:
         _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
