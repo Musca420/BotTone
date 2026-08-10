@@ -985,6 +985,46 @@ def _prediction_diagnostics(scored: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _gating_importance(
+    model: dict[str, Any], ranker: dict[str, Any] | None
+) -> dict[str, Any]:
+    if ranker is not None:
+        importance = np.vstack(
+            [np.asarray(item.feature_importances_, dtype=float) for item in ranker["models"]]
+        ).mean(axis=0)
+        source = "xgboost_ranker_gain"
+    else:
+        regressors = model["regressors"]
+        first = regressors[0]
+        if hasattr(first, "named_steps"):
+            scaler = first.named_steps["standardscaler"]
+            ridge = first.named_steps["ridge"]
+            importance = np.abs(np.asarray(ridge.coef_, dtype=float) / scaler.scale_)
+            source = "ridge_absolute_effective_coefficient"
+        else:
+            importance = np.vstack(
+                [np.asarray(item.feature_importances_, dtype=float) for item in regressors]
+            ).mean(axis=0)
+            source = "xgboost_ev_gain"
+    total = float(importance.sum())
+    normalized = importance / total if total > 0 else np.zeros_like(importance)
+    ordered = np.argsort(normalized)[::-1]
+    return {
+        "source": source,
+        "expert_output_importance_share": float(
+            sum(
+                normalized[index]
+                for index, name in enumerate(META_FEATURES)
+                if name in EXPERT_COLUMNS
+            )
+        ),
+        "top_features": [
+            {"name": META_FEATURES[index], "importance": float(normalized[index])}
+            for index in ordered[:20]
+        ],
+    }
+
+
 def _fit_calibrators(rows: pd.DataFrame, model: dict[str, Any]) -> dict[str, Any]:
     ev, probability, _ = _raw_meta(rows, model)
     actual = rows["net_bps"].to_numpy(float)
@@ -1320,6 +1360,9 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "model_audit_action_diagnostics": _action_diagnostics(model_audit),
         "ev_champion": ev_champion,
         "gating_champion": gating_champion,
+        "gating_importance": _gating_importance(
+            meta_models[ev_champion], active_ranker
+        ),
         "policy_selection": {
             "curve": curve,
             "selected": selected,
