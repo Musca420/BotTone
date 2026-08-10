@@ -476,7 +476,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
         & available.lt(HISTORICAL_AUDIT_END).to_numpy(bool)
         & clean_lookback[positions_all]
         & continuous_future
-        & np.isfinite(rows.loc[:, FEATURES].to_numpy(float)).all(axis=1)
+        & np.isfinite(rows.loc[:, FEATURES].to_numpy(np.float32)).all(axis=1)
     )
     matrix = rows.loc[
         valid, ["timestamp", "available_at", "context_available_at", "decision_position", *FEATURES]
@@ -500,16 +500,18 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
         matrix[f"terminal_{horizon}s_bps"] = (close[positions + steps] / entry - 1) * 10_000
         matrix[f"max_up_{horizon}s_bps"] = (future_high[positions] / entry - 1) * 10_000
         matrix[f"max_down_{horizon}s_bps"] = (1 - future_low[positions] / entry) * 10_000
+    numeric_columns = [
+        *FEATURES,
+        *(f"terminal_{horizon}s_bps" for horizon in HORIZONS),
+        *(f"max_up_{horizon}s_bps" for horizon in HORIZONS),
+        *(f"max_down_{horizon}s_bps" for horizon in HORIZONS),
+    ]
     numeric = matrix.loc[
         :,
-        [
-            *FEATURES,
-            *(f"terminal_{horizon}s_bps" for horizon in HORIZONS),
-            *(f"max_up_{horizon}s_bps" for horizon in HORIZONS),
-            *(f"max_down_{horizon}s_bps" for horizon in HORIZONS),
-        ],
-    ].to_numpy(float)
+        numeric_columns,
+    ].to_numpy(np.float32)
     matrix = matrix.loc[np.isfinite(numeric).all(axis=1)].copy()
+    matrix.loc[:, numeric_columns] = matrix.loc[:, numeric_columns].astype(np.float32)
     matrix["protocol_hash"] = PROTOCOL_HASH
     MATRIX.parent.mkdir(parents=True, exist_ok=True)
     temporary = MATRIX.with_suffix(".parquet.tmp")
@@ -561,9 +563,9 @@ def _fit_expert_pool(
     completed = 0
     for horizon in HORIZONS:
         returns[horizon] = {}
-        target = rows[f"terminal_{horizon}s_bps"].to_numpy(float)
+        target = rows[f"terminal_{horizon}s_bps"].to_numpy(np.float32)
         for view, columns in VIEWS.items():
-            x = rows.loc[:, columns].to_numpy(float)
+            x = rows.loc[:, columns].to_numpy(np.float32)
             models: list[Any] = []
             for seed in seeds:
                 indexes = (
@@ -583,10 +585,10 @@ def _fit_expert_pool(
         for side in SIDES:
             favorable = rows[
                 f"max_{'up' if side > 0 else 'down'}_{horizon}s_bps"
-            ].to_numpy(float)
+            ].to_numpy(np.float32)
             adverse = rows[
                 f"max_{'down' if side > 0 else 'up'}_{horizon}s_bps"
-            ].to_numpy(float)
+            ].to_numpy(np.float32)
             values: dict[str, Any] = {}
             for name, target, alpha in (
                 ("favorable_q50", favorable, 0.50),
@@ -594,7 +596,7 @@ def _fit_expert_pool(
                 ("adverse_q75", adverse, 0.75),
             ):
                 values[name] = _xgb_regressor(20260810 + horizon + side, quantile=alpha).fit(
-                    rows.loc[:, FEATURES].to_numpy(float), target, verbose=False
+                    rows.loc[:, FEATURES].to_numpy(np.float32), target, verbose=False
                 )
                 completed += 1
                 if completed == total or completed % 5 == 0:
@@ -611,19 +613,19 @@ def _predict_experts(rows: pd.DataFrame, pool: dict[str, Any]) -> pd.DataFrame:
     output = pd.DataFrame(index=rows.index)
     for horizon in HORIZONS:
         for view, columns in VIEWS.items():
-            x = rows.loc[:, columns].to_numpy(float)
+            x = rows.loc[:, columns].to_numpy(np.float32)
             values = np.vstack(
                 [
-                    np.asarray(model.predict(x), dtype=float)
+                    np.asarray(model.predict(x), dtype=np.float32)
                     for model in pool["returns"][horizon][view]
                 ]
             )
             output[f"expert_{horizon}s_{view}"] = values.mean(axis=0)
-        x_full = rows.loc[:, FEATURES].to_numpy(float)
+        x_full = rows.loc[:, FEATURES].to_numpy(np.float32)
         for side in SIDES:
             for name, model in pool["quantiles"][horizon][side].items():
                 output[f"{name}_{horizon}s_{side}"] = np.maximum(
-                    np.asarray(model.predict(x_full), dtype=float), 0.0
+                    np.asarray(model.predict(x_full), dtype=np.float32), 0.0
                 )
     return output
 
@@ -729,9 +731,9 @@ def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
     actions: list[pd.DataFrame] = []
     for horizon in HORIZONS:
         for side in SIDES:
-            favorable_q50 = predictions[f"favorable_q50_{horizon}s_{side}"].to_numpy(float)
-            favorable_q75 = predictions[f"favorable_q75_{horizon}s_{side}"].to_numpy(float)
-            adverse_q75 = predictions[f"adverse_q75_{horizon}s_{side}"].to_numpy(float)
+            favorable_q50 = predictions[f"favorable_q50_{horizon}s_{side}"].to_numpy(np.float32)
+            favorable_q75 = predictions[f"favorable_q75_{horizon}s_{side}"].to_numpy(np.float32)
+            adverse_q75 = predictions[f"adverse_q75_{horizon}s_{side}"].to_numpy(np.float32)
             target_1 = np.clip(
                 np.maximum(favorable_q50, ROUND_TRIP_COST_BPS + MINIMUM_NET_TARGET_BPS),
                 ROUND_TRIP_COST_BPS + MINIMUM_NET_TARGET_BPS,
@@ -744,10 +746,10 @@ def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
             trailing = np.clip(adverse_q75, 3.0, MAX_STOP_BPS)
             action = rows.loc[:, ["available_at", "entry_timestamp", "decision_position"]].copy()
             for feature in GATING_CONTEXT:
-                values = rows[feature].to_numpy(float)
+                values = rows[feature].to_numpy(np.float32)
                 action[feature] = values * side if feature in DIRECTIONAL_FEATURES else values
             for column in EXPERT_COLUMNS:
-                action[column] = predictions[column].to_numpy(float) * side
+                action[column] = predictions[column].to_numpy(np.float32) * side
             action["side"] = float(side)
             action["horizon_fraction"] = horizon / max(HORIZONS)
             action["horizon_seconds"] = horizon
@@ -758,7 +760,7 @@ def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
             action["predicted_favorable_q50_bps"] = favorable_q50
             action["predicted_favorable_q75_bps"] = favorable_q75
             action["predicted_adverse_q75_bps"] = adverse_q75
-            terminal = side * rows[f"terminal_{horizon}s_bps"].to_numpy(float)
+            terminal = side * rows[f"terminal_{horizon}s_bps"].to_numpy(np.float32)
             action["gross_bps"] = terminal
             action["net_bps"] = terminal - ROUND_TRIP_COST_BPS
             actions.append(action)
@@ -816,7 +818,7 @@ def _oof_actions(matrix: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
 
 
 def _meta_x(rows: pd.DataFrame) -> np.ndarray:
-    values = rows.loc[:, META_FEATURES].to_numpy(float)
+    values = rows.loc[:, META_FEATURES].to_numpy(np.float32)
     if not np.isfinite(values).all():
         raise ValueError("meta features must be finite")
     return values
@@ -827,7 +829,7 @@ def _fit_meta(rows: pd.DataFrame) -> dict[str, Any]:
         drop=True
     )
     x = _meta_x(ordered)
-    y = ordered["net_bps"].to_numpy(float)
+    y = ordered["net_bps"].to_numpy(np.float32)
     positive = (y > 0).astype(int)
     ridge_reg = make_pipeline(StandardScaler(), Ridge(alpha=20.0)).fit(x, y)
     ridge_cls = make_pipeline(
