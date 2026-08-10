@@ -1224,10 +1224,14 @@ def _leverage(stop_bps: np.ndarray, round_trip_cost_bps: float) -> np.ndarray:
 
 
 def sequential_replay(
-    scored: pd.DataFrame, threshold_bps: float, round_trip_cost_bps: float
+    scored: pd.DataFrame,
+    threshold_bps: float,
+    round_trip_cost_bps: float,
+    *,
+    record_decisions: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if scored.empty:
-        return scored.copy(), pd.DataFrame()
+        return scored.copy(), pd.DataFrame(columns=["timestamp", "action", "reason"])
     candidates = (
         scored.sort_values(
             ["actual_entry_timestamp", "calibrated_ev_bps", "p_target", "expert_id"],
@@ -1236,78 +1240,119 @@ def sequential_replay(
         )
         .drop_duplicates("actual_entry_timestamp", keep="first")
         .sort_values("actual_entry_timestamp")
+        .reset_index(drop=True)
     )
-    trades: list[pd.Series[Any]] = []
+    selected_rows: list[int] = []
+    leverages: list[float] = []
+    portfolio_returns: list[float] = []
+    equity_before: list[float] = []
+    daily_pnl_before: list[float] = []
+    risk_remaining_before: list[float] = []
+    entry_actions: list[str] = []
     decisions: list[dict[str, Any]] = []
     free_at = pd.Timestamp.min.tz_localize("UTC")
     equity = 1.0
     current_day: pd.Timestamp | None = None
     day_start_equity = 1.0
     risk_violations = 0
-    for _, row in candidates.iterrows():
-        entry = pd.Timestamp(row["actual_entry_timestamp"])
+    pending_return: float | None = None
+    active_side = 0
+    active_expert: str | None = None
+    active_entry: pd.Timestamp | None = None
+    for row_number, raw_row in enumerate(candidates.itertuples(index=False)):
+        row = cast(Any, raw_row)
+        entry = pd.Timestamp(row.actual_entry_timestamp)
+        # Realized P&L enters the risk state only when the preceding position exits.
+        if pending_return is not None and entry >= free_at:
+            exit_day = free_at.floor("D")
+            if current_day is None or exit_day != current_day:
+                current_day = exit_day
+                day_start_equity = equity
+            equity *= 1 + pending_return
+            pending_return = None
+            active_side = 0
+            active_expert = None
+            active_entry = None
         day = entry.floor("D")
         if current_day is None or day != current_day:
             current_day = day
             day_start_equity = equity
+        position_open = entry < free_at
         state = SequentialState(
             daily_pnl_fraction=equity / day_start_equity - 1,
             risk_remaining_fraction=max(0.0, MAXIMUM_DAILY_LOSS + equity / day_start_equity - 1),
-            position_side=0 if entry >= free_at else int(trades[-1]["side"]),
-            time_in_position_seconds=0,
+            position_side=active_side if position_open else 0,
+            time_in_position_seconds=(
+                int((entry - active_entry).total_seconds())
+                if position_open and active_entry is not None
+                else 0
+            ),
             unrealized_net_bps=0.0,
             close_cost_bps=round_trip_cost_bps / 2,
-            expert_id=None if entry >= free_at else str(trades[-1]["expert_id"]),
+            expert_id=active_expert if position_open else None,
             regime="OBSERVED",
-            vwap_distance_bps=float(row.get("vwap_distance_bps", 0.0)),
-            avwap_distance_bps=float(row.get("vwap_distance_240m_bps", 0.0)),
-            funding_bps=float(row["funding_bps"]),
-            volatility_bps=float(row.get("realized_volatility_30m_bps", 0.0)),
+            vwap_distance_bps=float(getattr(row, "vwap_distance_bps", 0.0)),
+            avwap_distance_bps=float(getattr(row, "vwap_distance_240m_bps", 0.0)),
+            funding_bps=float(row.funding_bps),
+            volatility_bps=float(getattr(row, "realized_volatility_30m_bps", 0.0)),
         )
-        if entry < free_at:
-            decisions.append(
-                {"timestamp": entry, "action": "HOLD", "reason": "POSITION_OPEN", **asdict(state)}
-            )
+        if position_open:
+            if record_decisions:
+                decisions.append(
+                    {
+                        "timestamp": entry,
+                        "action": "HOLD",
+                        "reason": "POSITION_OPEN",
+                        **asdict(state),
+                    }
+                )
             continue
-        if float(row["calibrated_ev_bps"]) < threshold_bps:
+        if float(row.calibrated_ev_bps) < threshold_bps:
+            if record_decisions:
+                decisions.append(
+                    {
+                        "timestamp": entry,
+                        "action": "WAIT",
+                        "reason": "EV_BELOW_THRESHOLD",
+                        **asdict(state),
+                    }
+                )
+            continue
+        leverage = float(_leverage(np.asarray([float(row.stop_bps)]), round_trip_cost_bps)[0])
+        worst_risk = leverage * (float(row.stop_bps) + round_trip_cost_bps) / 10_000
+        if state.risk_remaining_fraction + 1e-12 < worst_risk:
+            if record_decisions:
+                decisions.append(
+                    {
+                        "timestamp": entry,
+                        "action": "WAIT",
+                        "reason": "DAILY_RISK_VETO",
+                        **asdict(state),
+                    }
+                )
+            continue
+        portfolio_return = leverage * float(row.net_bps) / 10_000
+        if portfolio_return < -worst_risk - 1e-9:
+            risk_violations += 1
+        entry_action = "ENTER_LONG" if int(row.side) > 0 else "ENTER_SHORT"
+        selected_rows.append(row_number)
+        leverages.append(leverage)
+        portfolio_returns.append(portfolio_return)
+        equity_before.append(equity)
+        daily_pnl_before.append(state.daily_pnl_fraction)
+        risk_remaining_before.append(state.risk_remaining_fraction)
+        entry_actions.append(entry_action)
+        if record_decisions:
             decisions.append(
                 {
                     "timestamp": entry,
-                    "action": "WAIT",
-                    "reason": "EV_BELOW_THRESHOLD",
+                    "action": entry_action,
+                    "reason": "CALIBRATED_EV_AND_RISK_APPROVED",
                     **asdict(state),
                 }
             )
-            continue
-        leverage = float(_leverage(np.asarray([float(row["stop_bps"])]), round_trip_cost_bps)[0])
-        worst_risk = leverage * (float(row["stop_bps"]) + round_trip_cost_bps) / 10_000
-        if state.risk_remaining_fraction + 1e-12 < worst_risk:
-            decisions.append(
-                {"timestamp": entry, "action": "WAIT", "reason": "DAILY_RISK_VETO", **asdict(state)}
-            )
-            continue
-        portfolio_return = leverage * float(row["net_bps"]) / 10_000
-        if portfolio_return < -worst_risk - 1e-9:
-            risk_violations += 1
-        chosen = row.copy()
-        chosen["leverage"] = leverage
-        chosen["portfolio_return"] = portfolio_return
-        chosen["equity_before"] = equity
-        chosen["daily_pnl_before"] = state.daily_pnl_fraction
-        chosen["risk_remaining_before"] = state.risk_remaining_fraction
-        chosen["entry_action"] = "ENTER_LONG" if int(row["side"]) > 0 else "ENTER_SHORT"
-        chosen["close_action"] = "CLOSE"
-        trades.append(chosen)
-        decisions.append(
-            {
-                "timestamp": entry,
-                "action": chosen["entry_action"],
-                "reason": "CALIBRATED_EV_AND_RISK_APPROVED",
-                **asdict(state),
-            }
-        )
-        target_seconds = int(row["time_to_target_seconds"])
-        if 0 < target_seconds < int(row["exit_seconds"]):
+        target_seconds = int(row.time_to_target_seconds)
+        if record_decisions and 0 < target_seconds < int(row.exit_seconds):
             decisions.append(
                 {
                     "timestamp": entry + pd.Timedelta(seconds=target_seconds),
@@ -1316,20 +1361,37 @@ def sequential_replay(
                     **asdict(state),
                 }
             )
-        exit_at = pd.Timestamp(row["exit_timestamp"])
-        decisions.append(
-            {
-                "timestamp": exit_at,
-                "action": "CLOSE",
-                "reason": str(row["outcome"]),
-                **asdict(state),
-            }
-        )
-        equity *= 1 + portfolio_return
+        exit_at = pd.Timestamp(row.exit_timestamp)
+        if record_decisions:
+            decisions.append(
+                {
+                    "timestamp": exit_at,
+                    "action": "CLOSE",
+                    "reason": str(row.outcome),
+                    **asdict(state),
+                }
+            )
         free_at = exit_at
-    result = pd.DataFrame(trades).reset_index(drop=True) if trades else candidates.iloc[:0].copy()
+        pending_return = portfolio_return
+        active_side = int(row.side)
+        active_expert = str(row.expert_id)
+        active_entry = entry
+    result = candidates.iloc[selected_rows].copy().reset_index(drop=True)
+    if selected_rows:
+        result["leverage"] = leverages
+        result["portfolio_return"] = portfolio_returns
+        result["equity_before"] = equity_before
+        result["daily_pnl_before"] = daily_pnl_before
+        result["risk_remaining_before"] = risk_remaining_before
+        result["entry_action"] = entry_actions
+        result["close_action"] = "CLOSE"
     result.attrs["risk_violations"] = risk_violations
-    return result, pd.DataFrame(decisions).sort_values("timestamp").reset_index(drop=True)
+    decision_rows = (
+        pd.DataFrame(decisions).sort_values("timestamp").reset_index(drop=True)
+        if decisions
+        else pd.DataFrame(columns=["timestamp", "action", "reason"])
+    )
+    return result, decision_rows
 
 
 def _daily_returns(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
@@ -1359,7 +1421,14 @@ def _block_bootstrap_lcb(values: np.ndarray, block: int, seed: int) -> float | N
     return float(np.quantile(means, 0.05))
 
 
-def policy_metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> dict[str, Any]:
+def policy_metrics(
+    trades: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    daily_bootstrap: bool = True,
+    weekly_bootstrap: bool = True,
+) -> dict[str, Any]:
     daily = _daily_returns(trades, start, end)
     if trades.empty:
         return {
@@ -1390,8 +1459,16 @@ def policy_metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp)
         "maximum_drawdown": float((1 - equity / peak).max(initial=0.0)),
         "positive_active_days": float(active.gt(0).mean()) if len(active) else 0.0,
         "mean_daily_return": float(daily.mean()),
-        "daily_lcb_95": _block_bootstrap_lcb(daily.to_numpy(float), 5, 20260831),
-        "weekly_lcb_95": _block_bootstrap_lcb(weekly.to_numpy(float), 3, 20260901),
+        "daily_lcb_95": (
+            _block_bootstrap_lcb(daily.to_numpy(float), 5, 20260831)
+            if daily_bootstrap
+            else None
+        ),
+        "weekly_lcb_95": (
+            _block_bootstrap_lcb(weekly.to_numpy(float), 3, 20260901)
+            if weekly_bootstrap
+            else None
+        ),
         "stress_1_5x_expectancy_bps": float(trades["stress_1_5x_bps"].mean()),
         "stress_2x_expectancy_bps": float(trades["stress_2x_bps"].mean()),
         "risk_violations": int(trades.attrs.get("risk_violations", 0)),
@@ -1432,8 +1509,10 @@ def _choose_frequency_threshold(
 ) -> tuple[float, list[dict[str, Any]]]:
     frontier: list[dict[str, Any]] = []
     for threshold in THRESHOLDS_BPS:
-        trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps)
-        metrics = policy_metrics(trades, start, end)
+        trades, _ = sequential_replay(
+            scored, threshold, fee.round_trip_bps, record_decisions=False
+        )
+        metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
         frontier.append(
             {"threshold_bps": threshold, "metrics": metrics, "gates": selection_gates(metrics)}
         )
@@ -1529,7 +1608,17 @@ def walk_forward(
                 gpu=_gpu_info(),
             )
         champion = choose_champion(candidate_metrics)
+        model_metrics = candidate_metrics
         internal = "xgboost" if champion == "xgboost_cuda" else champion
+        _status(
+            "policy_refit",
+            f"fold {number}/{len(folds)} champion={champion}",
+            42 + 36 * (number - 0.05) / len(folds),
+            fold=f"{number}/{len(folds)}",
+            model=champion,
+            candidate_metrics=model_metrics,
+            gpu=_gpu_info(),
+        )
         refit = pd.concat([fit, inner], ignore_index=True)
         head = fit_probability_head(internal, refit)
         calibrated = fit_calibration(head, calibration)
@@ -1537,15 +1626,31 @@ def walk_forward(
         threshold, frontier = _choose_frequency_threshold(
             scored_selection, fee, fold["selection_start"], fold["test_start"]
         )
+        _status(
+            "policy_replay",
+            f"fold {number}/{len(folds)} selected threshold "
+            f"{threshold if math.isfinite(threshold) else 'NONE'} bps",
+            42 + 36 * (number - 0.02) / len(folds),
+            fold=f"{number}/{len(folds)}",
+            selected_threshold_bps=threshold if math.isfinite(threshold) else None,
+            gpu=_gpu_info(),
+        )
         scored_test = score_actions(test, head, calibrated)
         test_frontier: list[dict[str, Any]] = []
         test_daily: dict[str, list[float]] = {}
         for candidate_threshold in THRESHOLDS_BPS:
             candidate_trades, _ = sequential_replay(
-                scored_test, candidate_threshold, fee.round_trip_bps
+                scored_test,
+                candidate_threshold,
+                fee.round_trip_bps,
+                record_decisions=False,
             )
             candidate_metrics = policy_metrics(
-                candidate_trades, fold["test_start"], fold["test_end"]
+                candidate_trades,
+                fold["test_start"],
+                fold["test_end"],
+                daily_bootstrap=False,
+                weekly_bootstrap=False,
             )
             test_frontier.append(
                 {"threshold_bps": candidate_threshold, "metrics": candidate_metrics}
@@ -1559,7 +1664,9 @@ def walk_forward(
             decision_pieces.append(decisions)
         else:
             trades, decisions = scored_test.iloc[:0].copy(), pd.DataFrame()
-        metrics = policy_metrics(trades, fold["test_start"], fold["test_end"])
+        metrics = policy_metrics(
+            trades, fold["test_start"], fold["test_end"], weekly_bootstrap=False
+        )
         diagnostics.append(
             {
                 "fold": number,
@@ -1569,7 +1676,7 @@ def walk_forward(
                 "calibration_rows": len(calibration),
                 "selection_rows": len(selection),
                 "test_rows": len(test),
-                "candidate_metrics": candidate_metrics,
+                "candidate_metrics": model_metrics,
                 "champion": champion,
                 "selected_threshold_bps": threshold if math.isfinite(threshold) else None,
                 "frequency_pnl_frontier": frontier,

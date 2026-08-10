@@ -155,6 +155,41 @@ def test_position_can_cross_midnight_without_forced_close() -> None:
     assert decisions["action"].tolist() == ["ENTER_LONG", "CLOSE"]
 
 
+def test_open_position_does_not_reveal_its_future_pnl_to_risk_state() -> None:
+    start = pd.Timestamp("2026-01-01T10:00:00Z")
+    entries = [start, start + pd.Timedelta(minutes=1), start + pd.Timedelta(minutes=3)]
+    scored = pd.DataFrame(
+        {
+            "actual_entry_timestamp": entries,
+            "exit_timestamp": [
+                start + pd.Timedelta(minutes=2),
+                start + pd.Timedelta(minutes=2),
+                start + pd.Timedelta(minutes=4),
+            ],
+            "calibrated_ev_bps": [5.0, 5.0, -1.0],
+            "p_target": [0.6, 0.6, 0.4],
+            "expert_id": [policy.expert_id(1, 300)] * 3,
+            "side": [1, 1, 1],
+            "stop_bps": [50.0] * 3,
+            "net_bps": [-59.0, 10.0, 10.0],
+            "funding_bps": [0.0] * 3,
+            "stress_1_5x_bps": [-63.5, 5.5, 5.5],
+            "stress_2x_bps": [-68.0, 1.0, 1.0],
+            "time_to_target_seconds": [-1] * 3,
+            "exit_seconds": [120, 60, 60],
+            "outcome": ["STOP", "TARGET", "TARGET"],
+        }
+    )
+    _, decisions = policy.sequential_replay(scored, 0.0, 9.0)
+    hold = decisions.loc[decisions["action"].eq("HOLD")].iloc[0]
+    wait_after_exit = decisions.loc[
+        decisions["action"].eq("WAIT") & decisions["timestamp"].eq(entries[2])
+    ].iloc[0]
+    assert hold["daily_pnl_fraction"] == pytest.approx(0.0)
+    assert hold["time_in_position_seconds"] == 60
+    assert wait_after_exit["daily_pnl_fraction"] < 0
+
+
 def test_negative_result_has_explicit_non_operational_verdict() -> None:
     economics = {"has_positive_unconditional_action": False, "oracle_mean_net_bps": -1.0}
     assert policy._verdict(economics, [], {}) == "NO_ECONOMIC_ACTION_SET"
