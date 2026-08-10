@@ -38,7 +38,10 @@ aggiunge VWAP, momentum, volatilità, volume, spot/perpetual basis, mark, fundin
 Il flusso a cinque secondi aggiunge imbalance degli aggressori, persistenza, intensità, velocità e
 assorbimento. Ogni feature deve avere `available_at` non successivo alla decisione. L'ingresso
 avviene nel primo bucket da cinque secondi successivo. Valori mancanti non vengono sostituiti con
-zero e una discontinuità invalida sia il warm-up sia il percorso futuro dell'etichetta.
+zero. Un intervallo assente in un archivio `aggTrades` il cui checksum ufficiale è valido viene
+rappresentato esplicitamente come `no_trade_bucket`: volume e conteggio sono realmente zero e
+OHLC resta all'ultimo prezzo già osservato. Non è interpolazione; distingue causalmente “nessun
+trade” da “dato non disponibile”. Una vera discontinuità della fonte resta fail-closed.
 
 Il final holdout comincia il 10 agosto 2026, dopo la preregistrazione, e richiede nuovi dati futuri.
 Non viene aperto dal training storico. Gli intervalli precedenti sono ricerca cronologica, non una

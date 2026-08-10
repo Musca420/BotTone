@@ -22,7 +22,6 @@ from adaptive_bot.btc_vwap_alpha import _historical_features
 from adaptive_bot.musca_v5_micro_model import (
     DIRECTIONAL_MICRO_FEATURES,
     MICRO_FEATURES,
-    build_micro_features,
 )
 
 SOURCE = Path("data/ml/hybrid_v25/asset=BTCUSDT/minutes.parquet")
@@ -384,7 +383,58 @@ def _load_micro_source() -> pd.DataFrame:
     expected_available = rows["timestamp"] + pd.Timedelta(seconds=BUCKET_SECONDS)
     if not rows["available_at"].eq(expected_available).all():
         raise RuntimeError("invalid 5-second feature availability contract")
-    return rows
+    return _regularize_micro_buckets(rows)
+
+
+def _regularize_micro_buckets(rows: pd.DataFrame) -> pd.DataFrame:
+    """Represent checksum-complete intervals without trades; never interpolate prices."""
+    index = pd.date_range(
+        rows["timestamp"].iloc[0], rows["timestamp"].iloc[-1], freq=f"{BUCKET_SECONDS}s"
+    )
+    regular = rows.set_index("timestamp").reindex(index)
+    no_trade = regular["close"].isna()
+    previous_close = regular["close"].ffill()
+    if previous_close.isna().any():
+        raise RuntimeError("cannot causally price an initial no-trade bucket")
+    for column in ("open", "high", "low", "close"):
+        regular.loc[no_trade, column] = previous_close.loc[no_trade]
+    for column in (
+        "base_volume",
+        "quote_volume",
+        "signed_quote_volume",
+        "trade_count",
+        "buy_count",
+    ):
+        regular.loc[no_trade, column] = 0
+    regular["no_trade_bucket"] = no_trade
+    regular["available_at"] = regular.index + pd.Timedelta(seconds=BUCKET_SECONDS)
+    regular.index.name = "timestamp"
+    return regular.reset_index()
+
+
+def _build_moe_micro_features(data: pd.DataFrame) -> pd.DataFrame:
+    signed = data["signed_quote_volume"]
+    quote = data["quote_volume"]
+    output = data.loc[:, ["available_at"]].copy()
+    for bars, name in ((3, "15s"), (12, "1m"), (60, "5m")):
+        denominator = quote.rolling(bars, min_periods=bars).sum().replace(0, np.nan)
+        output[f"ofi_{name}"] = signed.rolling(bars, min_periods=bars).sum() / denominator
+    sign = np.sign(signed)
+    output["ofi_persistence_1m"] = sign.rolling(12, min_periods=12).mean()
+    baseline = data["trade_count"].shift(1).rolling(720, min_periods=120).median()
+    output["trade_intensity_15s"] = (
+        data["trade_count"].rolling(3, min_periods=3).sum() / baseline.replace(0, np.nan)
+    )
+    output["trade_intensity_1m"] = (
+        data["trade_count"].rolling(12, min_periods=12).sum()
+        / (12 * baseline).replace(0, np.nan)
+    )
+    output["price_velocity_15s"] = data["close"].pct_change(3) * 10_000
+    output["price_velocity_1m"] = data["close"].pct_change(12) * 10_000
+    output["absorption_1m"] = output["ofi_1m"].abs() / (
+        output["price_velocity_1m"].abs() + 0.1
+    )
+    return output.loc[:, ["available_at", *MICRO_FEATURES]].dropna().reset_index(drop=True)
 
 
 def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
@@ -402,6 +452,7 @@ def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
         mask = source_month.eq(month)
         months[month] = {
             "rows_5s": int(mask.sum()),
+            "no_trade_buckets": int(source.loc[mask, "no_trade_bucket"].sum()),
             "parquet_bytes": path.stat().st_size,
             "parquet_sha256": sha256,
         }
@@ -456,7 +507,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     ].sort_values("context_available_at")
 
     source = _load_micro_source()
-    micro = build_micro_features(source)
+    micro = _build_moe_micro_features(source)
     indexed = source.loc[:, ["timestamp", "available_at"]].reset_index(
         names="decision_position"
     )

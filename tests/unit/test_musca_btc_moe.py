@@ -54,6 +54,52 @@ def test_decision_cadence_does_not_depend_on_parquet_timestamp_resolution() -> N
         assert mask.iloc[12]
 
 
+def test_checksum_complete_interval_without_trades_is_causal_zero_volume() -> None:
+    timestamp = pd.to_datetime(
+        ["2026-01-01T00:00:00Z", "2026-01-01T00:00:10Z"], utc=True
+    )
+    rows = pd.DataFrame(
+        {
+            "timestamp": timestamp,
+            "available_at": timestamp + pd.Timedelta(seconds=5),
+            "open": [100.0, 101.0],
+            "high": [100.0, 101.0],
+            "low": [100.0, 101.0],
+            "close": [100.0, 101.0],
+            "base_volume": [2.0, 3.0],
+            "quote_volume": [200.0, 303.0],
+            "signed_quote_volume": [200.0, -303.0],
+            "trade_count": [2, 3],
+            "buy_count": [2, 0],
+        }
+    )
+    regular = moe._regularize_micro_buckets(rows)
+    empty = regular.iloc[1]
+    assert empty["timestamp"] == pd.Timestamp("2026-01-01T00:00:05Z")
+    assert empty["available_at"] == pd.Timestamp("2026-01-01T00:00:10Z")
+    assert empty["close"] == 100.0
+    assert empty["quote_volume"] == 0
+    assert bool(empty["no_trade_bucket"])
+
+
+def test_no_trade_bucket_does_not_poison_later_order_flow_windows() -> None:
+    periods = 800
+    timestamp = pd.date_range("2026-01-01", periods=periods, freq="5s", tz="UTC")
+    rows = pd.DataFrame(
+        {
+            "available_at": timestamp + pd.Timedelta(seconds=5),
+            "close": np.full(periods, 100.0),
+            "quote_volume": np.full(periods, 1_000.0),
+            "signed_quote_volume": np.full(periods, 100.0),
+            "trade_count": np.full(periods, 10),
+        }
+    )
+    rows.loc[400, ["quote_volume", "signed_quote_volume", "trade_count"]] = 0
+    features = moe._build_moe_micro_features(rows)
+    assert len(features) == periods - 120
+    assert features.loc[:, moe.MICRO_FEATURES].notna().all().all()
+
+
 def test_micro_features_have_explicit_availability_and_no_zero_fill() -> None:
     assert "available_at" not in moe.FEATURES
     assert set(moe.DIRECTIONAL_MICRO_FEATURES).issubset(moe.DIRECTIONAL_FEATURES)
