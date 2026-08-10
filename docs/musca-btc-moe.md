@@ -93,7 +93,9 @@ righe cronologiche errore EV, Brier score e regret decisionale. Un ensemble sepa
 regret OOS rispetto al champion EV.
 
 Per ogni decisione il gating confronta dieci azioni: LONG/SHORT per cinque orizzonti. La policy
-sceglie l'azione con EV calibrata più alta e può restare FLAT. Il livello di copertura è scelto
+sceglie l'azione con EV calibrata più alta e può restare FLAT. Un'azione con EV calibrata non
+positiva non può battere FLAT; non viene però applicato un LCB per singolo trade, perché
+l'incertezza aggregata è già verificata con bootstrap OOS. Il livello di copertura è scelto
 soltanto su marzo-aprile e congelato prima dell'audit.
 
 L'uscita simulata usa:

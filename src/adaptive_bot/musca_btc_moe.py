@@ -1210,7 +1210,10 @@ def _execute(
             ascending=[True, False, False, False, True],
         )
         .drop_duplicates("entry_timestamp", keep="first")
-        .loc[lambda value: value["score"].ge(threshold)]
+        .loc[
+            lambda value: value["score"].ge(threshold)
+            & value["calibrated_ev_bps"].gt(0)
+        ]
     )
     accepted: list[int] = []
     managed: list[tuple[float, int, str]] = []
