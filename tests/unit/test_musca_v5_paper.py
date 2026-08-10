@@ -207,6 +207,44 @@ def test_frozen_base_takes_half_then_protects_cost_and_trails(tmp_path: Path) ->
     assert account["trades"][0]["policy_source"] == "MUSCA_V8_FROZEN_BASE"
 
 
+def test_auto_moe_uses_second_target_and_never_widens_its_trail(tmp_path: Path) -> None:
+    first = pd.Timestamp("2026-08-09T00:00:00Z")
+    assessment = {
+        **_assessment(first, "BINANCE"),
+        "policy_source": "BTC_AUTO_MOE_RESEARCH_PAPER",
+        "expert_id": "btc-long-3600s-test",
+        "alpha_signal_at": first.isoformat(),
+        "management_style": "HALF_AT_Q50_Q75_NON_WIDENING_TRAIL",
+        "partial_target_fraction": 0.5,
+        "target_2_bps": 50.0,
+        "trailing_bps": 10.0,
+        "maximum_hold_minutes": 60,
+    }
+    account = new_paper_account(
+        "BINANCE",
+        first.isoformat(),
+        execution_venue="BINANCE",
+        maker_fee_bps=2.0,
+        taker_fee_bps=4.0,
+    )
+    advance_account(account, assessment, _book(first, 60_000))
+    advance_account(account, assessment, _book(first + pd.Timedelta(seconds=1), 60_000))
+
+    advance_account(account, assessment, _book(first + pd.Timedelta(seconds=2), 60_200))
+    position = account["open_position"]
+    assert position["tp1_hit"] is True
+    cost_protected = position["current_stop_price"]
+
+    advance_account(account, assessment, _book(first + pd.Timedelta(seconds=3), 60_260))
+    tightened = account["open_position"]["current_stop_price"]
+    assert tightened >= cost_protected
+
+    advance_account(account, assessment, _book(first + pd.Timedelta(seconds=4), 60_320))
+    assert account["open_position"] is None
+    assert account["trades"][0]["exit_reason"] == "DYNAMIC_TARGET_2"
+    assert len(account["trades"][0]["exit_fills"]) == 2
+
+
 def test_generic_binance_account_uses_its_own_fee_schedule() -> None:
     first = pd.Timestamp("2026-08-09T00:00:00Z")
     account = new_paper_account(

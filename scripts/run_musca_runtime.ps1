@@ -5,8 +5,8 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root ".venv\Scripts\python.exe"
-$statusPath = Join-Path $root "data\reports\musca_runtime.status.json"
-$mutex = [Threading.Mutex]::new($false, "Local\BotToneMuscaRuntimeSupervisor")
+$statusPath = Join-Path $root "data\reports\musca_auto_moe_runtime.status.json"
+$mutex = [Threading.Mutex]::new($false, "Local\BotToneMuscaAutoMoeRuntimeSupervisor")
 
 if (-not $mutex.WaitOne(0)) {
     exit 0
@@ -57,7 +57,7 @@ try {
             $workers += Ensure-PythonWorker "binance_l2" `
                 "adaptive_bot\.binance_l2_collector" `
                 @("-m", "adaptive_bot.binance_l2_collector") $processes
-            $workers += Ensure-PythonWorker "musca_v8_binance_paper" `
+            $workers += Ensure-PythonWorker "musca_btc_auto_moe_paper" `
                 "adaptive_bot\.musca_v8_binance" `
                 @(
                     "-m", "adaptive_bot.musca_v8_binance",
@@ -84,13 +84,13 @@ try {
 
         Write-RuntimeStatus @{
             phase = if ($errorMessage) {"degraded"} else {"running"}
-            detail = if ($errorMessage) {$errorMessage} else {"Musca V8 Binance-only paper runtime supervised"}
+            detail = if ($errorMessage) {$errorMessage} else {"Musca BTC Auto-MoE Binance paper runtime supervised"}
             supervisor_pid = $PID
             workers = $workers
             persistent_state = @(
-                "data/research/musca_v8_binance_paper_state.json",
-                "data/models/musca_v2/bundle.joblib",
-                "data/reports/musca_v8_multi_horizon.json"
+                "data/research/musca_btc_auto_moe_paper_state.json",
+                "data/reports/musca_btc_auto_moe.json",
+                "data/models/musca_btc_auto_moe/research_bundle.joblib"
             )
         }
         if ($Once) {

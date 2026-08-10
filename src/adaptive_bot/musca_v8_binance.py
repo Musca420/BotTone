@@ -16,10 +16,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import yaml
 
-from adaptive_bot import binance_l2_dataset, btc_vwap_alpha, musca_v8_multi_horizon
+from adaptive_bot import (
+    binance_l2_dataset,
+    btc_vwap_alpha,
+    musca_btc_auto_moe,
+)
 from adaptive_bot.musca_v5_execution import (
     quote_taker_round_trip,
     size_for_technical_stop,
@@ -27,13 +32,27 @@ from adaptive_bot.musca_v5_execution import (
 from adaptive_bot.musca_v5_paper import advance_account, new_paper_account
 
 CONFIG = Path("configs/binance_btcusdt_paper.yaml")
-STATE = Path("data/research/musca_v8_binance_paper_state.json")
+STATE = Path("data/research/musca_btc_auto_moe_paper_state.json")
 REPORT = Path("data/reports/musca_v8_binance_paper.json")
 SHADOW_REPORT = Path("data/reports/musca_v8_binance_shadow.json")
 PROFILE = "BINANCE"
-STRATEGY_PROFILE = "musca_v5_stable_multi_horizon_vwap"
+STRATEGY_PROFILE = "musca_btc_auto_moe_vwap"
 PREMIUM_INDEX_URL = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT"
 COMMISSION_URL = "https://fapi.binance.com/fapi/v1/commissionRate"
+OPEN_INTEREST_HISTORY_URL = (
+    "https://fapi.binance.com/futures/data/openInterestHist"
+    "?symbol=BTCUSDT&period=5m&limit=30"
+)
+FUNDING_HISTORY_URL = (
+    "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=200"
+)
+MARK_KLINES_URL = (
+    "https://fapi.binance.com/fapi/v1/markPriceKlines"
+    "?symbol=BTCUSDT&interval=1m&limit=5"
+)
+SPOT_KLINES_URL = (
+    "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=5"
+)
 _FUNDING_CACHE: tuple[float, dict[str, Any]] | None = None
 _CONTEXT_CACHE: tuple[float, pd.DataFrame] | None = None
 
@@ -68,13 +87,20 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.write_text(
         json.dumps(payload, indent=2, allow_nan=False, default=str), encoding="utf-8"
     )
-    temporary.replace(path)
+    for attempt in range(20):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(min(0.05 * (attempt + 1), 0.5))
 
 
 def load_config(path: Path = CONFIG) -> BinancePaperConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("mode") != "paper":
-        raise ValueError("Binance Musca V8 requires an explicit paper configuration")
+        raise ValueError("Binance Musca Auto-MoE requires an explicit paper configuration")
     if raw.get("live_trading_enabled") is not False:
         raise ValueError("live trading must remain disabled")
     execution = raw.get("execution")
@@ -116,7 +142,7 @@ def _fetch_json(url: str, *, headers: dict[str, str] | None = None) -> Any:
         url,
         headers={
             "Accept": "application/json",
-            "User-Agent": "BotTone-MuscaV8/1",
+            "User-Agent": "BotTone-MuscaAutoMoE/1",
             **(headers or {}),
         },
     )
@@ -189,6 +215,130 @@ def funding_snapshot(*, fetch: Callable[..., Any] = _fetch_json) -> dict[str, An
     return result
 
 
+def _closed_kline_close(
+    payload: Any, candle_timestamp: pd.Timestamp, observed_at: pd.Timestamp
+) -> tuple[float, pd.Timestamp]:
+    if not isinstance(payload, list):
+        raise ValueError("Binance kline history returned an invalid response")
+    for row in payload:
+        if not isinstance(row, list) or len(row) < 7:
+            continue
+        opened = pd.to_datetime(int(row[0]), unit="ms", utc=True)
+        closed = pd.to_datetime(int(row[6]), unit="ms", utc=True)
+        price = float(row[4])
+        if opened == candle_timestamp and closed <= observed_at and price > 0:
+            return price, closed
+    raise ValueError("Binance closed basis candle is unavailable")
+
+
+def derivatives_alpha_features(
+    *,
+    candle_timestamp: pd.Timestamp,
+    observed_at: pd.Timestamp,
+    return_5m_bps: float,
+    fetch: Callable[..., Any] = _fetch_json,
+) -> dict[str, Any]:
+    """Recreate the four historical derivatives features from public Binance data."""
+    candle_timestamp = (
+        candle_timestamp.tz_localize("UTC")
+        if candle_timestamp.tzinfo is None
+        else candle_timestamp.tz_convert("UTC")
+    )
+    observed_at = (
+        observed_at.tz_localize("UTC")
+        if observed_at.tzinfo is None
+        else observed_at.tz_convert("UTC")
+    )
+    oi_payload = fetch(OPEN_INTEREST_HISTORY_URL)
+    funding_payload = fetch(FUNDING_HISTORY_URL)
+    mark_payload = fetch(MARK_KLINES_URL)
+    spot_payload = fetch(SPOT_KLINES_URL)
+    if not isinstance(oi_payload, list):
+        raise ValueError("Binance open-interest history returned an invalid response")
+
+    oi = pd.DataFrame(oi_payload)
+    if not {"timestamp", "sumOpenInterest"}.issubset(oi.columns):
+        raise ValueError("Binance open-interest history is incomplete")
+    oi["timestamp"] = pd.to_datetime(
+        pd.to_numeric(oi["timestamp"], errors="raise"), unit="ms", utc=True
+    )
+    oi["open_interest"] = pd.to_numeric(oi["sumOpenInterest"], errors="raise")
+    oi = oi.loc[oi["timestamp"].le(observed_at)].sort_values("timestamp").tail(13)
+    if (
+        len(oi) != 13
+        or oi["timestamp"].duplicated().any()
+        or observed_at - oi["timestamp"].iloc[-1] > pd.Timedelta(minutes=10)
+        or float(oi["open_interest"].iloc[0]) <= 0
+    ):
+        raise ValueError("Binance open-interest 1h coverage is stale or incomplete")
+    oi_change_1h = float(
+        oi["open_interest"].iloc[-1] / oi["open_interest"].iloc[0] - 1
+    )
+
+    if not isinstance(funding_payload, list):
+        raise ValueError("Binance funding history returned an invalid response")
+    funding = pd.DataFrame(funding_payload)
+    if not {"fundingTime", "fundingRate"}.issubset(funding.columns):
+        raise ValueError("Binance funding history is incomplete")
+    funding["timestamp"] = pd.to_datetime(
+        pd.to_numeric(funding["fundingTime"], errors="raise"), unit="ms", utc=True
+    ).dt.as_unit("ns")
+    funding["rate"] = pd.to_numeric(funding["fundingRate"], errors="raise")
+    funding = funding.loc[funding["timestamp"].le(observed_at)].sort_values("timestamp")
+    if funding.empty or funding["timestamp"].duplicated().any():
+        raise ValueError("Binance funding history is unavailable")
+    minute_grid = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                observed_at.floor("min") - pd.Timedelta(minutes=10_080),
+                observed_at.floor("min"),
+                freq="1min",
+            ).as_unit("ns")
+        }
+    )
+    minute_rates = pd.merge_asof(
+        minute_grid,
+        funding[["timestamp", "rate"]],
+        on="timestamp",
+        direction="backward",
+    )["rate"]
+    history = minute_rates.iloc[:-1].dropna()
+    if len(history) < 1_440 or not pd.notna(minute_rates.iloc[-1]):
+        raise ValueError("Binance funding z-score warm-up is incomplete")
+    funding_std = float(history.std())
+    if not funding_std > 0:
+        raise ValueError("Binance funding history has zero dispersion")
+    funding_z = float((float(minute_rates.iloc[-1]) - float(history.mean())) / funding_std)
+
+    mark_close, mark_closed_at = _closed_kline_close(
+        mark_payload, candle_timestamp, observed_at
+    )
+    spot_close, spot_closed_at = _closed_kline_close(
+        spot_payload, candle_timestamp, observed_at
+    )
+    basis_bps = (mark_close / spot_close - 1) * 10_000
+    values = np.array(
+        [oi_change_1h, funding_z, basis_bps, return_5m_bps * oi_change_1h],
+        dtype=float,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError("Binance derivatives features are non-finite")
+    return {
+        "oi_change_1h": oi_change_1h,
+        "return_oi_interaction_raw": float(return_5m_bps * oi_change_1h),
+        "basis_bps": float(basis_bps),
+        "funding_z": funding_z,
+        "derivatives_feature_valid": True,
+        "derivatives_feature_available_at": observed_at.isoformat(),
+        "derivatives_source_timestamps": {
+            "open_interest": oi["timestamp"].iloc[-1].isoformat(),
+            "funding": funding["timestamp"].iloc[-1].isoformat(),
+            "mark": mark_closed_at.isoformat(),
+            "spot": spot_closed_at.isoformat(),
+        },
+    }
+
+
 def market_context() -> pd.DataFrame:
     global _CONTEXT_CACHE
     now = time.monotonic()
@@ -199,6 +349,24 @@ def market_context() -> pd.DataFrame:
     context = context.loc[context["feature_contract_valid"].fillna(False)].copy()
     if context.empty:
         raise ValueError("Binance minute Alpha has not completed its causal warm-up")
+    latest = context.iloc[-1]
+    derivatives = derivatives_alpha_features(
+        candle_timestamp=pd.Timestamp(latest["timestamp"]),
+        observed_at=pd.Timestamp.now(tz="UTC"),
+        return_5m_bps=float(latest["return_5m_bps"]),
+    )
+    for name in (
+        "oi_change_1h",
+        "return_oi_interaction_raw",
+        "basis_bps",
+        "funding_z",
+        "derivatives_feature_valid",
+        "derivatives_feature_available_at",
+    ):
+        context.at[context.index[-1], name] = derivatives[name]
+    context.attrs["derivatives_source_timestamps"] = derivatives[
+        "derivatives_source_timestamps"
+    ]
     _CONTEXT_CACHE = (now, context)
     return context
 
@@ -208,6 +376,9 @@ def latest_book(evaluated_at: pd.Timestamp, config: BinancePaperConfig) -> pd.Da
     if rows.empty:
         return rows
     rows["available_at"] = pd.to_datetime(rows["available_at"], utc=True, format="mixed")
+    rows = rows.loc[rows["available_at"].le(evaluated_at)].copy()
+    if rows.empty:
+        return rows
     rows = rows.sort_values("exchange_second").tail(10).reset_index(drop=True)
     latest = rows.iloc[-1]
     bids, asks = latest.get("bids"), latest.get("asks")
@@ -294,7 +465,8 @@ def build_assessment(
         latest.get("available_at"),
         evaluated_at,
         maximum_age_seconds=90,
-        structurally_valid=bool(latest.get("feature_contract_valid", False)),
+        structurally_valid=bool(latest.get("feature_contract_valid", False))
+        and bool(latest.get("derivatives_feature_valid", False)),
     )
     execution_source = _source(
         "Binance",
@@ -325,7 +497,11 @@ def build_assessment(
     target_bps: float | None = None
     if candidate and not book.empty and sign:
         mid = float(book_row["mid"])
-        stop_bps = sign * (mid - float(candidate["stop_price"])) / mid * 10_000
+        stop_bps = (
+            float(candidate["stop_bps"])
+            if candidate.get("stop_bps") is not None
+            else sign * (mid - float(candidate["stop_price"])) / mid * 10_000
+        )
         next_funding = pd.Timestamp(funding["next_funding_timestamp"])
         crosses_funding = next_funding <= evaluated_at + pd.Timedelta(
             minutes=int(candidate["maximum_hold_minutes"])
@@ -377,7 +553,7 @@ def build_assessment(
                         break
                     quote = sized
         expected_net_ev_bps = float(candidate["robust_expected_gross_bps"]) - expected_cost_bps
-        target_bps = 1.5 * stop_bps if stop_bps and stop_bps > 0 else None
+        target_bps = float(candidate.get("target_1_bps", 1.5 * stop_bps)) if stop_bps else None
     approved = bool(
         candidate
         and sources_valid
@@ -392,7 +568,7 @@ def build_assessment(
     reason = (
         "BASE_ALPHA_NET_POSITIVE"
         if approved
-        else "WAIT_NEW_IMPULSE_PULLBACK_RESTART"
+        else "WAIT_NO_POSITIVE_AUTO_MOE_ACTION"
         if candidate is None
         else "BINANCE_DATA_FAIL_CLOSED"
         if not sources_valid
@@ -406,15 +582,15 @@ def build_assessment(
     )
     entry = float(quote.entry.execution_vwap) if quote is not None else None
     setup = candidate or {
-        "setup": "IMPULSE_PULLBACK_MULTI_HORIZON",
+        "setup": "AUTO_MOE_VWAP_CONTROLLER",
         "direction": None,
         "candidate": False,
         "setup_active": False,
         "passed_checks": 0,
         "total_checks": 7,
-        "first_failed_check": "waiting_new_impulse_pullback_restart",
+        "first_failed_check": "no_expert_with_positive_calibrated_ev",
         "checks": [],
-        "policy_source": "MUSCA_V8_FROZEN_BASE_MONITOR",
+        "policy_source": "BTC_AUTO_MOE_RESEARCH_PAPER_MONITOR",
     }
     context_observed = pd.Timestamp(latest["available_at"]).isoformat()
     return {
@@ -427,17 +603,19 @@ def build_assessment(
         "fee_profile": PROFILE,
         "setup": setup["setup"],
         "direction": direction,
-        "policy_source": setup.get("policy_source", "MUSCA_V8_FROZEN_BASE"),
+        "policy_source": setup.get("policy_source", "MUSCA_AUTO_MOE_FROZEN_BASE"),
         "expert_id": setup.get("expert_id"),
         "alpha_signal_at": setup.get("available_at"),
         "management_style": setup.get("management_style", "HALF_AT_1_5R_COST_PROTECTED_TRAIL_15M"),
         "partial_target_fraction": setup.get("partial_target_fraction", 0.5),
         "maximum_hold_minutes": int(setup.get("maximum_hold_minutes", 360)),
         "candidate_complete": candidate is not None,
-        "model_context": "COMPLETE_CANDIDATE" if candidate else "WAITING_FROZEN_EVENT",
+        "model_context": "COMPLETE_CANDIDATE" if candidate else "NO_POSITIVE_EXPERT_ACTION",
         "model_feature_coverage": {"complete": sources_valid, "missing": []},
         "probability_status": (
-            "FROZEN_BASE_HISTORICAL_CALIBRATION" if candidate else "FROZEN_BASE_WAITING_EVENT"
+            "AUTO_MOE_PREQUENTIAL_CALIBRATION"
+            if candidate
+            else "AUTO_MOE_WAITING_POSITIVE_EV"
         ),
         "target_probability": candidate.get("target_probability") if candidate else None,
         "stop_probability": None,
@@ -458,6 +636,8 @@ def build_assessment(
         "vwap_distance_bps": float(latest["vwap_distance_bps"]),
         "stop_bps": stop_bps,
         "target_bps": target_bps,
+        "target_2_bps": candidate.get("target_2_bps") if candidate else None,
+        "trailing_bps": candidate.get("trailing_bps") if candidate else None,
         "expected_cost_bps": expected_cost_bps,
         "expected_funding_bps": expected_funding_bps,
         "execution_status": "QUOTED" if quote is not None else "NOT_EVALUATED",
@@ -482,6 +662,11 @@ def build_assessment(
         "break_even_price": entry * (1 + sign * expected_cost_bps / 10_000) if entry else None,
         "stop_price": entry * (1 - sign * stop_bps / 10_000) if entry and stop_bps else None,
         "target_price": entry * (1 + sign * target_bps / 10_000) if entry and target_bps else None,
+        "target_2_price": (
+            entry * (1 + sign * float(candidate["target_2_bps"]) / 10_000)
+            if entry and candidate and candidate.get("target_2_bps")
+            else None
+        ),
         "anchor": {
             "state": "VALID" if candidate else "NONE",
             "valid": candidate is not None,
@@ -507,6 +692,9 @@ def build_assessment(
                 "vwap_slope_bps": float(latest["vwap_slope_bps"]),
                 "range_60s_bps": float(latest["range_60s_bps"]),
                 "taker_imbalance_60s": float(latest["taker_imbalance_60s"]),
+                "oi_change_1h": float(latest["oi_change_1h"]),
+                "basis_bps": float(latest["basis_bps"]),
+                "funding_z": float(latest["funding_z"]),
                 "mid": float(book_row["mid"]) if not book.empty else None,
                 "mark_price": funding["mark_price"],
                 "index_price": funding["index_price"],
@@ -520,7 +708,7 @@ def build_assessment(
         },
         "setups": [setup],
         "evaluation_frequency": (
-            "frozen V8 event on completed Binance 5m bars; execution on next Binance book"
+            "Auto-MoE decision on completed Binance 1m context; execution on next Binance book"
         ),
         "outcome_horizons_minutes": [360],
     }
@@ -549,21 +737,15 @@ def _load_account(fees: FeeSchedule) -> dict[str, Any]:
 
 
 def _historical_alpha(config: BinancePaperConfig, fees: FeeSchedule) -> dict[str, Any]:
-    report = json.loads(musca_v8_multi_horizon.REPORT.read_text(encoding="utf-8"))
+    report = json.loads(musca_btc_auto_moe.REPORT.read_text(encoding="utf-8"))
     cost = 2 * fees.taker_bps + config.non_fee_reserve_bps
-    matching = next(
-        (
-            audit
-            for audit in report.get("paper_profiles", {}).values()
-            if abs(float(audit.get("assumed_round_trip_cost_bps", -1)) - cost) < 1e-9
-        ),
-        None,
-    )
+    trained_cost = float(report.get("protocol", {}).get("round_trip_cost_bps", -1))
     return {
         "status": report.get("verdict"),
         "protocol_hash": report.get("protocol_hash"),
-        "paper_profiles": {PROFILE: matching} if matching else {},
-        "cost_matched_without_retraining": matching is not None,
+        "historical_audit": report.get("historical_audit"),
+        "paper_profiles": {PROFILE: report.get("historical_audit")},
+        "cost_matched_without_retraining": abs(trained_cost - cost) < 1e-9,
         "modeled_round_trip_cost_bps": cost,
         "holdout_opened": False,
         "real_capital_allowed": False,
@@ -597,9 +779,9 @@ def _shadow(audit: dict[str, Any]) -> dict[str, Any]:
                 {
                     "exchange_timestamp": trade["entry_at"] if entry else trade["exit_at"],
                     "received_timestamp": trade["entry_at"] if entry else trade["exit_at"],
-                    "source": "musca_v8_binance_observed_depth_paper",
+                    "source": "musca_btc_auto_moe_observed_depth_paper",
                     "instrument": "BTCUSDT",
-                    "client_order_id": f"musca-v8-binance-{2 * number + int(not entry)}",
+                    "client_order_id": f"musca-auto-moe-{2 * number + int(not entry)}",
                     "side": "buy" if (trade["side"] == "LONG") == entry else "sell",
                     "price": str(
                         trade["entry_execution_price"] if entry else trade["exit_execution_price"]
@@ -666,13 +848,14 @@ def _shadow(audit: dict[str, Any]) -> dict[str, Any]:
 
 def refresh(config_path: Path = CONFIG) -> dict[str, Any]:
     config = load_config(config_path)
-    evaluated_at = pd.Timestamp.now(tz="UTC")
     fees = fee_schedule(config)
     funding = funding_snapshot()
     context = market_context()
+    evaluated_at = pd.Timestamp.now(tz="UTC")
     book = latest_book(evaluated_at, config)
     cost = 2 * fees.taker_bps + config.non_fee_reserve_bps
-    candidate = musca_v8_multi_horizon.live_candidate_for_cost(cost, evaluated_at)
+    recent_l2 = binance_l2_dataset.load_recent_records(max_lines=7_200)
+    candidate = musca_btc_auto_moe.live_candidate(context, recent_l2, evaluated_at)
     account = _load_account(fees)
     assessment = build_assessment(
         candidate=candidate,
@@ -698,9 +881,9 @@ def refresh(config_path: Path = CONFIG) -> dict[str, Any]:
         Path("data/reports/binance_l2_collector.status.json").read_text(encoding="utf-8")
     )
     audit = {
-        "protocol": musca_v8_multi_horizon.PROTOCOL,
-        "protocol_hash": musca_v8_multi_horizon.PROTOCOL_HASH,
-        "validation_status": "RESEARCH_ONLY_BINANCE_PAPER_REQUIRED",
+        "protocol": musca_btc_auto_moe.PROTOCOL,
+        "protocol_hash": musca_btc_auto_moe.PROTOCOL_HASH,
+        "validation_status": "RESEARCH_PAPER_NO_REAL_CAPITAL",
         "real_capital_allowed": False,
         "selected_fee_profile": PROFILE,
         "alpha": alpha,
@@ -758,7 +941,7 @@ async def worker(*, once: bool, config_path: Path = CONFIG) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Musca V8 Binance USD-M paper worker")
+    parser = argparse.ArgumentParser(description="Musca BTC Auto-MoE Binance paper worker")
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()

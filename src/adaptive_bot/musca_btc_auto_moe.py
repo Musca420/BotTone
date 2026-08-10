@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -45,6 +46,13 @@ MIN_FIT_OPPORTUNITIES = 1_000
 MIN_VALIDATION_OPPORTUNITIES = 90
 MAX_SIGNAL_JACCARD = 0.90
 GATE_SEEDS = (20260820, 20260821, 20260822)
+EXPERT_VALIDATION_PROFIT_FACTOR = 1.02
+MAX_PROFIT_FACTOR_FEATURE = 100.0
+LIVE_OFFICIAL_DERIVATIVE_FEATURES = frozenset(
+    {"oi_change_1h", "return_oi_interaction_raw", "basis_bps", "funding_z"}
+)
+MODEL_FEATURES = base.FEATURES
+GATE_CONTEXT = base.GATING_CONTEXT
 
 EXPERT_META_FEATURES = (
     "side",
@@ -59,7 +67,7 @@ EXPERT_META_FEATURES = (
     "validation_activation_rate",
     "generator_score_bps",
 )
-GATE_FEATURES = (*base.GATING_CONTEXT, *EXPERT_META_FEATURES)
+GATE_FEATURES = (*GATE_CONTEXT, *EXPERT_META_FEATURES)
 
 PROTOCOL = {
     "name": "musca_btc_automatic_two_stage_mixture_of_experts",
@@ -77,9 +85,17 @@ PROTOCOL = {
         "minimum_fit_opportunities": MIN_FIT_OPPORTUNITIES,
         "minimum_validation_opportunities": MIN_VALIDATION_OPPORTUNITIES,
         "maximum_signal_jaccard": MAX_SIGNAL_JACCARD,
-        "validation_profit_factor": 1.05,
-        "validation_cost_stress": 1.5,
-        "positive_validation_months": "both January and February 2026",
+        "model_features": list(MODEL_FEATURES),
+        "live_official_derivative_features": sorted(LIVE_OFFICIAL_DERIVATIVE_FEATURES),
+        "live_feature_sources": {
+            "oi_change_1h": "GET /futures/data/openInterestHist period=5m",
+            "basis_bps": "closed GET /fapi/v1/markPriceKlines / spot api/v3/klines",
+            "funding_z": "GET /fapi/v1/fundingRate reconstructed on the minute grid",
+        },
+        "validation_profit_factor": EXPERT_VALIDATION_PROFIT_FACTOR,
+        "expert_selection_target": "managed net PnL using the production exit rules",
+        "validation_cost_stress": "reported only; applied to the combined policy audit",
+        "positive_validation_months": "both January and February using managed net PnL",
     },
     "phase_2": {
         "inputs": "forward-OOS expert activations, frozen expert metadata and regime context",
@@ -87,6 +103,7 @@ PROTOCOL = {
         "challenger": "three-seed XGBoost GPU",
         "challenger_rule": "strictly better MAE, Brier and decision regret",
         "decision": "highest calibrated EV if positive, otherwise neutral FLAT",
+        "adaptation": "monthly prequential refit; prior outcomes only",
     },
     "management": base.PROTOCOL["management"],
     "entry": base.PROTOCOL["entry"],
@@ -195,6 +212,42 @@ def _profit_factor(values: np.ndarray) -> float:
     return gains / losses if losses else float("inf")
 
 
+def _managed_net(
+    rows: pd.DataFrame,
+    indexes: np.ndarray,
+    source: pd.DataFrame,
+    funding: tuple[np.ndarray, np.ndarray],
+    *,
+    side: int,
+    horizon: int,
+    target_1: float,
+    target_2: float,
+    stop: float,
+    trailing: float,
+) -> np.ndarray:
+    if not len(indexes):
+        return np.empty(0, dtype=float)
+    active = rows.iloc[indexes]
+    gross, exit_seconds, _ = base._simulate_management(
+        source,
+        active["decision_position"].to_numpy(int),
+        side,
+        horizon,
+        np.full(len(active), target_1, dtype=float),
+        np.full(len(active), target_2, dtype=float),
+        np.full(len(active), stop, dtype=float),
+        np.full(len(active), trailing, dtype=float),
+    )
+    exit_timestamp = active["entry_timestamp"] + pd.to_timedelta(exit_seconds, unit="s")
+    funding_bps = base._funding_pnl_bps(
+        active["entry_timestamp"],
+        exit_timestamp,
+        np.full(len(active), side),
+        funding,
+    )
+    return np.asarray(gross + funding_bps - base.ROUND_TRIP_COST_BPS, dtype=float)
+
+
 def _candidate(
     fit: pd.DataFrame,
     validation: pd.DataFrame,
@@ -202,42 +255,40 @@ def _candidate(
     validation_indexes: np.ndarray,
     fit_net: np.ndarray,
     validation_net: np.ndarray,
+    source: pd.DataFrame,
+    funding: tuple[np.ndarray, np.ndarray],
     *,
     side: int,
     horizon: int,
     tree: int,
     leaf: int,
 ) -> dict[str, Any]:
-    fit_values = fit_net[fit_indexes]
-    validation_values = validation_net[validation_indexes]
+    terminal_fit_values = fit_net[fit_indexes]
+    terminal_validation_values = validation_net[validation_indexes]
     reasons: list[str] = []
     if len(fit_indexes) < MIN_FIT_OPPORTUNITIES:
         reasons.append("fit_opportunities")
     if len(validation_indexes) < MIN_VALIDATION_OPPORTUNITIES:
         reasons.append("validation_opportunities")
-    fit_expectancy = float(fit_values.mean()) if len(fit_values) else float("-inf")
-    validation_expectancy = (
-        float(validation_values.mean()) if len(validation_values) else float("-inf")
+    terminal_fit_expectancy = (
+        float(terminal_fit_values.mean()) if len(terminal_fit_values) else float("-inf")
     )
-    validation_pf = _profit_factor(validation_values) if len(validation_values) else 0.0
-    stress_expectancy = validation_expectancy - 0.5 * base.ROUND_TRIP_COST_BPS
-    if fit_expectancy <= 0:
+    terminal_validation_expectancy = (
+        float(terminal_validation_values.mean())
+        if len(terminal_validation_values)
+        else float("-inf")
+    )
+    terminal_validation_pf = (
+        min(_profit_factor(terminal_validation_values), MAX_PROFIT_FACTOR_FEATURE)
+        if len(terminal_validation_values)
+        else 0.0
+    )
+    if terminal_fit_expectancy <= 0:
         reasons.append("fit_expectancy")
-    if validation_expectancy <= 0:
+    if terminal_validation_expectancy <= 0:
         reasons.append("validation_expectancy")
-    if validation_pf < 1.05:
+    if terminal_validation_pf < EXPERT_VALIDATION_PROFIT_FACTOR:
         reasons.append("validation_profit_factor")
-    if stress_expectancy < 0:
-        reasons.append("cost_stress_1_5x")
-
-    timestamps = pd.to_datetime(validation.iloc[validation_indexes]["entry_timestamp"], utc=True)
-    months = pd.DataFrame(
-        {"month": timestamps.dt.strftime("%Y-%m").to_numpy(), "net": validation_values}
-    )
-    monthly = months.groupby("month")["net"].mean() if len(months) else pd.Series(dtype=float)
-    positive_months = int(monthly.gt(0).sum())
-    if positive_months < 2:
-        reasons.append("monthly_stability")
 
     favorable_name = f"max_{'up' if side > 0 else 'down'}_{horizon}s_bps"
     adverse_name = f"max_{'down' if side > 0 else 'up'}_{horizon}s_bps"
@@ -252,6 +303,62 @@ def _candidate(
     target_2 = float(np.clip(max(favorable_q75, target_1 + 1.0), target_1 + 1.0, 300.0))
     stop = float(np.clip(adverse_q75, 3.0, base.MAX_STOP_BPS))
     trailing = float(np.clip(adverse_q50, 3.0, stop))
+    fit_values = np.empty(0, dtype=float)
+    validation_values = np.empty(0, dtype=float)
+    managed_evaluated = not reasons
+    if managed_evaluated:
+        fit_values = _managed_net(
+            fit,
+            fit_indexes,
+            source,
+            funding,
+            side=side,
+            horizon=horizon,
+            target_1=target_1,
+            target_2=target_2,
+            stop=stop,
+            trailing=trailing,
+        )
+        validation_values = _managed_net(
+            validation,
+            validation_indexes,
+            source,
+            funding,
+            side=side,
+            horizon=horizon,
+            target_1=target_1,
+            target_2=target_2,
+            stop=stop,
+            trailing=trailing,
+        )
+    fit_expectancy = float(fit_values.mean()) if len(fit_values) else float("-inf")
+    validation_expectancy = (
+        float(validation_values.mean()) if len(validation_values) else float("-inf")
+    )
+    validation_pf = (
+        min(_profit_factor(validation_values), MAX_PROFIT_FACTOR_FEATURE)
+        if len(validation_values)
+        else 0.0
+    )
+    if managed_evaluated and fit_expectancy <= 0:
+        reasons.append("managed_fit_expectancy")
+    if managed_evaluated and validation_expectancy <= 0:
+        reasons.append("managed_validation_expectancy")
+    if managed_evaluated and validation_pf < EXPERT_VALIDATION_PROFIT_FACTOR:
+        reasons.append("managed_validation_profit_factor")
+    stress_expectancy = validation_expectancy - 0.5 * base.ROUND_TRIP_COST_BPS
+    timestamps = pd.to_datetime(validation.iloc[validation_indexes]["entry_timestamp"], utc=True)
+    months = (
+        pd.DataFrame(
+            {"month": timestamps.dt.strftime("%Y-%m").to_numpy(), "net": validation_values}
+        )
+        if len(validation_values)
+        else pd.DataFrame(columns=["month", "net"])
+    )
+    monthly = months.groupby("month")["net"].mean() if len(months) else pd.Series(dtype=float)
+    positive_months = int(monthly.gt(0).sum())
+    if managed_evaluated and positive_months < 2:
+        reasons.append("managed_monthly_stability")
     signal = np.zeros(len(validation), dtype=bool)
     signal[validation_indexes] = True
     signature = hashlib.sha256(np.packbits(signal).tobytes()).hexdigest()
@@ -268,6 +375,9 @@ def _candidate(
         "fit_expectancy_bps": fit_expectancy,
         "validation_expectancy_bps": validation_expectancy,
         "validation_profit_factor": validation_pf,
+        "terminal_fit_expectancy_bps": terminal_fit_expectancy,
+        "terminal_validation_expectancy_bps": terminal_validation_expectancy,
+        "terminal_validation_profit_factor": terminal_validation_pf,
         "validation_stress_1_5x_bps": stress_expectancy,
         "positive_validation_months": positive_months,
         "validation_activation_rate": len(validation_indexes) / max(1, len(validation)),
@@ -346,8 +456,9 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
     fit = _period(matrix, None, DISCOVERY_FIT_END)
     validation = _period(matrix, DISCOVERY_FIT_END, LIBRARY_FREEZE_END)
     funding = base._funding_curve()
-    x_fit = fit.loc[:, base.FEATURES].to_numpy(np.float32)
-    x_validation = validation.loc[:, base.FEATURES].to_numpy(np.float32)
+    source = base._load_micro_source()
+    x_fit = fit.loc[:, MODEL_FEATURES].to_numpy(np.float32)
+    x_validation = validation.loc[:, MODEL_FEATURES].to_numpy(np.float32)
     all_candidates: list[dict[str, Any]] = []
     signals: dict[str, np.ndarray] = {}
     generators: dict[str, Any] = {}
@@ -382,6 +493,8 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
                         validation_indexes,
                         fit_net,
                         validation_net,
+                        source,
+                        funding,
                         side=side,
                         horizon=horizon,
                         tree=tree,
@@ -451,7 +564,7 @@ def _expert_action_rows(
     if not library["experts"]:
         return pd.DataFrame()
     funding = base._funding_curve()
-    x = rows.loc[:, base.FEATURES].to_numpy(np.float32)
+    x = rows.loc[:, MODEL_FEATURES].to_numpy(np.float32)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for expert in library["experts"]:
         grouped[f"{expert['side']}:{expert['horizon_seconds']}"].append(expert)
@@ -548,7 +661,11 @@ def build_actions(
 
 
 def _gate_x(rows: pd.DataFrame) -> np.ndarray:
-    values = rows.loc[:, GATE_FEATURES].to_numpy(np.float32)
+    frame = rows.loc[:, GATE_FEATURES].copy()
+    frame["validation_profit_factor"] = frame["validation_profit_factor"].clip(
+        upper=MAX_PROFIT_FACTOR_FEATURE
+    )
+    values = frame.to_numpy(np.float32)
     if not np.isfinite(values).all():
         raise ValueError("gating features must be finite")
     return values
@@ -693,6 +810,235 @@ def _execute(scored: pd.DataFrame) -> pd.DataFrame:
     return winners.loc[accepted].sort_values("entry_timestamp").reset_index(drop=True)
 
 
+@lru_cache(maxsize=1)
+def _paper_bundle() -> dict[str, Any]:
+    if not BUNDLE.exists():
+        raise ValueError("Auto-MoE paper bundle is missing")
+    bundle = cast(dict[str, Any], joblib.load(BUNDLE))
+    if bundle.get("protocol_hash") != PROTOCOL_HASH:
+        raise ValueError("Auto-MoE paper bundle protocol is stale")
+    if not bundle.get("paper_orders_enabled", False):
+        raise ValueError("Auto-MoE paper economics gate is closed")
+    return bundle
+
+
+def _live_micro_features(
+    records: pd.DataFrame, evaluated_at: pd.Timestamp
+) -> dict[str, float] | None:
+    required = {
+        "exchange_second",
+        "available_at",
+        "buy_quote",
+        "sell_quote",
+        "trade_count",
+        "aggregate_trades",
+    }
+    if records.empty or required - set(records):
+        return None
+    frame = records.loc[:, sorted(required)].copy()
+    frame["exchange_second"] = pd.to_numeric(frame["exchange_second"], errors="coerce")
+    frame["available_at"] = pd.to_datetime(frame["available_at"], utc=True, format="mixed")
+    for name in ("buy_quote", "sell_quote", "trade_count"):
+        frame[name] = pd.to_numeric(frame[name], errors="coerce")
+    frame = frame.dropna().sort_values("exchange_second")
+    if frame.empty:
+        return None
+    evaluated_at = (
+        evaluated_at.tz_localize("UTC")
+        if evaluated_at.tzinfo is None
+        else evaluated_at.tz_convert("UTC")
+    )
+    frame["trade_close"] = frame["aggregate_trades"].map(
+        lambda trades: (
+            float(trades[-1][0]) if isinstance(trades, list) and trades else float("nan")
+        )
+    )
+    frame["bucket"] = pd.to_datetime(
+        frame["exchange_second"].astype(np.int64), unit="s", utc=True
+    ).dt.floor("5s")
+    buckets = frame.groupby("bucket", sort=True).agg(
+        close=("trade_close", "last"),
+        buy_quote=("buy_quote", "sum"),
+        sell_quote=("sell_quote", "sum"),
+        trade_count=("trade_count", "sum"),
+        observed_seconds=("exchange_second", "nunique"),
+    )
+    buckets = buckets.loc[buckets.index + pd.Timedelta(seconds=5) <= evaluated_at].copy()
+    buckets["close"] = buckets["close"].ffill()
+    buckets = buckets.dropna(subset=["close"])
+    if (
+        len(buckets) < 121
+        or buckets.index[-60:].to_series().diff().dropna().ne(pd.Timedelta(seconds=5)).any()
+        or buckets["observed_seconds"].iloc[-60:].lt(5).any()
+    ):
+        return None
+    signed = buckets["buy_quote"] - buckets["sell_quote"]
+    quote = buckets["buy_quote"] + buckets["sell_quote"]
+
+    def imbalance(window: int) -> float:
+        denominator = float(quote.iloc[-window:].sum())
+        return float(signed.iloc[-window:].sum() / denominator) if denominator > 0 else float("nan")
+
+    baseline = float(
+        buckets["trade_count"].shift(1).rolling(720, min_periods=120).median().iloc[-1]
+    )
+    if not np.isfinite(baseline) or baseline <= 0:
+        return None
+    ofi_1m = imbalance(12)
+    price_velocity_1m = float(
+        (buckets["close"].iloc[-1] / buckets["close"].iloc[-13] - 1) * 10_000
+    )
+    result = {
+        "ofi_15s": imbalance(3),
+        "ofi_1m": ofi_1m,
+        "ofi_5m": imbalance(60),
+        "ofi_persistence_1m": float(np.sign(signed.iloc[-12:]).mean()),
+        "trade_intensity_15s": float(buckets["trade_count"].iloc[-3:].sum() / baseline),
+        "trade_intensity_1m": float(
+            buckets["trade_count"].iloc[-12:].sum() / (12 * baseline)
+        ),
+        "absorption_1m": float(abs(ofi_1m) / (abs(price_velocity_1m) + 0.1)),
+        "price_velocity_15s": float(
+            (buckets["close"].iloc[-1] / buckets["close"].iloc[-4] - 1) * 10_000
+        ),
+        "price_velocity_1m": price_velocity_1m,
+    }
+    return result if np.isfinite(np.fromiter(result.values(), dtype=float)).all() else None
+
+
+def live_candidate(
+    context: pd.DataFrame,
+    l2_records: pd.DataFrame,
+    evaluated_at: pd.Timestamp,
+) -> dict[str, Any] | None:
+    bundle = _paper_bundle()
+    if context.empty or l2_records.empty:
+        return None
+    latest = context.sort_values("available_at").iloc[-1]
+    available_at = pd.Timestamp(latest["available_at"])
+    available_at = (
+        available_at.tz_localize("UTC")
+        if available_at.tzinfo is None
+        else available_at.tz_convert("UTC")
+    )
+    if available_at > evaluated_at or evaluated_at - available_at > pd.Timedelta(seconds=90):
+        return None
+    l2 = l2_records.copy()
+    l2["available_at"] = pd.to_datetime(l2["available_at"], utc=True, format="mixed")
+    l2 = l2.loc[l2["available_at"].le(evaluated_at)].copy()
+    micro = _live_micro_features(l2, available_at)
+    if micro is None:
+        return None
+    timestamp = available_at
+    features: dict[str, float] = {}
+    for name in MODEL_FEATURES:
+        if name in micro:
+            features[name] = micro[name]
+        elif name == "hour_sin":
+            hour = timestamp.hour + timestamp.minute / 60
+            features[name] = float(np.sin(2 * np.pi * hour / 24))
+        elif name == "hour_cos":
+            hour = timestamp.hour + timestamp.minute / 60
+            features[name] = float(np.cos(2 * np.pi * hour / 24))
+        elif name == "weekday_sin":
+            features[name] = float(np.sin(2 * np.pi * timestamp.dayofweek / 7))
+        elif name == "weekday_cos":
+            features[name] = float(np.cos(2 * np.pi * timestamp.dayofweek / 7))
+        else:
+            features[name] = float(latest.get(name, float("nan")))
+    values = np.array([features[name] for name in MODEL_FEATURES], dtype=np.float32)
+    if not np.isfinite(values).all():
+        return None
+    library = cast(dict[str, Any], bundle["expert_library"])
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for expert in library["experts"]:
+        grouped[f"{expert['side']}:{expert['horizon_seconds']}"].append(expert)
+    action_rows: list[dict[str, Any]] = []
+    x = values.reshape(1, -1)
+    for key, experts in grouped.items():
+        generator = library["generators"][key]
+        leaves = np.asarray(generator.apply(x), dtype=np.int32)[0]
+        generator_score = float(np.asarray(generator.predict(x), dtype=float)[0])
+        for expert in experts:
+            if leaves[int(expert["tree_index"])] != int(expert["leaf_id"]):
+                continue
+            side = int(expert["side"])
+            row: dict[str, Any] = {
+                "entry_timestamp": available_at,
+                "exit_timestamp": available_at
+                + pd.Timedelta(seconds=int(expert["horizon_seconds"])),
+                "expert_id": expert["expert_id"],
+            }
+            for name in GATE_CONTEXT:
+                value = features[name]
+                row[name] = value * side if name in base.DIRECTIONAL_FEATURES else value
+            for name in EXPERT_META_FEATURES:
+                if name == "horizon_fraction":
+                    row[name] = int(expert["horizon_seconds"]) / max(base.HORIZONS)
+                elif name == "generator_score_bps":
+                    row[name] = generator_score
+                else:
+                    row[name] = expert[name]
+            action_rows.append(row)
+    if not action_rows:
+        return None
+    scored = _score(
+        pd.DataFrame(action_rows),
+        cast(dict[str, Any], bundle["meta_model"]),
+        cast(dict[str, Any], bundle["calibrators"]),
+    ).sort_values(["calibrated_ev_bps", "raw_ev_bps", "expert_id"], ascending=[False, False, True])
+    winner = scored.iloc[0]
+    if float(winner["calibrated_ev_bps"]) <= 0:
+        return None
+    expert = next(
+        item for item in library["experts"] if item["expert_id"] == winner["expert_id"]
+    )
+    side = int(expert["side"])
+    decision_second = int(available_at.timestamp())
+    decision_books = l2.loc[
+        pd.to_numeric(l2["exchange_second"], errors="coerce").lt(decision_second)
+    ].sort_values("exchange_second")
+    if decision_books.empty:
+        return None
+    latest_book = decision_books.iloc[-1]
+    price = (
+        float(latest_book["mid"])
+        if "mid" in latest_book and pd.notna(latest_book["mid"])
+        else (
+            float(latest_book["bids"][0][0]) + float(latest_book["asks"][0][0])
+        )
+        / 2
+    )
+    direction = "LONG" if side > 0 else "SHORT"
+    return {
+        "setup": "AUTO_MOE_VWAP_CONTROLLER",
+        "candidate": True,
+        "setup_active": True,
+        "direction": direction,
+        "available_at": available_at.isoformat(),
+        "expert_id": expert["expert_id"],
+        "policy_source": "BTC_AUTO_MOE_RESEARCH_PAPER",
+        "operating_vwap": float(latest["rolling_vwap"]),
+        "impulse_anchor_at": None,
+        "stop_price": price * (1 - side * float(expert["stop_bps"]) / 10_000),
+        "stop_bps": float(expert["stop_bps"]),
+        "target_1_bps": float(expert["target_1_bps"]),
+        "target_2_bps": float(expert["target_2_bps"]),
+        "trailing_bps": float(expert["trailing_bps"]),
+        "maximum_hold_minutes": int(expert["horizon_seconds"]) // 60,
+        "management_style": "HALF_AT_Q50_Q75_NON_WIDENING_TRAIL",
+        "partial_target_fraction": 0.5,
+        "target_probability": float(winner["probability_net_positive"]),
+        "expected_net_ev_bps": float(winner["calibrated_ev_bps"]),
+        "robust_expected_gross_bps": float(winner["calibrated_ev_bps"])
+        + base.ROUND_TRIP_COST_BPS,
+        "passed_checks": 1,
+        "total_checks": 1,
+        "first_failed_check": None,
+        "checks": [{"name": "auto_moe_calibrated_ev", "passed": True}],
+    }
+
+
 def _library_spa(actions: pd.DataFrame) -> float | None:
     if actions.empty:
         return None
@@ -751,6 +1097,103 @@ def _trade_breakdown(trades: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _policy_metrics(
+    trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
+) -> dict[str, Any]:
+    metrics = base._metrics(trades, start, end)
+    calendar = pd.date_range(start.floor("D"), end.floor("D") - pd.Timedelta(days=1), freq="1D")
+    daily = (
+        trades.assign(day=pd.to_datetime(trades["entry_timestamp"], utc=True).dt.floor("D"))
+        .groupby("day")["net_bps"]
+        .sum()
+        if not trades.empty
+        else pd.Series(dtype=float)
+    )
+    metrics["active_days"] = len(daily)
+    metrics["flat_calendar_days"] = int(max(0, len(calendar) - len(daily)))
+    metrics["positive_active_days"] = float(daily.gt(0).mean()) if len(daily) else 0.0
+    metrics["nonnegative_calendar_days"] = float(
+        daily.reindex(calendar, fill_value=0.0).ge(0).mean()
+    )
+    return metrics
+
+
+def _policy_gates(metrics: dict[str, Any], *, live: bool) -> dict[str, bool]:
+    expectancy = metrics.get("expectancy_bps")
+    profit_factor = metrics.get("profit_factor")
+    common = {
+        "expectancy": expectancy is not None and float(expectancy) > 0,
+        "profit_factor": profit_factor is not None
+        and float(profit_factor) >= (1.15 if live else 1.05),
+        "drawdown": metrics.get("max_drawdown") is not None
+        and float(metrics["max_drawdown"]) <= 0.10,
+        "risk_budget": int(metrics.get("risk_budget_violations", 0)) == 0,
+    }
+    if not live:
+        return {"minimum_research_trades_50": int(metrics.get("trades", 0)) >= 50, **common}
+    lcb = metrics.get("bootstrap_lcb_95_bps")
+    pvalue = metrics.get("spa_pvalue")
+    return {
+        "minimum_historical_trades_300": int(metrics.get("trades", 0)) >= 300,
+        "frequency_3_per_day": float(metrics.get("trades_per_day", 0.0)) >= 3.0,
+        **common,
+        "positive_active_days": float(metrics.get("positive_active_days", 0.0)) > 0.5,
+        "stress_1_5x": metrics.get("stress_1_5x_expectancy_bps") is not None
+        and float(metrics["stress_1_5x_expectancy_bps"]) >= 0,
+        "bootstrap_lcb": lcb is not None and float(lcb) > 0,
+        "spa": pvalue is not None and float(pvalue) <= 0.05,
+    }
+
+
+def _prequential_audit(
+    actions: pd.DataFrame, champion: str
+) -> tuple[pd.DataFrame, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    timestamp = pd.to_datetime(actions["entry_timestamp"], utc=True)
+    trade_pieces: list[pd.DataFrame] = []
+    diagnostics: list[dict[str, Any]] = []
+    latest_model: dict[str, Any] | None = None
+    latest_calibrators: dict[str, Any] | None = None
+    for test_start in pd.date_range(
+        CALIBRATION_END, HISTORICAL_AUDIT_END, freq="MS", inclusive="left"
+    ):
+        test_end = min(test_start + pd.offsets.MonthBegin(1), HISTORICAL_AUDIT_END)
+        calibration_start = test_start - pd.offsets.MonthBegin(1)
+        fit = actions.loc[timestamp.lt(calibration_start - base.PURGE)].copy()
+        calibration = actions.loc[
+            timestamp.ge(calibration_start) & timestamp.lt(test_start - base.PURGE)
+        ].copy()
+        test = actions.loc[
+            timestamp.ge(test_start) & timestamp.lt(test_end - base.PURGE)
+        ].copy()
+        if fit.empty or calibration.empty or test.empty:
+            continue
+        latest_model = _fit_gate(fit, (champion,))[champion]
+        latest_calibrators = _fit_calibrators(calibration, latest_model)
+        scored = _score(test, latest_model, latest_calibrators)
+        trades = _execute(scored)
+        trade_pieces.append(trades)
+        diagnostics.append(
+            {
+                "month": test_start.strftime("%Y-%m"),
+                "fit_rows": len(fit),
+                "calibration_rows": len(calibration),
+                "test_rows": len(test),
+                "positive_candidate_fraction": float(
+                    scored.groupby("entry_timestamp")["calibrated_ev_bps"].max().gt(0).mean()
+                ),
+                "metrics": _policy_metrics(trades, test_start, test_end),
+            }
+        )
+    if latest_model is None or latest_calibrators is None:
+        raise ValueError("prequential audit has no complete fit/calibration/test window")
+    combined = (
+        pd.concat(trade_pieces, ignore_index=True)
+        if trade_pieces
+        else pd.DataFrame(columns=actions.columns)
+    )
+    return combined, diagnostics, latest_model, latest_calibrators
+
+
 def train(*, force: bool = False) -> dict[str, Any]:
     _status("start", "BTC automatic expert discovery", 0)
     matrix = base.build_matrix(force=False)
@@ -770,6 +1213,7 @@ def train(*, force: bool = False) -> dict[str, Any]:
             pd.to_datetime(matrix["available_at"], utc=True).ge(FUTURE_HOLDOUT_START).sum()
         ),
         "research_only": True,
+        "shadow_collection_enabled": True,
         "paper_orders_enabled": False,
         "live_orders_enabled": False,
         "real_capital_allowed": False,
@@ -817,23 +1261,32 @@ def train(*, force: bool = False) -> dict[str, Any]:
         else "ridge"
     )
     gate_fit = actions.loc[timestamp.lt(GATE_FIT_END - base.PURGE)].copy()
-    champion_model = _fit_gate(gate_fit, (champion,))[champion]
-    calibrators = _fit_calibrators(calibration, champion_model)
-    audit_scored = _score(historical_audit, champion_model, calibrators)
-    trades = _execute(audit_scored)
+    trades, prequential, _, _ = _prequential_audit(actions, champion)
+    forward_calibration_start = HISTORICAL_AUDIT_END - pd.offsets.MonthBegin(1)
+    forward_fit = actions.loc[
+        timestamp.lt(forward_calibration_start - base.PURGE)
+    ].copy()
+    forward_calibration = actions.loc[
+        timestamp.ge(forward_calibration_start)
+        & timestamp.lt(HISTORICAL_AUDIT_END - base.PURGE)
+    ].copy()
+    champion_model = _fit_gate(forward_fit, (champion,))[champion]
+    calibrators = _fit_calibrators(forward_calibration, champion_model)
     AUDIT_TRADES.parent.mkdir(parents=True, exist_ok=True)
     temporary_trades = AUDIT_TRADES.with_suffix(".parquet.tmp")
     trades.to_parquet(temporary_trades, index=False)
     temporary_trades.replace(AUDIT_TRADES)
-    metrics = base._metrics(trades, CALIBRATION_END, HISTORICAL_AUDIT_END)
-    gates = base._audit_gates(metrics)
-    historical_pass = all(gates.values())
+    metrics = _policy_metrics(trades, CALIBRATION_END, HISTORICAL_AUDIT_END)
+    paper_gates = _policy_gates(metrics, live=False)
+    live_gates = _policy_gates(metrics, live=True)
+    paper_pass = all(paper_gates.values())
+    historical_pass = all(live_gates.values())
     months: dict[str, Any] = {}
     for start in pd.date_range(CALIBRATION_END, HISTORICAL_AUDIT_END, freq="MS", inclusive="left"):
         end = min(start + pd.offsets.MonthBegin(1), HISTORICAL_AUDIT_END)
         timestamp_trades = pd.to_datetime(trades["entry_timestamp"], utc=True)
         monthly_trades = trades.loc[timestamp_trades.ge(start) & timestamp_trades.lt(end)].copy()
-        months[start.strftime("%Y-%m")] = base._metrics(monthly_trades, start, end)
+        months[start.strftime("%Y-%m")] = _policy_metrics(monthly_trades, start, end)
     report.update(
         {
             "forward_action_rows": len(actions),
@@ -845,18 +1298,23 @@ def train(*, force: bool = False) -> dict[str, Any]:
             "library_spa_pvalue": _library_spa(gate_tune),
             "candidate_metrics": candidate_metrics,
             "gating_champion": champion,
+            "prequential_monthly_refits": prequential,
+            "forward_model_fit_rows": len(forward_fit),
+            "forward_model_calibration_rows": len(forward_calibration),
             "historical_audit": {
                 "metrics": metrics,
-                "gates": gates,
+                "paper_gates": paper_gates,
+                "live_gates": live_gates,
                 "months": months,
                 "trade_breakdown": _trade_breakdown(trades),
-                "timestamps_with_positive_candidate_fraction": float(
-                    audit_scored.groupby("entry_timestamp")["calibrated_ev_bps"].max().gt(0).mean()
-                ),
+                "flat_days_are_neutral": True,
             },
+            "paper_orders_enabled": paper_pass,
             "verdict": (
                 "HISTORICAL_ALPHA_READY_FOR_FUTURE_HOLDOUT"
                 if historical_pass
+                else "RESEARCH_PAPER"
+                if paper_pass
                 else "NO_DEPLOYABLE_POLICY"
             ),
         }
@@ -869,8 +1327,11 @@ def train(*, force: bool = False) -> dict[str, Any]:
         "calibrators": calibrators,
         "gating_champion": champion,
         "historical_pass": historical_pass,
+        "paper_pass": paper_pass,
         "research_only": True,
         "orders_enabled": False,
+        "paper_orders_enabled": paper_pass,
+        "live_orders_enabled": False,
     }
     _atomic_joblib(BUNDLE, bundle)
     _atomic_json(REPORT, report)

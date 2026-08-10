@@ -49,6 +49,7 @@ MUSCA_LIQUIDITY_REPORT_PATH = Path("data/reports/musca_vwap_liquidity_filtered_s
 V14_SHADOW_REPORT_PATH = Path("data/reports/v14_vwap_shadow.json")
 CROSS_EXCHANGE_AUDIT_PATH = Path("data/reports/btc_cross_exchange_forward_audit.json")
 MUSCA_V8_BINANCE_AUDIT_PATH = Path("data/reports/musca_v8_binance_paper.json")
+MUSCA_AUTO_MOE_AUDIT_PATH = Path("data/reports/musca_btc_auto_moe.json")
 MUSCA_V5_ECONOMIC_ALPHA_PATH = Path("data/reports/btc_vwap_alpha_v1.json")
 
 
@@ -183,6 +184,42 @@ def build_binance_alpha_payload(path: str | Path) -> dict[str, Any]:
     source = Path(path)
     try:
         report = json.loads(source.read_text(encoding="utf-8"))
+        if "historical_audit" in report:
+            audit = report["historical_audit"]
+            metrics = audit["metrics"]
+            paper_gates = audit["paper_gates"]
+            live_gates = audit["live_gates"]
+            paper_passed = all(bool(value) for value in paper_gates.values())
+            return {
+                "available": True,
+                "status": report["verdict"],
+                "champion": f"{report['gating_champion']} adaptive expert gate",
+                "challenger": "XGBoost rejected by the common OOS audit",
+                "base_viable_profiles": ["BINANCE"] if paper_passed else [],
+                "holdout_opened": bool(report.get("future_holdout_rows_read", 0)),
+                "protocol_hash": report["protocol_hash"],
+                "profiles": [
+                    {
+                        "profile": "BINANCE",
+                        "trades": metrics["trades"],
+                        "expectancy_bps": metrics["expectancy_bps"],
+                        "lcb_95_bps": metrics["bootstrap_lcb_95_bps"],
+                        "profit_factor": metrics["profit_factor"],
+                        "max_drawdown": metrics["max_drawdown"],
+                        "stress_2x_expectancy_bps": metrics[
+                            "stress_2x_expectancy_bps"
+                        ],
+                        "base_financial_gates_passed": paper_passed,
+                        "stress_gate_passed": bool(live_gates["stress_1_5x"]),
+                        "trade_count_gate_passed": bool(
+                            live_gates["minimum_historical_trades_300"]
+                        ),
+                    }
+                ],
+                "paper_gates": paper_gates,
+                "live_gates": live_gates,
+                "updated_at": report.get("created_at"),
+            }
         alpha = report["alpha"]
         audit = alpha["paper_profiles"]["BINANCE"]
         normal = audit["oos_2026"]
@@ -436,7 +473,10 @@ def build_dashboard_payload(
     musca = report.get("strategy_profile") == "musca_v8_momentum_short_control"
     musca_v2 = report.get("strategy_profile") == "musca_v2_long_horizon_vwap"
     musca_v4 = report.get("strategy_profile") == "musca_v4_multi_anchor_vwap"
-    musca_v5 = report.get("strategy_profile") == "musca_v5_stable_multi_horizon_vwap"
+    musca_v5 = report.get("strategy_profile") in {
+        "musca_v5_stable_multi_horizon_vwap",
+        "musca_btc_auto_moe_vwap",
+    }
     musca_liquidity = report.get("strategy_profile") == "musca_vwap_liquidity_filtered"
     v14_shadow = report.get("strategy_profile") == "v14_vwap_diagnostic_shadow"
     latest = telemetry[-1] if telemetry else None
@@ -485,7 +525,7 @@ def build_dashboard_payload(
                 if v14_shadow
                 else "MUSCA VWAP · Liquidity Shadow"
                 if musca_liquidity
-                else "MUSCA V5 · BINANCE PAPER"
+                else "MUSCA BTC · AUTO-MoE PAPER"
                 if binance_profile
                 else "MUSCA V5 · BTC VWAP Alpha"
                 if musca_v5
@@ -528,7 +568,7 @@ def build_dashboard_payload(
             "historical_replay": report.get("historical_replay", {}),
             "fee_profile": selected_fee_profile if musca_v5 else None,
             "forward_audit": forward_audit,
-            "economic_alpha": build_binance_alpha_payload(MUSCA_V8_BINANCE_AUDIT_PATH)
+            "economic_alpha": build_binance_alpha_payload(MUSCA_AUTO_MOE_AUDIT_PATH)
             if binance_profile
             else build_musca_v5_economic_payload(MUSCA_V5_ECONOMIC_ALPHA_PATH)
             if musca_v5
@@ -568,7 +608,7 @@ def _variant_summaries(report_path: Path) -> list[dict[str, Any]]:
             {
                 "range_adx_threshold": None,
                 "profile_id": "musca-v5-binance",
-                "profile_label": "MUSCA V5 · BINANCE PAPER",
+                "profile_label": "MUSCA BTC · AUTO-MoE PAPER",
                 "final_equity": account.get("final_equity", 10_000),
                 "net_pnl": account.get("net_pnl", 0),
                 "max_drawdown": account.get("max_drawdown", 0),

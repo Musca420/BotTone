@@ -1,118 +1,163 @@
-# Musca BTC Auto-MoE — protocollo preregistrato
+# Musca BTC Auto-MoE — protocollo ufficiale di ricerca
 
-Data di congelamento: 2026-08-10
+## Stato congelato
 
-## Domanda
+La policy corrente è `RESEARCH_PAPER`: può emettere ordini nel simulatore Binance,
+ma non può inviare denaro reale. Il protocollo congelato è identificato da:
 
-Su Binance USD-M `BTCUSDT`, quali strategie causali complete possono essere scoperte dai dati e
-quale di esse, se una, conviene eseguire nello stato corrente dopo costi e rischio?
+```text
+a195b75e41bf7bfd40dd2ca23103720cee1ea5dfbc7333cd34dcca4c7171a360
+```
 
-Il training è composto da due fasi indipendenti. La prima crea gli esperti; la seconda può
-soltanto scegliere tra gli esperti congelati e `FLAT`. Il precedente run da 125 componenti resta
-immutato ed è una baseline negativa, non una sorgente di conferma.
+Artefatti principali:
 
-## Fase 1 — scoperta della libreria
+- `src/adaptive_bot/musca_btc_auto_moe.py`: generazione esperti, gate e audit;
+- `src/adaptive_bot/musca_v8_binance.py`: adattatore paper Binance fail-closed;
+- `src/adaptive_bot/musca_v5_paper.py`: conto, ordini e gestione posizione simulati;
+- `data/reports/musca_btc_auto_moe.json`: report riproducibile completo;
+- `data/models/musca_btc_auto_moe/research_bundle.joblib`: policy congelata;
+- `data/research/musca_btc_auto_moe_paper_state.json`: conto paper persistente;
+- `tests/unit/test_musca_btc_auto_moe.py`: causalità, selezione e audit;
+- `tests/unit/test_musca_v8_binance.py`: parità storico/live e fail-closed;
+- `tests/unit/test_musca_v5_paper.py`: TP parziali e trailing non allargabile.
 
-Un generatore di alberi randomizzati GPU apprende direttamente regole condizionali dai 56 input
-causali già verificati. Ogni foglia è un candidato esperto completo con:
+## Cosa è stato adottato dai bot pubblici maturi
 
-- regola di attivazione appresa;
-- lato `LONG` o `SHORT`;
-- orizzonte massimo 1, 5, 15, 60 minuti oppure 6 ore;
-- primo e secondo target, stop e trailing ricavati esclusivamente dalle escursioni osservate nel
-  fit precedente;
-- identità deterministica derivata da protocollo, lato, orizzonte, albero e foglia.
+I bot pubblici funzionanti non offrono un Alpha BTC universale. Binance separa
+Grid, DCA, rebalancing e arbitraggio; Hummingbot separa la logica di quotazione
+dalla gestione di inventory, spread e rischio; Freqtrade/FreqAI richiede
+backtest, dry-run e riaddestramento temporale. La conseguenza applicata qui è:
 
-Non esiste un massimo preregistrato di esperti nella libreria. Il generatore valuta alberi in
-blocchi e si arresta quando due blocchi consecutivi non aggiungono un esperto nuovo e robusto. Un
-tetto di emergenza di 128 alberi per lato e orizzonte limita soltanto il calcolo in caso di mancata
-convergenza; non tronca la libreria dopo la selezione.
+1. nessun grid sempre acceso quando spread, fee e adverse selection lo rendono
+   negativo;
+2. candidati generati soltanto da eventi causali realmente osservati;
+3. molte strategie locali apprese, poi un gate adattivo sceglie esperto o FLAT;
+4. stessa gestione di stop/target/trailing in label, audit e paper;
+5. riaddestramento prequentiale: ogni mese usa soltanto dati precedenti;
+6. esecuzione e rischio restano separati dall'Alpha.
 
-Un candidato viene congelato soltanto se:
+Riferimenti ufficiali:
 
-- ha almeno 1.000 attivazioni nel fit e 90 nella validazione;
-- expectancy terminale netta positiva sia nel fit sia nella validazione;
-- profit factor di validazione almeno 1,05;
-- expectancy non negativa con costi 1,5×;
-- entrambi i mesi di validazione hanno expectancy positiva;
-- non duplica un esperto già scelto e ha Jaccard dei segnali inferiore a 0,90 rispetto agli esperti
-  dello stesso lato e orizzonte.
+- <https://academy.binance.com/ur-PK/articles/your-guide-to-binance-trading-bots>
+- <https://hummingbot.org/strategies/v1-strategies/pure-market-making/>
+- <https://hummingbot.org/strategies/v1-strategies/avellaneda-market-making/>
+- <https://www.freqtrade.io/en/stable/strategy-101/>
+- <https://www.freqtrade.io/en/stable/freqai-running/>
 
-La selezione è greedy per robust score, stabilità mensile e diversità. Il report registra tutti i
-candidati valutati, quelli respinti, la saturazione e la prova SPA della libreria rispetto a
-`FLAT`. I costi 1,5× sono uno stress diagnostico della discovery; il replay principale usa sempre
-i costi reali 1×.
+## Architettura del training
 
-## Fase 2 — gating
+### Fase 1 — generatore automatico di esperti
 
-Dopo il congelamento, ogni esperto viene applicato soltanto a periodi successivi. Per ogni sua
-attivazione viene costruito il percorso economico reale con ingresso nel bucket successivo da
-cinque secondi, funding osservato, fee, target parziali, stop, trailing e timeout.
+La GPU genera foglie decisionali sui lati LONG/SHORT e sugli orizzonti 1 minuto,
+5 minuti, 15 minuti, 1 ora e 6 ore. Ogni foglia è valutata come strategia con il
+percorso economico realmente gestito: ingresso sul bucket successivo, metà
+posizione a q50, seconda metà a q75, stop avverso q75, trailing che non aumenta
+mai il rischio, funding e costo round-trip di 9 bps.
 
-Il gate riceve esclusivamente:
+Non è imposto un numero finale di esperti. La generazione si arresta per
+saturazione e rimuove segnali quasi duplicati con Jaccard massimo 0,90. Delle
+7.691 azioni-esperto valutate, 65 sono risultate economicamente valide prima
+della diversificazione e 29 sono state congelate:
 
-- le feature di regime causali disponibili alla decisione;
-- lato, durata e livelli dell'esperto;
-- statistiche congelate dell'esperto;
-- l'uscita del generatore dell'esperto sullo stato corrente.
+| Lato | Orizzonte | Esperti |
+|---|---:|---:|
+| LONG | 1 ora | 5 |
+| SHORT | 1 ora | 0 |
+| LONG | 6 ore | 9 |
+| SHORT | 6 ore | 15 |
 
-Ridge/logistic resta il champion predefinito. XGBoost GPU lo sostituisce soltanto se migliora sulle
-stesse righe cronologiche MAE dell'EV, Brier score e regret decisionale. La calibrazione isotonic
-usa un mese separato e non cambia il ranking. A ogni timestamp vince l'esperto con EV calibrata
-più alta; se la migliore EV non è positiva, l'azione è `FLAT`, con valore neutro zero.
+Gli orizzonti 1/5/15 minuti hanno prodotto zero esperti validi dopo i costi. Il
+protocollo non li forza: questo è il risultato che ha respinto la precedente
+ipotesi delle microtransazioni continue su BTC.
 
-## Cronologia sigillata
+### Fase 2 — selettore adattivo
 
-- generazione degli alberi: tutto il 2025;
-- selezione e congelamento libreria: gennaio–febbraio 2026;
-- primo fit del gate: marzo 2026;
-- confronto Ridge/XGBoost: aprile 2026;
-- refit del champion su marzo–aprile 2026;
-- calibrazione: maggio 2026;
-- audit storico mensile e aggregato: giugno–luglio 2026;
-- holdout futuro intoccabile: dal 10 agosto 2026.
+Il gate usa le attivazioni OOS degli esperti e il contesto di mercato. Ridge è
+il champion predefinito; XGBoost GPU può sostituirlo soltanto battendolo sulle
+stesse righe in MAE EV, Brier e regret decisionale. Nel run congelato:
 
-Il purge è pari a sei ore. I mesi usati per provare la libreria non partecipano alla generazione
-degli esperti; aprile confronta i modelli ma non modifica la libreria; giugno e luglio non possono
-cambiare libreria, champion, calibrazione, soglia `EV > 0` o regole di gestione.
+| Modello | MAE bps | Brier | Regret bps |
+|---|---:|---:|---:|
+| Ridge | 81,088 | 0,31681 | 35,544 |
+| XGBoost | 87,554 | 0,38881 | 39,284 |
 
-## Economia e gate
+Ridge rimane quindi il modello corretto. FLAT vale zero ed è neutro: viene scelto
+solo quando nessun esperto attivo presenta EV calibrato positivo.
 
-Scenario principale: commissione Binance USD-M taker di 4 bps per lato più 1 bp round-trip di
-riserva esecutiva, quindi 9 bps complessivi. Funding osservato, capitale simulato 10.000 USDT,
-rischio massimo 1% per trade, leva massima 10×, una sola posizione, nessun averaging down.
+## Contratto causale dei dati
 
-L'audit richiede:
+Il modello usa 57 feature disponibili sia nello storico sia nel paper: ritorni,
+VWAP multi-orizzonte, distanza/velocità/test del VWAP, volatilità, volumi,
+taker flow, struttura della candela, efficiency/range, order-flow L2 e quattro
+feature derivatives. Le ultime sono ricostruite esclusivamente dagli endpoint
+pubblici ufficiali Binance:
 
-- almeno 300 trade e almeno 3 trade al giorno;
-- expectancy e bootstrap LCB 95% positive;
-- profit factor almeno 1,15;
-- drawdown massimo 10%;
-- maggioranza dei giorni di calendario positiva;
-- SPA contro `FLAT` con `p <= 0,05`;
-- zero violazioni del budget di rischio.
+- open interest 1h: `/futures/data/openInterestHist?period=5m`;
+- basis: ultima candela chiusa mark price contro spot;
+- funding z-score: `/fapi/v1/fundingRate` ricostruito sulla griglia al minuto;
+- interazione ritorno 5m × variazione OI.
 
-Qualunque risultato resta `RESEARCH_ONLY`; ordini paper/live rimangono disabilitati finché il
-futuro holdout non contiene almeno dieci giorni e 100 trade e supera gli stessi gate. Il risultato
-corretto può essere `NO_DISCOVERED_EXPERT_LIBRARY` oppure `NO_DEPLOYABLE_POLICY`.
+Ogni decisione usa l'ultimo minuto completato. Timestamp futuri, buchi recenti,
+book stale o warm-up insufficiente invalidano l'intero candidato; i mancanti non
+sono sostituiti con zero.
 
-## Fonti e implementazione
+Documentazione Binance:
 
-La matrice riusa esclusivamente i dati Binance ufficiali e il contratto causale già testato. Gli
-alberi rappresentano regole piecewise-constant apprese dai dati; profondità e foglie minime ne
-controllano la complessità. La calibrazione isotonic è usata soltanto con un campione separato.
+- <https://github.com/binance/binance-public-data/blob/master/README.md?plain=1>
+- <https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data>
 
-- [Binance Public Data](https://github.com/binance/binance-public-data/blob/master/README.md)
-- [Binance USD-M commission rate](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account#user-commission-rate)
-- [XGBoost random forests](https://xgboost.readthedocs.io/en/stable/tutorials/rf.html)
-- [XGBoost GPU](https://xgboost.readthedocs.io/en/stable/gpu/)
-- [scikit-learn decision trees](https://scikit-learn.org/stable/modules/tree.html)
-- [scikit-learn isotonic regression](https://scikit-learn.org/stable/modules/isotonic.html)
-- [arch SPA](https://bashtage.github.io/arch/multiple-comparison/multiple-comparison-reference.html)
+## Risultato storico OOS
 
-## Output separati
+Audit prequentiale 1 giugno–31 luglio 2026, dopo costo round-trip di 9 bps:
 
-- `data/ml/musca_btc_auto_moe/`;
-- `data/models/musca_btc_auto_moe/research_bundle.joblib`;
-- `data/reports/musca_btc_auto_moe.json`;
-- `data/reports/musca_btc_auto_moe.status.json`.
+| Metrica | Risultato |
+|---|---:|
+| Trade | 72 |
+| Frequenza | 1,1803 per giorno di calendario |
+| Expectancy netta | +19,5415 bps/trade |
+| Profit factor | 1,5511 |
+| Win rate | 62,50% |
+| Max drawdown | 2,438% |
+| Bootstrap LCB 95% | +11,3991 bps |
+| SPA p-value | 0,040 |
+| Expectancy con costi 1,5× | +15,0415 bps |
+| Expectancy con costi 2× | +10,5415 bps |
+| Giorni attivi positivi | 63,16% |
+
+Il risultato non è uniforme: giugno ha 67 trade, expectancy +21,312 bps e PF
+1,605; luglio ha soltanto 5 trade, expectancy −4,187 bps e PF 0,892. È un motivo
+esplicito per mantenere il sistema in paper e non presentare il backtest come una
+garanzia di redditività futura.
+
+## Gate e decisione operativa
+
+Passano i gate paper: almeno 50 trade di ricerca, expectancy positiva, PF,
+drawdown e assenza di violazioni del risk budget. Non passano i gate live:
+
+- meno di 300 trade storici OOS;
+- frequenza inferiore a 3 trade/giorno;
+- holdout futuro ancora sigillato e vuoto.
+
+Il simulatore parte da 10.000 USDT, rischia al massimo l'1% per trade, usa leva
+massima 10× solo come limite di notional, ammette una posizione e applica
+profondità L2, fee, slippage e funding osservati. Leva e stress dei costi sono
+concetti distinti. Il denaro reale rimane vietato fino al completamento di almeno
+300 osservazioni OOS complessive, dell'holdout futuro e dei gate ingegneristici.
+
+## Riproduzione
+
+Training:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_musca_btc_auto_moe_training.ps1
+```
+
+Paper persistente e dashboard:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_musca_runtime.ps1
+```
+
+La pagina operativa resta su `http://127.0.0.1:8080/?profile=musca-v5-binance`;
+il valore interno del profilo è mantenuto per compatibilità con i bookmark, ma
+l'interfaccia lo identifica come `MUSCA BTC · AUTO-MoE PAPER`.

@@ -295,7 +295,9 @@ def _enqueue(
         "side": assessment.get("direction"),
         "quantity_btc": assessment.get("quantity_btc"),
         "target_bps": assessment.get("target_bps"),
+        "target_2_bps": assessment.get("target_2_bps"),
         "stop_bps": assessment.get("stop_bps"),
+        "trailing_bps": assessment.get("trailing_bps"),
         "expected_cost_bps": assessment.get("expected_cost_bps"),
         "expected_funding_bps": assessment.get("expected_funding_bps"),
         "risk_budget": assessment.get("risk_budget"),
@@ -426,9 +428,15 @@ def _open_pending(account: dict[str, Any], book: dict[str, Any]) -> bool:
     balance = _number(account["realized_balance"]) - entry_fee
     direction = Decimal("1") if side == "LONG" else Decimal("-1")
     target_bps = _number(pending.get("target_bps"))
+    target_2_bps = _number(pending.get("target_2_bps"))
     entry = actual_fill.execution_vwap
     current_stop = risk.technical_stop_price
     target = entry * (Decimal("1") + direction * target_bps / TEN_THOUSAND)
+    target_2 = (
+        entry * (Decimal("1") + direction * target_2_bps / TEN_THOUSAND)
+        if target_2_bps > target_bps
+        else None
+    )
     break_even = entry * (Decimal("1") + direction * expected_cost_bps / TEN_THOUSAND)
     now = book["available_at"].isoformat()
     slippage = actual_fill.notional * actual_fill.slippage_bps / TEN_THOUSAND
@@ -459,9 +467,12 @@ def _open_pending(account: dict[str, Any], book: dict[str, Any]) -> bool:
         "exit_fills": [],
         "entry_slippage": float(slippage),
         "target_bps": float(target_bps),
+        "target_2_bps": float(target_2_bps) if target_2 is not None else None,
         "stop_bps": float(stop_bps),
+        "trailing_bps": pending.get("trailing_bps"),
         "expected_cost_bps": float(expected_cost_bps),
         "target_price": float(target),
+        "target_2_price": float(target_2) if target_2 is not None else None,
         "initial_stop_price": float(current_stop),
         "current_stop_price": float(current_stop),
         "catastrophic_stop_price": float(risk.catastrophic_stop_price),
@@ -732,6 +743,7 @@ def _manage_open(account: dict[str, Any], assessment: dict[str, Any], book: dict
     catastrophic = _number(position["catastrophic_stop_price"])
     stop = _number(position["current_stop_price"])
     target = _number(position["target_price"])
+    target_2 = _number(position.get("target_2_price"))
     catastrophic_hit = (position["side"] == "LONG" and mark <= catastrophic) or (
         position["side"] == "SHORT" and mark >= catastrophic
     )
@@ -741,6 +753,10 @@ def _manage_open(account: dict[str, Any], assessment: dict[str, Any], book: dict
     target_hit = not bool(position.get("tp1_hit", False)) and (
         (position["side"] == "LONG" and mark >= target)
         or (position["side"] == "SHORT" and mark <= target)
+    )
+    target_2_hit = bool(position.get("tp1_hit", False)) and target_2 > 0 and (
+        (position["side"] == "LONG" and mark >= target_2)
+        or (position["side"] == "SHORT" and mark <= target_2)
     )
     opened = _timestamp(position.get("entry_at"))
     maximum_hold = int(position.get("maximum_hold_minutes", MAX_HOLD_MINUTES))
@@ -759,13 +775,32 @@ def _manage_open(account: dict[str, Any], assessment: dict[str, Any], book: dict
     if reason is not None:
         _close_position(account, book, position, reason)
         return
+    if target_2_hit:
+        _close_position(account, book, position, "DYNAMIC_TARGET_2")
+        return
     if target_hit:
-        if position.get("management_style") == "HALF_AT_1_5R_COST_PROTECTED_TRAIL_15M":
+        if float(position.get("partial_target_fraction", 0.0)) > 0:
             _take_partial_target(account, book, position)
         else:
             _close_position(account, book, position, "DYNAMIC_TARGET")
         return
-    if (
+    if position.get("management_style") == "HALF_AT_Q50_Q75_NON_WIDENING_TRAIL" and bool(
+        position.get("tp1_hit", False)
+    ):
+        trailing_bps = _number(position.get("trailing_bps"))
+        proposal = entry * (
+            Decimal("1")
+            + direction
+            * (Decimal(str(position["mfe_bps"])) - trailing_bps)
+            / TEN_THOUSAND
+        )
+        current_stop = _number(position["current_stop_price"])
+        position["current_stop_price"] = float(
+            max(current_stop, proposal)
+            if position["side"] == "LONG"
+            else min(current_stop, proposal)
+        )
+    elif (
         bool(position.get("tp1_hit", False))
         and opened is not None
         and now >= opened + pd.Timedelta(minutes=15)

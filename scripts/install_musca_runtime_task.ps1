@@ -16,7 +16,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings `
-    -Description "Supervises Binance L2, Musca V8 Binance paper and dashboard 8080." `
+    -Description "Supervises Binance L2, Musca BTC Auto-MoE paper and dashboard 8080." `
     -Force | Out-Null
 
 foreach ($legacy in @("AdaptiveBotDashboardBTC", "AdaptiveBotV11Research")) {

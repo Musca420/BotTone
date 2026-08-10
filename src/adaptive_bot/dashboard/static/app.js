@@ -169,8 +169,8 @@ function render(data, live, research, ml) {
   setText("bot-title", muscaLiquidity ? "MUSCA VWAP LIQUIDITY" : muscaV5 ? "MUSCA · BTC VWAP ALPHA" : muscaV4 ? "MUSCA V4" : muscaV2 ? "MUSCA V2" : v14Shadow ? "V14 VWAP SHADOW" : musca ? "MUSCA BOT" : "Adaptive Range Bot");
   setText("entry-score-label", muscaV5 ? "Target probability" : muscaLiquidity ? "Flow/depth vote" : muscaV2 || muscaV4 ? "Stress EV (bps)" : musca ? "Momentum score" : "MR score");
   setText("atr-label", muscaV5 ? "Planned stop" : "ATR (14)");
-  document.title = muscaLiquidity ? "MUSCA VWAP — Liquidity Shadow" : muscaV5 ? "MUSCA V5 — Binance Paper Simulation" : muscaV4 ? "MUSCA V4 — Multi-Anchor VWAP Shadow" : muscaV2 ? "MUSCA V2 — Adaptive VWAP Shadow" : v14Shadow ? "V14 VWAP — BTC Shadow" : musca ? "MUSCA BOT — BTC Shadow" : "Adaptive Range Bot — Operations";
-  if (muscaV5) setText("bot-title", `MUSCA V5 · ${summary.fee_profile || "BINANCE"}`);
+  document.title = muscaLiquidity ? "MUSCA VWAP — Liquidity Shadow" : muscaV5 ? "MUSCA BTC Auto-MoE — Binance Paper Simulation" : muscaV4 ? "MUSCA V4 — Multi-Anchor VWAP Shadow" : muscaV2 ? "MUSCA V2 — Adaptive VWAP Shadow" : v14Shadow ? "V14 VWAP — BTC Shadow" : musca ? "MUSCA BOT — BTC Shadow" : "Adaptive Range Bot — Operations";
+  if (muscaV5) setText("bot-title", `MUSCA BTC AUTO-MoE · ${summary.fee_profile || "BINANCE"}`);
   setText("mode", muscaV5 ? `${summary.fee_profile || "BINANCE"} PAPER` : String(summary.mode).toUpperCase());
   setText("instrument", summary.instrument);
   setText("timeframe", `${summary.timeframe_minutes} minutes`);
@@ -185,7 +185,7 @@ function render(data, live, research, ml) {
   if (muscaV5) {
     setText(
       "active-profile",
-      `MUSCA V5 · ${summary.fee_profile || "BINANCE"} · ${summary.instrument} FUTURES · ${summary.timeframe_minutes}M · BINANCE PAPER SIMULATION`,
+      `MUSCA BTC AUTO-MoE · ${summary.fee_profile || "BINANCE"} · ${summary.instrument} FUTURES · ${summary.timeframe_minutes}M · BINANCE PAPER SIMULATION`,
     );
   }
   setText("latest-bar", dateTime(latest.timestamp));
