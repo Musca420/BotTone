@@ -255,13 +255,13 @@ def test_dashboard_reads_active_local_alpha_report(tmp_path: Path) -> None:
     assert not payload["profiles"][5]["trade_count_gate_passed"]
 
 
-def test_dashboard_exposes_only_current_binance_and_archived_v2_profiles() -> None:
+def test_dashboard_is_dedicated_to_current_binance_policy() -> None:
     html = Path("src/adaptive_bot/dashboard/static/index.html").read_text(encoding="utf-8")
     script = Path("src/adaptive_bot/dashboard/static/app.js").read_text(encoding="utf-8")
-    assert 'id="v5-vip-profile-body"' in html
-    assert "function renderEconomicAlpha" in script
-    assert 'value="musca-v5-binance"' in html
-    assert 'value="musca-v5-vip0"' not in html
-    assert 'const allowedProfiles = ["musca-v5-binance", "musca-v2"]' in script
-    assert "function selectedV5Paper" in script
-    assert "paper_accounts?.[selectedV5Profile(audit)]" in script
+    assert 'id="strategy-section"' in html
+    assert 'id="market-chart"' in html
+    assert "Real capital is disabled" in html
+    assert "MUSCA V2" not in html
+    assert 'const PROFILE = "musca-v5-binance";' in script
+    assert "function renderValidation" in script
+    assert "paper_accounts?.BINANCE" in script

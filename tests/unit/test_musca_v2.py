@@ -25,12 +25,12 @@ def test_v25_report_remains_present() -> None:
     assert Path("data/reports/ml_hybrid_v25_model_audit.json").exists()
 
 
-def test_dashboard_hides_generic_panels_for_musca_v2() -> None:
+def test_dashboard_does_not_expose_archived_musca_v2() -> None:
     html = Path("src/adaptive_bot/dashboard/static/index.html").read_text(encoding="utf-8")
     script = Path("src/adaptive_bot/dashboard/static/app.js").read_text(encoding="utf-8")
-    assert 'id="ml-panel" class="panel decision-panel wide generic-profile-only"' in html
-    assert 'id="research-panel" class="panel fills-panel wide generic-profile-only"' in html
-    assert "setMuscaView(muscaV2, muscaV4 || muscaV5 || muscaLiquidity)" in script
+    assert "MUSCA V2" not in html
+    assert "musca-v2" not in script
+    assert 'id="strategy-section"' in html
 
 
 def test_shadow_starts_now_without_retroactive_fills() -> None:
