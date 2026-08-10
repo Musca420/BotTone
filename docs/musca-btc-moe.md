@@ -5,10 +5,11 @@ Data di congelamento: 2026-08-10
 ## Obiettivo
 
 Apprendere una policy intraday BTC su Binance `BTCUSDT` USD-M senza imporre regole di ingresso
-FADE/FOLLOW. Il training osserva ogni stato causale a cadenza di cinque minuti e apprende:
+FADE/FOLLOW. Il training osserva ogni stato causale a cadenza di un minuto, usando il flusso
+ufficiale Binance aggregato a cinque secondi, e apprende:
 
 - direzione LONG o SHORT;
-- orizzonte 5, 15, 30 o 60 minuti;
+- orizzonte 1, 5, 15, 60 minuti o 6 ore;
 - primo target, secondo target, stop e trailing dipendenti dallo stato;
 - probabilità di risultato netto positivo ed EV netta dopo costi;
 - quale esperto ascoltare nel regime corrente.
@@ -19,41 +20,44 @@ trade negativi; deve essere positiva soltanto in aggregato OOS.
 
 ## Dati e disponibilità
 
-Si usano esclusivamente archivi ufficiali Binance perpetual e spot a un minuto già verificati con
-checksum, dal 15 aprile 2024 al 3 agosto 2026. Le feature comprendono prezzo, VWAP, momentum,
-volatilità, volume, taker flow, trade count, spot/perpetual basis, mark, funding e open interest.
-Ogni feature deve avere `available_at` non successivo alla decisione. L'ingresso avviene all'open
-del minuto seguente. Valori mancanti non vengono sostituiti con zero.
+Si usano gli archivi ufficiali Binance USD-M `aggTrades` a cinque secondi, verificati con il
+checksum pubblicato da Binance, da gennaio 2025 a luglio 2026. Il contesto causale a un minuto
+aggiunge VWAP, momentum, volatilità, volume, spot/perpetual basis, mark, funding e open interest.
+Il flusso a cinque secondi aggiunge imbalance degli aggressori, persistenza, intensità, velocità e
+assorbimento. Ogni feature deve avere `available_at` non successivo alla decisione. L'ingresso
+avviene nel primo bucket da cinque secondi successivo. Valori mancanti non vengono sostituiti con
+zero e una discontinuità invalida sia il warm-up sia il percorso futuro dell'etichetta.
 
 Il final holdout comincia il 10 agosto 2026, dopo la preregistrazione, e richiede nuovi dati futuri.
 Non viene aperto dal training storico. Gli intervalli precedenti sono ricerca cronologica, non una
 conferma finale indipendente:
 
-- OOF meta-fit: gennaio-dicembre 2025;
+- OOF meta-fit: aprile-dicembre 2025, con base train precedente e tre fold trimestrali;
 - confronto Ridge/XGBoost: gennaio 2026;
 - calibrazione: febbraio 2026;
 - selezione della copertura: marzo-aprile 2026;
-- audit storico congelato: maggio-3 agosto 2026;
+- audit storico congelato: maggio-luglio 2026;
 - final holdout futuro: dal 10 agosto 2026.
 
-Il purge è 60 minuti. Il training di ogni previsione usa esclusivamente dati precedenti.
+Il purge è 6 ore. Il training di ogni previsione usa esclusivamente dati precedenti.
 
 ## Esperti generati
 
-Il pool finale contiene 100 componenti XGBoost GPU: cinque bootstrap temporali per ciascuna delle
-20 combinazioni `orizzonte × vista`.
+Il pool finale contiene 125 componenti XGBoost GPU: cinque bootstrap temporali per ciascuna delle
+25 combinazioni `orizzonte × vista`.
 
-Orizzonti: 5, 15, 30 e 60 minuti.
+Orizzonti: 1, 5, 15 e 60 minuti e 6 ore. Gli orizzonti sono alternative apprese, non scadenze
+imposte a ogni trade: target, stop o trailing possono chiudere prima.
 
 Viste apprese:
 
 1. stato completo;
 2. struttura VWAP e volatilità;
 3. momentum, efficienza e posizione nel range;
-4. taker flow, volume, trade intensity e price action;
+4. taker flow, volume, trade intensity, assorbimento e price action a 5 secondi;
 5. regime, open interest, basis, funding e ora.
 
-Altri 24 modelli quantile apprendono, per lato e orizzonte, mediana e 75° percentile
+Altri 30 modelli quantile apprendono, per lato e orizzonte, mediana e 75° percentile
 dell'escursione favorevole e 75° percentile dell'escursione avversa. Insieme generano target e
 stop entro soli limiti di sicurezza, senza una griglia di segnali manuali.
 
@@ -67,7 +71,7 @@ righe cronologiche errore EV, Brier score e regret decisionale. Un ensemble sepa
 `XGBRanker` con loss pairwise può determinare l'ordinamento delle otto azioni soltanto se riduce il
 regret OOS rispetto al champion EV.
 
-Per ogni decisione il gating confronta otto azioni: LONG/SHORT per quattro orizzonti. La policy
+Per ogni decisione il gating confronta dieci azioni: LONG/SHORT per cinque orizzonti. La policy
 sceglie l'azione con EV calibrata più alta e può restare FLAT. Il livello di copertura è scelto
 soltanto su marzo-aprile e congelato prima dell'audit.
 
@@ -78,9 +82,11 @@ L'uscita simulata usa:
 - stop quantile strutturale;
 - dopo il primo target, stop mai allargato e trailing basato sull'escursione avversa prevista;
 - timeout all'orizzonte scelto;
-- stop prevalente se stop e target sono toccati nella stessa candela.
+- stop prevalente se stop e target sono toccati nello stesso bucket da cinque secondi.
 
-Queste sono meccaniche esecutive; direzione, durata e livelli provengono dai modelli.
+Queste sono meccaniche esecutive; direzione, durata e livelli provengono dai modelli. Gli esperti
+sono modelli numerici specializzati, non agenti linguistici: tutti vengono interrogati allo stesso
+timestamp e il gating impara OOS quale combinazione ascoltare nel regime osservato.
 
 ## Economia e rischio
 

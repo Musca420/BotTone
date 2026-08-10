@@ -19,8 +19,14 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier, XGBRanker, XGBRegressor
 
 from adaptive_bot.btc_vwap_alpha import _historical_features
+from adaptive_bot.musca_v5_micro_model import (
+    DIRECTIONAL_MICRO_FEATURES,
+    MICRO_FEATURES,
+    build_micro_features,
+)
 
 SOURCE = Path("data/ml/hybrid_v25/asset=BTCUSDT/minutes.parquet")
+MICRO_ROOT = Path("data/ml/musca_v5/aggtrades")
 ROOT = Path("data/ml/musca_btc_moe")
 MATRIX = ROOT / "matrix.parquet"
 CHECKPOINTS = ROOT / "checkpoints"
@@ -29,7 +35,13 @@ STATUS = Path("data/reports/musca_btc_moe.status.json")
 BUNDLE = Path("data/models/musca_btc_moe/research_bundle.joblib")
 
 SYMBOL = "BTCUSDT"
-HORIZONS = (5, 15, 30, 60)
+BUCKET_SECONDS = 5
+DECISION_CADENCE_SECONDS = 60
+HORIZONS = (60, 300, 900, 3_600, 21_600)
+MICRO_MONTHS = tuple(
+    f"{year}-{month:02d}" for year in (2025, 2026) for month in range(1, 13)
+    if (year == 2025 or month <= 7)
+)
 SIDES = (1, -1)
 FINAL_SEEDS = (20260810, 20260811, 20260812, 20260813, 20260814)
 ROUND_TRIP_COST_BPS = 11.0
@@ -37,16 +49,16 @@ MINIMUM_NET_TARGET_BPS = 2.0
 MAX_TARGET_BPS = 300.0
 MAX_STOP_BPS = 200.0
 FUTURE_HOLDOUT_START = pd.Timestamp("2026-08-10T00:00:00Z")
-META_START = pd.Timestamp("2025-01-01T00:00:00Z")
+META_START = pd.Timestamp("2025-04-01T00:00:00Z")
 META_END = pd.Timestamp("2026-01-01T00:00:00Z")
 MODEL_AUDIT_END = pd.Timestamp("2026-02-01T00:00:00Z")
 CALIBRATION_END = pd.Timestamp("2026-03-01T00:00:00Z")
 POLICY_SELECTION_END = pd.Timestamp("2026-05-01T00:00:00Z")
-HISTORICAL_AUDIT_END = pd.Timestamp("2026-08-04T00:00:00Z")
-PURGE = pd.Timedelta(minutes=max(HORIZONS))
+HISTORICAL_AUDIT_END = pd.Timestamp("2026-08-01T00:00:00Z")
+PURGE = pd.Timedelta(seconds=max(HORIZONS))
 COVERAGES = (0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
 
-FEATURES = (
+CONTEXT_FEATURES = (
     "return_1m_bps",
     "return_2m_bps",
     "return_3m_bps",
@@ -96,6 +108,7 @@ FEATURES = (
     "weekday_sin",
     "weekday_cos",
 )
+FEATURES = (*CONTEXT_FEATURES, *MICRO_FEATURES)
 
 VWAP_VIEW = (
     "return_1m_bps",
@@ -115,6 +128,8 @@ VWAP_VIEW = (
     "vwap_band_position",
     "atr_5m_bps",
     "realized_volatility_30m_bps",
+    "price_velocity_15s",
+    "price_velocity_1m",
 )
 TREND_VIEW = (
     "return_1m_bps",
@@ -130,6 +145,9 @@ TREND_VIEW = (
     "efficiency_60m",
     "range_position_15m",
     "range_position_60m",
+    "price_velocity_15s",
+    "price_velocity_1m",
+    "ofi_persistence_1m",
 )
 FLOW_VIEW = (
     "return_1m_bps",
@@ -143,6 +161,7 @@ FLOW_VIEW = (
     "volume_percentile",
     "candle_body_bps",
     "wick_imbalance_bps",
+    *MICRO_FEATURES,
 )
 REGIME_VIEW = (
     "return_5m_bps",
@@ -164,6 +183,9 @@ REGIME_VIEW = (
     "hour_cos",
     "weekday_sin",
     "weekday_cos",
+    "ofi_5m",
+    "trade_intensity_1m",
+    "absorption_1m",
 )
 VIEWS: dict[str, tuple[str, ...]] = {
     "full": FEATURES,
@@ -193,9 +215,10 @@ DIRECTIONAL_FEATURES = frozenset(
         "return_oi_interaction_raw",
         "basis_bps",
         "funding_z",
+        *DIRECTIONAL_MICRO_FEATURES,
     }
 )
-EXPERT_COLUMNS = tuple(f"expert_{horizon}m_{view}" for horizon in HORIZONS for view in VIEWS)
+EXPERT_COLUMNS = tuple(f"expert_{horizon}s_{view}" for horizon in HORIZONS for view in VIEWS)
 GATING_CONTEXT = (
     "vwap_distance_bps",
     "vwap_tests_30m",
@@ -216,6 +239,15 @@ GATING_CONTEXT = (
     "hour_cos",
     "weekday_sin",
     "weekday_cos",
+    "ofi_15s",
+    "ofi_1m",
+    "ofi_5m",
+    "ofi_persistence_1m",
+    "trade_intensity_15s",
+    "trade_intensity_1m",
+    "absorption_1m",
+    "price_velocity_15s",
+    "price_velocity_1m",
 )
 META_FEATURES = (
     *GATING_CONTEXT,
@@ -232,12 +264,13 @@ META_FEATURES = (
 )
 
 PROTOCOL = {
-    "name": "musca_btc_mixture_of_experts_v1",
+    "name": "musca_btc_mixture_of_experts_microstructure",
     "symbol": SYMBOL,
-    "source": "Binance official USD-M and spot one-minute archives",
-    "decision_cadence_minutes": 5,
-    "entry": "next-minute open after completed decision candle",
-    "horizons_minutes": list(HORIZONS),
+    "source": "Binance official USD-M aggTrades 5s plus causal one-minute context",
+    "micro_months": list(MICRO_MONTHS),
+    "decision_cadence_seconds": DECISION_CADENCE_SECONDS,
+    "entry": "next 5-second bucket after the completed decision bucket",
+    "horizons_seconds": list(HORIZONS),
     "sides": ["LONG", "SHORT"],
     "feature_views": {name: list(columns) for name, columns in VIEWS.items()},
     "return_experts": {
@@ -254,7 +287,7 @@ PROTOCOL = {
         "five-seed XGBoost pairwise ranker"
     ),
     "management": "half at q50, half at q75, q75 adverse stop and non-widening trail",
-    "same_minute": "stop wins",
+    "same_5s_bucket": "stop wins",
     "round_trip_cost_bps": ROUND_TRIP_COST_BPS,
     "minimum_net_target_bps": MINIMUM_NET_TARGET_BPS,
     "risk_per_trade": 0.01,
@@ -309,56 +342,145 @@ def _load_source() -> pd.DataFrame:
     return rows.sort_values("timestamp").reset_index(drop=True)
 
 
+def _load_micro_source() -> pd.DataFrame:
+    paths = [
+        MICRO_ROOT / f"BTCUSDT-aggTrades-5s-{month}.parquet" for month in MICRO_MONTHS
+    ]
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            "official Binance 5-second data are incomplete; training was not started: "
+            + ", ".join(missing)
+        )
+    columns = (
+        "timestamp",
+        "available_at",
+        "open",
+        "high",
+        "low",
+        "close",
+        "base_volume",
+        "quote_volume",
+        "signed_quote_volume",
+        "trade_count",
+        "buy_count",
+    )
+    frames = [pd.read_parquet(path, columns=list(columns)) for path in paths]
+    rows = pd.concat(frames, ignore_index=True)
+    rows["timestamp"] = pd.to_datetime(rows["timestamp"], utc=True)
+    rows["available_at"] = pd.to_datetime(rows["available_at"], utc=True)
+    rows = rows.sort_values("timestamp").reset_index(drop=True)
+    if rows["timestamp"].duplicated().any() or not rows["timestamp"].is_monotonic_increasing:
+        raise RuntimeError("duplicate or unordered Binance aggTrades buckets")
+    expected_available = rows["timestamp"] + pd.Timedelta(seconds=BUCKET_SECONDS)
+    if not rows["available_at"].eq(expected_available).all():
+        raise RuntimeError("invalid 5-second feature availability contract")
+    return rows
+
+
+def _forward_extreme(values: np.ndarray, steps: int, operation: str) -> np.ndarray:
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=steps)
+    future = pd.Series(values).shift(-1).rolling(indexer, min_periods=steps)
+    if operation == "max":
+        return future.max().to_numpy(float)
+    if operation == "min":
+        return future.min().to_numpy(float)
+    raise ValueError(f"unsupported future operation: {operation}")
+
+
 def build_matrix(*, force: bool = False) -> pd.DataFrame:
     if MATRIX.exists() and not force:
         cached = pd.read_parquet(MATRIX)
         if len(cached) and cached["protocol_hash"].eq(PROTOCOL_HASH).all():
             return cached
-    _status("matrix", "feature causali ogni 5 minuti", 2)
-    source = _load_source()
-    rows = _historical_features(source)
-    timestamp = pd.to_datetime(rows["timestamp"], utc=True)
-    rows["hour_sin"] = np.sin(2 * np.pi * (timestamp.dt.hour + timestamp.dt.minute / 60) / 24)
-    rows["hour_cos"] = np.cos(2 * np.pi * (timestamp.dt.hour + timestamp.dt.minute / 60) / 24)
-    rows["weekday_sin"] = np.sin(2 * np.pi * timestamp.dt.dayofweek / 7)
-    rows["weekday_cos"] = np.cos(2 * np.pi * timestamp.dt.dayofweek / 7)
-    available = pd.to_datetime(rows["feature_available_at"], utc=True)
+    _status("matrix", "contesto 1m + aggTrades causali a 5 secondi", 2)
+    minute_source = _load_source()
+    context = _historical_features(minute_source)
+    context_timestamp = pd.to_datetime(context["timestamp"], utc=True)
+    context["hour_sin"] = np.sin(
+        2 * np.pi * (context_timestamp.dt.hour + context_timestamp.dt.minute / 60) / 24
+    )
+    context["hour_cos"] = np.cos(
+        2 * np.pi * (context_timestamp.dt.hour + context_timestamp.dt.minute / 60) / 24
+    )
+    context["weekday_sin"] = np.sin(2 * np.pi * context_timestamp.dt.dayofweek / 7)
+    context["weekday_cos"] = np.cos(2 * np.pi * context_timestamp.dt.dayofweek / 7)
+    context["context_valid"] = (
+        context["is_available"].fillna(False)
+        & context["feature_contract_valid"].fillna(False)
+        & context["oi_feature_available"].fillna(False)
+    )
+    context["context_available_at"] = pd.to_datetime(context["feature_available_at"], utc=True)
+    context = context.loc[
+        :, ["context_available_at", "context_valid", *CONTEXT_FEATURES]
+    ].sort_values("context_available_at")
+
+    source = _load_micro_source()
+    micro = build_micro_features(source)
+    indexed = source.loc[:, ["timestamp", "available_at"]].reset_index(
+        names="decision_position"
+    )
+    rows = micro.merge(indexed, on="available_at", how="inner", validate="one_to_one")
+    rows = pd.merge_asof(
+        rows.sort_values("available_at"),
+        context,
+        left_on="available_at",
+        right_on="context_available_at",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    available = pd.to_datetime(rows["available_at"], utc=True)
+    positions_all = rows["decision_position"].to_numpy(int)
+    cadence = available.astype("int64").mod(DECISION_CADENCE_SECONDS * 1_000_000_000).eq(0)
+    gaps = source["timestamp"].diff().ne(pd.Timedelta(seconds=BUCKET_SECONDS))
+    gaps.iloc[0] = False
+    clean_lookback = gaps.rolling(60, min_periods=60).sum().eq(0).to_numpy(bool)
+    max_steps = max(HORIZONS) // BUCKET_SECONDS
+    has_future = positions_all + max_steps < len(source)
+    continuous_future = np.zeros(len(rows), dtype=bool)
+    safe_positions = positions_all[has_future]
+    continuous_future[has_future] = (
+        source["timestamp"].to_numpy()[safe_positions + max_steps]
+        - source["timestamp"].to_numpy()[safe_positions]
+        == np.timedelta64(max(HORIZONS), "s")
+    )
     valid = (
-        rows["is_available"].fillna(False).to_numpy(bool)
-        & rows["feature_contract_valid"].fillna(False).to_numpy(bool)
-        & rows["oi_feature_available"].fillna(False).to_numpy(bool)
-        & available.dt.minute.mod(5).eq(0).to_numpy(bool)
+        rows["context_valid"].fillna(False).to_numpy(bool)
+        & cadence.to_numpy(bool)
         & available.lt(HISTORICAL_AUDIT_END).to_numpy(bool)
+        & clean_lookback[positions_all]
+        & continuous_future
         & np.isfinite(rows.loc[:, FEATURES].to_numpy(float)).all(axis=1)
     )
-    valid[-(max(HORIZONS) + 1) :] = False
-    positions = np.flatnonzero(valid)
-    matrix = rows.loc[positions, ["timestamp", "feature_available_at", *FEATURES]].copy()
-    matrix = matrix.rename(columns={"feature_available_at": "available_at"})
-    matrix["decision_position"] = positions
+    matrix = rows.loc[
+        valid, ["timestamp", "available_at", "context_available_at", "decision_position", *FEATURES]
+    ].copy()
+    positions = matrix["decision_position"].to_numpy(int)
     matrix["entry_timestamp"] = source.loc[positions + 1, "timestamp"].to_numpy()
     if not matrix["available_at"].le(matrix["entry_timestamp"]).all():
         raise RuntimeError("feature availability exceeds entry time")
+    if not matrix["context_available_at"].le(matrix["available_at"]).all():
+        raise RuntimeError("one-minute context contains future information")
 
-    open_price = source["perp_open"].to_numpy(float)
-    high = source["perp_high"].to_numpy(float)
-    low = source["perp_low"].to_numpy(float)
-    close = source["perp_close"].to_numpy(float)
+    open_price = source["open"].to_numpy(float)
+    high = source["high"].to_numpy(float)
+    low = source["low"].to_numpy(float)
+    close = source["close"].to_numpy(float)
     entry = open_price[positions + 1]
     for horizon in HORIZONS:
-        offsets = positions[:, None] + np.arange(1, horizon + 1)
-        high_path = high[offsets]
-        low_path = low[offsets]
-        matrix[f"terminal_{horizon}m_bps"] = (close[positions + horizon] / entry - 1) * 10_000
-        matrix[f"max_up_{horizon}m_bps"] = (high_path.max(axis=1) / entry - 1) * 10_000
-        matrix[f"max_down_{horizon}m_bps"] = (1 - low_path.min(axis=1) / entry) * 10_000
+        steps = horizon // BUCKET_SECONDS
+        future_high = _forward_extreme(high, steps, "max")
+        future_low = _forward_extreme(low, steps, "min")
+        matrix[f"terminal_{horizon}s_bps"] = (close[positions + steps] / entry - 1) * 10_000
+        matrix[f"max_up_{horizon}s_bps"] = (future_high[positions] / entry - 1) * 10_000
+        matrix[f"max_down_{horizon}s_bps"] = (1 - future_low[positions] / entry) * 10_000
     numeric = matrix.loc[
         :,
         [
             *FEATURES,
-            *(f"terminal_{horizon}m_bps" for horizon in HORIZONS),
-            *(f"max_up_{horizon}m_bps" for horizon in HORIZONS),
-            *(f"max_down_{horizon}m_bps" for horizon in HORIZONS),
+            *(f"terminal_{horizon}s_bps" for horizon in HORIZONS),
+            *(f"max_up_{horizon}s_bps" for horizon in HORIZONS),
+            *(f"max_down_{horizon}s_bps" for horizon in HORIZONS),
         ],
     ].to_numpy(float)
     matrix = matrix.loc[np.isfinite(numeric).all(axis=1)].copy()
@@ -367,7 +489,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     temporary = MATRIX.with_suffix(".parquet.tmp")
     matrix.to_parquet(temporary, index=False)
     temporary.replace(MATRIX)
-    return matrix.reset_index(drop=True)
+    return cast(pd.DataFrame, matrix.reset_index(drop=True))
 
 
 def _xgb_regressor(seed: int, *, quantile: float | None = None) -> XGBRegressor:
@@ -392,7 +514,7 @@ def _xgb_regressor(seed: int, *, quantile: float | None = None) -> XGBRegressor:
     return XGBRegressor(**parameters)
 
 
-def _block_bootstrap(size: int, seed: int, block: int = 288) -> np.ndarray:
+def _block_bootstrap(size: int, seed: int, block: int = 1_440) -> np.ndarray:
     rng = np.random.default_rng(seed)
     width = min(block, size)
     starts = rng.integers(0, max(1, size - width + 1), size=int(np.ceil(size / width)))
@@ -413,7 +535,7 @@ def _fit_expert_pool(
     completed = 0
     for horizon in HORIZONS:
         returns[horizon] = {}
-        target = rows[f"terminal_{horizon}m_bps"].to_numpy(float)
+        target = rows[f"terminal_{horizon}s_bps"].to_numpy(float)
         for view, columns in VIEWS.items():
             x = rows.loc[:, columns].to_numpy(float)
             models: list[Any] = []
@@ -433,8 +555,12 @@ def _fit_expert_pool(
             returns[horizon][view] = models
         quantiles[horizon] = {}
         for side in SIDES:
-            favorable = rows[f"max_{'up' if side > 0 else 'down'}_{horizon}m_bps"].to_numpy(float)
-            adverse = rows[f"max_{'down' if side > 0 else 'up'}_{horizon}m_bps"].to_numpy(float)
+            favorable = rows[
+                f"max_{'up' if side > 0 else 'down'}_{horizon}s_bps"
+            ].to_numpy(float)
+            adverse = rows[
+                f"max_{'down' if side > 0 else 'up'}_{horizon}s_bps"
+            ].to_numpy(float)
             values: dict[str, Any] = {}
             for name, target, alpha in (
                 ("favorable_q50", favorable, 0.50),
@@ -466,11 +592,11 @@ def _predict_experts(rows: pd.DataFrame, pool: dict[str, Any]) -> pd.DataFrame:
                     for model in pool["returns"][horizon][view]
                 ]
             )
-            output[f"expert_{horizon}m_{view}"] = values.mean(axis=0)
+            output[f"expert_{horizon}s_{view}"] = values.mean(axis=0)
         x_full = rows.loc[:, FEATURES].to_numpy(float)
         for side in SIDES:
             for name, model in pool["quantiles"][horizon][side].items():
-                output[f"{name}_{horizon}m_{side}"] = np.maximum(
+                output[f"{name}_{horizon}s_{side}"] = np.maximum(
                     np.asarray(model.predict(x_full), dtype=float), 0.0
                 )
     return output
@@ -491,14 +617,14 @@ def _simulate_management(
     stop: np.ndarray,
     trailing: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    open_price = source["perp_open"].to_numpy(float)
-    high = source["perp_high"].to_numpy(float)
-    low = source["perp_low"].to_numpy(float)
-    close = source["perp_close"].to_numpy(float)
+    open_price = source["open"].to_numpy(float)
+    high = source["high"].to_numpy(float)
+    low = source["low"].to_numpy(float)
+    close = source["close"].to_numpy(float)
     entry = open_price[positions + 1]
     size = len(positions)
     gross = np.full(size, np.nan)
-    exit_minutes = np.full(size, horizon, dtype=np.int16)
+    exit_seconds = np.full(size, horizon, dtype=np.int32)
     outcome = np.full(size, "TIMEOUT", dtype=object)
     active = np.ones(size, dtype=bool)
     first_filled = np.zeros(size, dtype=bool)
@@ -506,8 +632,10 @@ def _simulate_management(
     peak = np.zeros(size)
     half_realized = np.zeros(size)
 
-    for minute in range(1, horizon + 1):
-        indexes = positions + minute
+    steps = horizon // BUCKET_SECONDS
+    for step in range(1, steps + 1):
+        indexes = positions + step
+        elapsed_seconds = step * BUCKET_SECONDS
         open_return = side * (open_price[indexes] / entry - 1) * 10_000
         best = np.where(
             side > 0,
@@ -524,21 +652,21 @@ def _simulate_management(
         gross[gap] = np.where(
             first_filled[gap], half_realized[gap] + 0.5 * open_return[gap], open_return[gap]
         )
-        exit_minutes[gap] = minute
+        exit_seconds[gap] = elapsed_seconds
         outcome[gap] = "STOP_GAP"
         active[gap] = False
 
         before = active & ~first_filled
         stopped = before & (worst <= stop_level + 1e-9)
         gross[stopped] = stop_level[stopped]
-        exit_minutes[stopped] = minute
+        exit_seconds[stopped] = elapsed_seconds
         outcome[stopped] = "STOP"
         active[stopped] = False
 
         first = active & ~first_filled & (best >= target_1 - 1e-9)
         second_same_bar = first & (best >= target_2 - 1e-9)
         gross[second_same_bar] = 0.5 * target_1[second_same_bar] + 0.5 * target_2[second_same_bar]
-        exit_minutes[second_same_bar] = minute
+        exit_seconds[second_same_bar] = elapsed_seconds
         outcome[second_same_bar] = "TARGET_2"
         active[second_same_bar] = False
         first &= active
@@ -549,12 +677,12 @@ def _simulate_management(
         after = active & first_filled & ~first
         stopped_after = after & (worst <= stop_level + 1e-9)
         gross[stopped_after] = half_realized[stopped_after] + 0.5 * stop_level[stopped_after]
-        exit_minutes[stopped_after] = minute
+        exit_seconds[stopped_after] = elapsed_seconds
         outcome[stopped_after] = "TRAIL_STOP"
         active[stopped_after] = False
         second = active & first_filled & (best >= target_2 - 1e-9)
         gross[second] = half_realized[second] + 0.5 * target_2[second]
-        exit_minutes[second] = minute
+        exit_seconds[second] = elapsed_seconds
         outcome[second] = "TARGET_2"
         active[second] = False
 
@@ -564,23 +692,20 @@ def _simulate_management(
         managed = active & first_filled
         stop_level[managed] = _tighten_stop(stop_level[managed], peak[managed] - trailing[managed])
 
-    terminal = side * (close[positions + horizon] / entry - 1) * 10_000
+    terminal = side * (close[positions + steps] / entry - 1) * 10_000
     gross[active] = np.where(
         first_filled[active], half_realized[active] + 0.5 * terminal[active], terminal[active]
     )
-    return gross.astype(float), exit_minutes, outcome.astype(str)
+    return gross.astype(float), exit_seconds, outcome.astype(str)
 
 
-def _action_rows(
-    rows: pd.DataFrame, predictions: pd.DataFrame, source: pd.DataFrame
-) -> pd.DataFrame:
+def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
     actions: list[pd.DataFrame] = []
-    positions = rows["decision_position"].to_numpy(int)
     for horizon in HORIZONS:
         for side in SIDES:
-            favorable_q50 = predictions[f"favorable_q50_{horizon}m_{side}"].to_numpy(float)
-            favorable_q75 = predictions[f"favorable_q75_{horizon}m_{side}"].to_numpy(float)
-            adverse_q75 = predictions[f"adverse_q75_{horizon}m_{side}"].to_numpy(float)
+            favorable_q50 = predictions[f"favorable_q50_{horizon}s_{side}"].to_numpy(float)
+            favorable_q75 = predictions[f"favorable_q75_{horizon}s_{side}"].to_numpy(float)
+            adverse_q75 = predictions[f"adverse_q75_{horizon}s_{side}"].to_numpy(float)
             target_1 = np.clip(
                 np.maximum(favorable_q50, ROUND_TRIP_COST_BPS + MINIMUM_NET_TARGET_BPS),
                 ROUND_TRIP_COST_BPS + MINIMUM_NET_TARGET_BPS,
@@ -591,18 +716,15 @@ def _action_rows(
             )
             stop = np.clip(adverse_q75, 3.0, MAX_STOP_BPS)
             trailing = np.clip(adverse_q75, 3.0, MAX_STOP_BPS)
-            gross, exit_minutes, outcome = _simulate_management(
-                source, positions, side, horizon, target_1, target_2, stop, trailing
-            )
             action = rows.loc[:, ["available_at", "entry_timestamp", "decision_position"]].copy()
-            for feature in FEATURES:
+            for feature in GATING_CONTEXT:
                 values = rows[feature].to_numpy(float)
                 action[feature] = values * side if feature in DIRECTIONAL_FEATURES else values
             for column in EXPERT_COLUMNS:
                 action[column] = predictions[column].to_numpy(float) * side
             action["side"] = float(side)
             action["horizon_fraction"] = horizon / max(HORIZONS)
-            action["horizon_minutes"] = horizon
+            action["horizon_seconds"] = horizon
             action["target_1_bps"] = target_1
             action["target_2_bps"] = target_2
             action["stop_bps"] = stop
@@ -610,19 +732,13 @@ def _action_rows(
             action["predicted_favorable_q50_bps"] = favorable_q50
             action["predicted_favorable_q75_bps"] = favorable_q75
             action["predicted_adverse_q75_bps"] = adverse_q75
-            action["gross_bps"] = gross
-            action["net_bps"] = gross - ROUND_TRIP_COST_BPS
-            action["stress_1_5x_bps"] = gross - 1.5 * ROUND_TRIP_COST_BPS
-            action["stress_2x_bps"] = gross - 2 * ROUND_TRIP_COST_BPS
-            action["exit_minutes"] = exit_minutes
-            action["exit_timestamp"] = action["entry_timestamp"] + pd.to_timedelta(
-                exit_minutes, unit="min"
-            )
-            action["outcome"] = outcome
+            terminal = side * rows[f"terminal_{horizon}s_bps"].to_numpy(float)
+            action["gross_bps"] = terminal
+            action["net_bps"] = terminal - ROUND_TRIP_COST_BPS
             actions.append(action)
     return (
         pd.concat(actions, ignore_index=True)
-        .sort_values(["entry_timestamp", "side", "horizon_minutes"])
+        .sort_values(["entry_timestamp", "side", "horizon_seconds"])
         .reset_index(drop=True)
     )
 
@@ -648,10 +764,11 @@ def _checkpoint(
 
 
 def _oof_actions(matrix: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
+    del source
     folds = (
-        (pd.Timestamp("2025-01-01T00:00:00Z"), pd.Timestamp("2025-05-01T00:00:00Z")),
-        (pd.Timestamp("2025-05-01T00:00:00Z"), pd.Timestamp("2025-09-01T00:00:00Z")),
-        (pd.Timestamp("2025-09-01T00:00:00Z"), META_END),
+        (pd.Timestamp("2025-04-01T00:00:00Z"), pd.Timestamp("2025-07-01T00:00:00Z")),
+        (pd.Timestamp("2025-07-01T00:00:00Z"), pd.Timestamp("2025-10-01T00:00:00Z")),
+        (pd.Timestamp("2025-10-01T00:00:00Z"), META_END),
     )
     pieces: list[pd.DataFrame] = []
     for number, (start, end) in enumerate(folds, start=1):
@@ -666,7 +783,7 @@ def _oof_actions(matrix: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
             status_width=12,
         )
         predictions = _predict_experts(testing, pool)
-        pieces.append(_action_rows(testing, predictions, source))
+        pieces.append(_action_rows(testing, predictions))
     return (
         pd.concat(pieces, ignore_index=True).sort_values("entry_timestamp").reset_index(drop=True)
     )
@@ -680,7 +797,7 @@ def _meta_x(rows: pd.DataFrame) -> np.ndarray:
 
 
 def _fit_meta(rows: pd.DataFrame) -> dict[str, Any]:
-    ordered = rows.sort_values(["entry_timestamp", "side", "horizon_minutes"]).reset_index(
+    ordered = rows.sort_values(["entry_timestamp", "side", "horizon_seconds"]).reset_index(
         drop=True
     )
     x = _meta_x(ordered)
@@ -824,23 +941,49 @@ def _score_meta(
     return output
 
 
-def _execute(scored: pd.DataFrame, threshold: float) -> pd.DataFrame:
+def _execute(scored: pd.DataFrame, threshold: float, source: pd.DataFrame) -> pd.DataFrame:
     winners = (
         scored.sort_values(
-            ["entry_timestamp", "score", "calibrated_ev_bps", "side", "horizon_minutes"],
+            ["entry_timestamp", "score", "calibrated_ev_bps", "side", "horizon_seconds"],
             ascending=[True, False, False, False, True],
         )
         .drop_duplicates("entry_timestamp", keep="first")
         .loc[lambda value: value["score"].ge(threshold)]
     )
     accepted: list[int] = []
+    managed: list[tuple[float, int, str]] = []
     free_at = pd.Timestamp.min.tz_localize("UTC")
     for index, row in winners.iterrows():
         if pd.Timestamp(row["entry_timestamp"]) < free_at:
             continue
+        gross, exit_seconds, outcome = _simulate_management(
+            source,
+            np.asarray([int(row["decision_position"])]),
+            int(row["side"]),
+            int(row["horizon_seconds"]),
+            np.asarray([float(row["target_1_bps"])]),
+            np.asarray([float(row["target_2_bps"])]),
+            np.asarray([float(row["stop_bps"])]),
+            np.asarray([float(row["trailing_bps"])]),
+        )
         accepted.append(cast(int, index))
-        free_at = pd.Timestamp(row["exit_timestamp"])
-    return winners.loc[accepted].sort_values("entry_timestamp").reset_index(drop=True)
+        managed.append((float(gross[0]), int(exit_seconds[0]), str(outcome[0])))
+        free_at = pd.Timestamp(row["entry_timestamp"]) + pd.Timedelta(
+            seconds=int(exit_seconds[0])
+        )
+    trades = winners.loc[accepted].sort_values("entry_timestamp").reset_index(drop=True)
+    if trades.empty:
+        return trades
+    trades["gross_bps"] = [value[0] for value in managed]
+    trades["exit_seconds"] = [value[1] for value in managed]
+    trades["outcome"] = [value[2] for value in managed]
+    trades["net_bps"] = trades["gross_bps"] - ROUND_TRIP_COST_BPS
+    trades["stress_1_5x_bps"] = trades["gross_bps"] - 1.5 * ROUND_TRIP_COST_BPS
+    trades["stress_2x_bps"] = trades["gross_bps"] - 2 * ROUND_TRIP_COST_BPS
+    trades["exit_timestamp"] = trades["entry_timestamp"] + pd.to_timedelta(
+        trades["exit_seconds"], unit="s"
+    )
+    return trades
 
 
 def _bootstrap_lcb(trades: pd.DataFrame, seed: int = 20260810) -> float | None:
@@ -934,7 +1077,7 @@ def _metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> di
         "long": int(trades["side"].gt(0).sum()),
         "short": int(trades["side"].lt(0).sum()),
         "horizons": {
-            str(key): int(value) for key, value in trades["horizon_minutes"].value_counts().items()
+            str(key): int(value) for key, value in trades["horizon_seconds"].value_counts().items()
         },
     }
 
@@ -971,7 +1114,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     del resume  # checkpoints are always protocol-hash guarded and safe to reuse
     _status("start", "BTCUSDT Mixture of Experts", 0)
     matrix = build_matrix(force=force_matrix)
-    source = _load_source()
+    source = _load_micro_source()
     oof_path = CHECKPOINTS / "oof_actions.parquet"
     if oof_path.exists():
         oof = pd.read_parquet(oof_path)
@@ -992,7 +1135,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         CHECKPOINTS / "final_experts.joblib",
         final_train,
         FINAL_SEEDS,
-        status_prefix="finale 100 esperti + 24 quantili",
+        status_prefix="finale 125 esperti + 30 quantili",
         status_start=42,
         status_width=35,
     )
@@ -1006,7 +1149,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         future_actions = pd.DataFrame()
     if future_actions.empty:
         future_predictions = _predict_experts(future_rows, final_pool)
-        future_actions = _action_rows(future_rows, future_predictions, source)
+        future_actions = _action_rows(future_rows, future_predictions)
         future_actions["protocol_hash"] = PROTOCOL_HASH
         temporary = future_actions_path.with_suffix(".parquet.tmp")
         future_actions.to_parquet(temporary, index=False)
@@ -1065,7 +1208,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     curve: list[dict[str, Any]] = []
     for coverage in COVERAGES:
         threshold = float(selection_scored["score"].quantile(1 - coverage))
-        trades = _execute(selection_scored, threshold)
+        trades = _execute(selection_scored, threshold, source)
         value = _metrics(trades, CALIBRATION_END, POLICY_SELECTION_END)
         curve.append(
             {
@@ -1093,7 +1236,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         historical_audit, meta_models[ev_champion], calibrators, active_ranker
     )
     audit_threshold = float(frozen["threshold"])
-    audit_trades = _execute(audit_scored, audit_threshold)
+    audit_trades = _execute(audit_scored, audit_threshold, source)
     audit_metrics = _metrics(audit_trades, POLICY_SELECTION_END, HISTORICAL_AUDIT_END)
     audit_gates = _audit_gates(audit_metrics)
     historical_pass = selected is not None and all(audit_gates.values())
@@ -1129,7 +1272,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
                     > pd.to_datetime(matrix["entry_timestamp"], utc=True)
                 ).sum()
             ),
-            "same_minute_stop_wins": True,
+            "same_5s_bucket_stop_wins": True,
             "one_position": True,
         },
         "verdict": (
