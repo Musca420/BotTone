@@ -18,6 +18,18 @@ VWAP rolling 5/15/60/240 minuti resta un centro e una famiglia di feature, non d
 la direzione. `FLAT` vale zero e non è contato come profitto. Una policy può accettare singoli
 trade negativi; deve essere positiva soltanto in aggregato OOS.
 
+I cinque passaggi del sistema sono congelati così:
+
+1. costruzione causale dello stato BTC ogni minuto;
+2. addestramento degli esperti specializzati per vista e durata;
+3. generazione delle loro previsioni esclusivamente OOF;
+4. apprendimento del gating che decide quali esperti ascoltare e quale azione preferire;
+5. replay sequenziale con target, stop, trailing, costi e una sola posizione.
+
+Il report registra anche quanta importanza il gate assegna realmente alle uscite degli esperti e
+quali venti segnali usa di più. In questo modo “ascoltare gli esperti” è verificabile, non soltanto
+una descrizione dell'architettura.
+
 ## Dati e disponibilità
 
 Si usano gli archivi ufficiali Binance USD-M `aggTrades` a cinque secondi, verificati con il
@@ -60,6 +72,12 @@ Viste apprese:
 Altri 30 modelli quantile apprendono, per lato e orizzonte, mediana e 75° percentile
 dell'escursione favorevole e 75° percentile dell'escursione avversa. Insieme generano target e
 stop entro soli limiti di sicurezza, senza una griglia di segnali manuali.
+
+Il target supervisionato del gating è il rendimento terminale netto dell'azione allo specifico
+orizzonte. La selezione della copertura e l'audit economico non usano quel terminale teorico:
+riproducono invece in sequenza sul percorso a cinque secondi target parziali, stop e trailing.
+Questo mantiene il training trattabile senza sostituire il risultato economico con un'etichetta
+irrealizzabile.
 
 ## Gating e meta-modello
 
