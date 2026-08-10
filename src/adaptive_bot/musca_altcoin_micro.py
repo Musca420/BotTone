@@ -599,7 +599,7 @@ def score(rows: pd.DataFrame, model: dict[str, Any], cost_bps: float) -> pd.Data
 
 
 def execute(scored: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    candidates = scored.loc[scored["score"].ge(max(0.0, threshold))].sort_values(
+    candidates = scored.loc[scored["score"].ge(threshold)].sort_values(
         "entry_timestamp"
     )
     accepted: list[Hashable] = []
@@ -698,7 +698,7 @@ def _period(rows: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
 
 
 def _threshold(history: pd.DataFrame, coverage: float) -> float:
-    return max(0.0, float(history["score"].quantile(1 - coverage)))
+    return float(history["score"].quantile(1 - coverage))
 
 
 def _with_symbol(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:

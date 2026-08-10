@@ -64,3 +64,24 @@ def test_execute_accepts_losses_but_never_overlaps_positions() -> None:
     trades = policy.execute(rows, threshold=0.0)
 
     assert trades["net_bps"].tolist() == [-5.0]
+
+
+def test_frozen_negative_rank_threshold_can_be_evaluated_as_a_policy() -> None:
+    rows = pd.DataFrame(
+        [
+            {
+                "entry_timestamp": pd.Timestamp("2026-04-01T00:00:00Z"),
+                "exit_timestamp": pd.Timestamp("2026-04-01T00:01:00Z"),
+                "score": -1.0,
+            },
+            {
+                "entry_timestamp": pd.Timestamp("2026-04-01T00:02:00Z"),
+                "exit_timestamp": pd.Timestamp("2026-04-01T00:03:00Z"),
+                "score": -3.0,
+            },
+        ]
+    )
+
+    trades = policy.execute(rows, threshold=-2.0)
+
+    assert trades["score"].tolist() == [-1.0]

@@ -84,6 +84,12 @@ stesse azioni. Il modello stima rendimento lordo e probabilità di risultato net
 regressione viene calibrata cronologicamente. XGBoost diventa champion soltanto se migliora Ridge
 nelle decisioni OOS, non perché usa la GPU.
 
+La regressione serve a ordinare gli eventi, non a imporre un limite prudenziale positivo a ogni
+singolo trade. La regolarizzazione può contrarre tutte le stime verso la media. Un percentile può
+essere negoziato soltanto quando la sequenza completa, scelta su dati precedenti, supera expectancy,
+PF, drawdown e bootstrap; altrimenti la policy intera resta FLAT. Questo consente normali trade
+perdenti senza attribuire un profitto a FLAT.
+
 La copertura viene scelta una sola volta su aprile, massimizzando i trade/giorno tra i punti
 preregistrati che superano tutti i gate. La soglia viene poi congelata per maggio-giugno.
 
