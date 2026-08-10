@@ -461,11 +461,22 @@ def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
             "parquet_bytes": path.stat().st_size,
             "parquet_sha256": sha256,
         }
+    context_digest = hashlib.sha256()
+    with SOURCE.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            context_digest.update(chunk)
+    context_sha256 = context_digest.hexdigest()
     return {
         "provider": "Binance official public data",
         "download_archive_checksum_verified": True,
         "months": months,
-        "combined_parquet_sha256": hashlib.sha256("".join(file_hashes).encode()).hexdigest(),
+        "one_minute_context": {
+            "parquet_bytes": SOURCE.stat().st_size,
+            "parquet_sha256": context_sha256,
+        },
+        "combined_parquet_sha256": hashlib.sha256(
+            ("".join(file_hashes) + context_sha256).encode()
+        ).hexdigest(),
     }
 
 
