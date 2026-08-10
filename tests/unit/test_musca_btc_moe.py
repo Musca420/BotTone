@@ -100,6 +100,21 @@ def test_no_trade_bucket_does_not_poison_later_order_flow_windows() -> None:
     assert features.loc[:, moe.MICRO_FEATURES].notna().all().all()
 
 
+def test_observed_funding_is_charged_only_when_position_crosses_event() -> None:
+    event = pd.Timestamp("2026-01-01T08:00:00Z").value
+    curve = (np.asarray([event]), np.asarray([0.0, 1.0]))
+    entry = pd.Series(pd.to_datetime(["2026-01-01T07:59:00Z"] * 2, utc=True))
+    exit_after = pd.Series(pd.to_datetime(["2026-01-01T08:01:00Z"] * 2, utc=True))
+    pnl = moe._funding_pnl_bps(entry, exit_after, np.asarray([1, -1]), curve)
+    assert np.array_equal(pnl, np.asarray([-1.0, 1.0]))
+
+    exit_before = pd.Series(pd.to_datetime(["2026-01-01T07:59:30Z"] * 2, utc=True))
+    assert np.array_equal(
+        moe._funding_pnl_bps(entry, exit_before, np.asarray([1, -1]), curve),
+        np.zeros(2),
+    )
+
+
 def test_micro_features_have_explicit_availability_and_no_zero_fill() -> None:
     assert "available_at" not in moe.FEATURES
     assert set(moe.DIRECTIONAL_MICRO_FEATURES).issubset(moe.DIRECTIONAL_FEATURES)

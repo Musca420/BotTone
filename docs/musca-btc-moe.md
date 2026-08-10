@@ -118,6 +118,10 @@ valore viene sostituito dalla commissione effettiva dell'account restituita dall
 Il primo target deve coprire il costo reale e almeno 2 bps netti. Costi 1,5× e 2× sono soltanto
 diagnostici.
 
+Il funding non è una costante: ogni label e replay usa `perp_funding_event_rate` osservato. La
+posizione lo paga o lo riceve soltanto se l'intervallo tra fill e uscita attraversa il timestamp
+dell'evento; il segno è opposto per LONG e SHORT.
+
 Simulazione: equity 10.000 USDT, rischio massimo 1% per trade, leva massima 10×, una posizione
 BTC, nessun averaging down e nessuna liquidazione ammessa.
 

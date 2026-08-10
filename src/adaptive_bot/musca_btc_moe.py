@@ -469,6 +469,35 @@ def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _funding_curve() -> tuple[np.ndarray, np.ndarray]:
+    rows = pd.read_parquet(SOURCE, columns=["timestamp", "perp_funding_event_rate"])
+    timestamp = pd.to_datetime(rows["timestamp"], utc=True)
+    rates = rows["perp_funding_event_rate"].fillna(0).to_numpy(float) * 10_000
+    active = rates != 0
+    event_ns = timestamp.to_numpy(dtype="datetime64[ns]").astype(np.int64)[active]
+    cumulative_bps = np.r_[0.0, np.cumsum(rates[active])]
+    return event_ns, cumulative_bps
+
+
+def _funding_pnl_bps(
+    entry_timestamp: pd.Series,
+    exit_timestamp: pd.Series,
+    side: np.ndarray,
+    funding: tuple[np.ndarray, np.ndarray],
+) -> np.ndarray:
+    event_ns, cumulative_bps = funding
+    entry_ns = pd.to_datetime(entry_timestamp, utc=True).to_numpy(
+        dtype="datetime64[ns]"
+    ).astype(np.int64)
+    exit_ns = pd.to_datetime(exit_timestamp, utc=True).to_numpy(
+        dtype="datetime64[ns]"
+    ).astype(np.int64)
+    first = np.searchsorted(event_ns, entry_ns, side="right")
+    last = np.searchsorted(event_ns, exit_ns, side="right")
+    observed_rate_bps = cumulative_bps[last] - cumulative_bps[first]
+    return np.asarray(-np.asarray(side, dtype=float) * observed_rate_bps, dtype=float)
+
+
 def _forward_extreme(values: np.ndarray, steps: int, operation: str) -> np.ndarray:
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=steps)
     future = pd.Series(values).shift(-1).rolling(indexer, min_periods=steps)
@@ -799,7 +828,11 @@ def _simulate_management(
     return gross.astype(float), exit_seconds, outcome.astype(str)
 
 
-def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
+def _action_rows(
+    rows: pd.DataFrame,
+    predictions: pd.DataFrame,
+    funding: tuple[np.ndarray, np.ndarray],
+) -> pd.DataFrame:
     actions: list[pd.DataFrame] = []
     for horizon in HORIZONS:
         for side in SIDES:
@@ -833,8 +866,17 @@ def _action_rows(rows: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
             action["predicted_favorable_q75_bps"] = favorable_q75
             action["predicted_adverse_q75_bps"] = adverse_q75
             terminal = side * rows[f"terminal_{horizon}s_bps"].to_numpy(np.float32)
+            action["exit_timestamp"] = action["entry_timestamp"] + pd.Timedelta(
+                seconds=horizon
+            )
+            action["funding_bps"] = _funding_pnl_bps(
+                action["entry_timestamp"],
+                action["exit_timestamp"],
+                np.full(len(action), side),
+                funding,
+            )
             action["gross_bps"] = terminal
-            action["net_bps"] = terminal - ROUND_TRIP_COST_BPS
+            action["net_bps"] = terminal + action["funding_bps"] - ROUND_TRIP_COST_BPS
             actions.append(action)
     return (
         pd.concat(actions, ignore_index=True)
@@ -863,8 +905,9 @@ def _checkpoint(
     return pool
 
 
-def _oof_actions(matrix: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
-    del source
+def _oof_actions(
+    matrix: pd.DataFrame, funding: tuple[np.ndarray, np.ndarray]
+) -> pd.DataFrame:
     folds = (
         (pd.Timestamp("2025-04-01T00:00:00Z"), pd.Timestamp("2025-07-01T00:00:00Z")),
         (pd.Timestamp("2025-07-01T00:00:00Z"), pd.Timestamp("2025-10-01T00:00:00Z")),
@@ -883,7 +926,7 @@ def _oof_actions(matrix: pd.DataFrame, source: pd.DataFrame) -> pd.DataFrame:
             status_width=12,
         )
         predictions = _predict_experts(testing, pool)
-        pieces.append(_action_rows(testing, predictions))
+        pieces.append(_action_rows(testing, predictions, funding))
     return (
         pd.concat(pieces, ignore_index=True).sort_values("entry_timestamp").reset_index(drop=True)
     )
@@ -1138,7 +1181,12 @@ def _score_meta(
     return output
 
 
-def _execute(scored: pd.DataFrame, threshold: float, source: pd.DataFrame) -> pd.DataFrame:
+def _execute(
+    scored: pd.DataFrame,
+    threshold: float,
+    source: pd.DataFrame,
+    funding: tuple[np.ndarray, np.ndarray],
+) -> pd.DataFrame:
     winners = (
         scored.sort_values(
             ["entry_timestamp", "score", "calibrated_ev_bps", "side", "horizon_seconds"],
@@ -1174,11 +1222,21 @@ def _execute(scored: pd.DataFrame, threshold: float, source: pd.DataFrame) -> pd
     trades["gross_bps"] = [value[0] for value in managed]
     trades["exit_seconds"] = [value[1] for value in managed]
     trades["outcome"] = [value[2] for value in managed]
-    trades["net_bps"] = trades["gross_bps"] - ROUND_TRIP_COST_BPS
-    trades["stress_1_5x_bps"] = trades["gross_bps"] - 1.5 * ROUND_TRIP_COST_BPS
-    trades["stress_2x_bps"] = trades["gross_bps"] - 2 * ROUND_TRIP_COST_BPS
     trades["exit_timestamp"] = trades["entry_timestamp"] + pd.to_timedelta(
         trades["exit_seconds"], unit="s"
+    )
+    trades["funding_bps"] = _funding_pnl_bps(
+        trades["entry_timestamp"],
+        trades["exit_timestamp"],
+        trades["side"].to_numpy(float),
+        funding,
+    )
+    trades["net_bps"] = trades["gross_bps"] + trades["funding_bps"] - ROUND_TRIP_COST_BPS
+    trades["stress_1_5x_bps"] = (
+        trades["gross_bps"] + trades["funding_bps"] - 1.5 * ROUND_TRIP_COST_BPS
+    )
+    trades["stress_2x_bps"] = (
+        trades["gross_bps"] + trades["funding_bps"] - 2 * ROUND_TRIP_COST_BPS
     )
     return trades
 
@@ -1244,6 +1302,7 @@ def _metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> di
             "bootstrap_lcb_95_bps": None,
             "spa_pvalue": None,
             "risk_budget_violations": 0,
+            "funding_bps_total": 0.0,
         }
     net = trades["net_bps"].to_numpy(float)
     gains = net[net > 0].sum()
@@ -1269,6 +1328,7 @@ def _metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> di
         "positive_calendar_days": float((daily > 0).mean()),
         "max_drawdown": float((1 - equity / peak).max(initial=0.0)),
         "risk_budget_violations": int((strategy_returns < -0.010001).sum()),
+        "funding_bps_total": float(trades["funding_bps"].sum()),
         "bootstrap_lcb_95_bps": _bootstrap_lcb(trades),
         "spa_pvalue": _spa_pvalue(trades, start, end),
         "stress_1_5x_expectancy_bps": float(trades["stress_1_5x_bps"].mean()),
@@ -1317,10 +1377,11 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     matrix = build_matrix(force=force_matrix)
     source = _load_micro_source()
     source_manifest = _micro_manifest(source)
+    funding = _funding_curve()
     oof_path = CHECKPOINTS / "oof_actions.parquet"
     oof = _read_protocol_parquet(oof_path)
     if oof.empty:
-        oof = _oof_actions(matrix, source)
+        oof = _oof_actions(matrix, funding)
         oof["protocol_hash"] = PROTOCOL_HASH
         oof_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = oof_path.with_suffix(".parquet.tmp")
@@ -1341,7 +1402,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     future_actions = _read_protocol_parquet(future_actions_path)
     if future_actions.empty:
         future_predictions = _predict_experts(future_rows, final_pool)
-        future_actions = _action_rows(future_rows, future_predictions)
+        future_actions = _action_rows(future_rows, future_predictions, funding)
         future_actions["protocol_hash"] = PROTOCOL_HASH
         temporary = future_actions_path.with_suffix(".parquet.tmp")
         future_actions.to_parquet(temporary, index=False)
@@ -1400,7 +1461,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     curve: list[dict[str, Any]] = []
     for coverage in COVERAGES:
         threshold = float(selection_scored["score"].quantile(1 - coverage))
-        trades = _execute(selection_scored, threshold, source)
+        trades = _execute(selection_scored, threshold, source, funding)
         value = _metrics(trades, CALIBRATION_END, POLICY_SELECTION_END)
         curve.append(
             {
@@ -1428,7 +1489,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         historical_audit, meta_models[ev_champion], calibrators, active_ranker
     )
     audit_threshold = float(frozen["threshold"])
-    audit_trades = _execute(audit_scored, audit_threshold, source)
+    audit_trades = _execute(audit_scored, audit_threshold, source, funding)
     audit_metrics = _metrics(audit_trades, POLICY_SELECTION_END, HISTORICAL_AUDIT_END)
     audit_gates = _audit_gates(audit_metrics)
     historical_pass = selected is not None and all(audit_gates.values())
