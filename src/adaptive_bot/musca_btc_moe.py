@@ -992,6 +992,26 @@ def _prediction_diagnostics(scored: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _matrix_opportunity_diagnostics(matrix: pd.DataFrame) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for horizon in HORIZONS:
+        up = matrix[f"max_up_{horizon}s_bps"].to_numpy(float)
+        down = matrix[f"max_down_{horizon}s_bps"].to_numpy(float)
+        terminal = np.abs(matrix[f"terminal_{horizon}s_bps"].to_numpy(float))
+        best_path = np.maximum(up, down)
+        result[str(horizon)] = {
+            "states": len(matrix),
+            "path_exceeds_minimum_target_fraction": float(
+                (best_path > ROUND_TRIP_COST_BPS + MINIMUM_NET_TARGET_BPS).mean()
+            ),
+            "terminal_exceeds_round_trip_cost_fraction": float(
+                (terminal > ROUND_TRIP_COST_BPS).mean()
+            ),
+            "median_best_path_bps": float(np.median(best_path)),
+        }
+    return result
+
+
 def _gating_importance(
     model: dict[str, Any], ranker: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -1363,6 +1383,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "symbol": SYMBOL,
         "source_manifest": source_manifest,
         "matrix_rows": len(matrix),
+        "raw_opportunity_diagnostics": _matrix_opportunity_diagnostics(matrix),
         "oof_action_rows": len(oof),
         "meta_fit_action_rows": len(meta_fit),
         "future_action_rows": len(future_actions),
