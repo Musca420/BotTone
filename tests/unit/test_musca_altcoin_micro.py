@@ -6,6 +6,26 @@ import pandas as pd
 from adaptive_bot import musca_altcoin_micro as policy
 
 
+class _RawRegressor:
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return values[:, 0]
+
+
+class _FlatCalibrator:
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return np.zeros(len(values))
+
+
+class _RawClassifier:
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        return np.column_stack((np.full(len(values), 0.5), np.full(len(values), 0.5)))
+
+
+class _ProbabilityCalibrator:
+    def predict_proba(self, values: np.ndarray) -> np.ndarray:
+        return np.column_stack((np.full(len(values), 0.5), np.full(len(values), 0.5)))
+
+
 def test_protocol_trades_only_altcoins_and_keeps_btc_as_context() -> None:
     assert set(policy.SYMBOLS) == {"ETHUSDT", "XRPUSDT", "DOGEUSDT"}
     assert "BTCUSDT" not in policy.SYMBOLS
@@ -85,3 +105,28 @@ def test_frozen_negative_rank_threshold_can_be_evaluated_as_a_policy() -> None:
     trades = policy.execute(rows, threshold=-2.0)
 
     assert trades["score"].tolist() == [-1.0]
+
+
+def test_isotonic_plateau_does_not_destroy_raw_ranking() -> None:
+    timestamp = pd.date_range("2026-04-01", periods=2, freq="1min", tz="UTC")
+    rows = pd.DataFrame({feature: np.zeros(2) for feature in policy.FEATURES})
+    rows[policy.FEATURES[0]] = [1.0, 2.0]
+    rows["available_at"] = timestamp
+    rows["entry_timestamp"] = timestamp
+    rows["day"] = timestamp.floor("D")
+    for _, _, stem in policy._action_stems():
+        rows[f"{stem}_target_bps"] = 20.0
+        rows[f"{stem}_stop_bps"] = 10.0
+        rows[f"{stem}_gross_bps"] = 20.0
+        rows[f"{stem}_exit_minutes"] = 1
+    model = {
+        "regressor": _RawRegressor(),
+        "ev_calibrator": _FlatCalibrator(),
+        "classifier": _RawClassifier(),
+        "probability_calibrator": _ProbabilityCalibrator(),
+    }
+
+    scored = policy.score(rows, model, cost_bps=9.0)
+
+    assert scored["score"].tolist() == [-8.0, -7.0]
+    assert scored["expected_gross_bps"].tolist() == [0.0, 0.0]

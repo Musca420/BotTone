@@ -90,6 +90,10 @@ essere negoziato soltanto quando la sequenza completa, scelta su dati precedenti
 PF, drawdown e bootstrap; altrimenti la policy intera resta FLAT. Questo consente normali trade
 perdenti senza attribuire un profitto a FLAT.
 
+Il ranking usa la previsione grezza continua. L'isotonic produce l'EV calibrata da mostrare e
+verificare, ma non determina il percentile: i suoi plateau altrimenti trasformerebbero una piccola
+copertura in migliaia di pareggi ammessi alla stessa soglia.
+
 La copertura viene scelta una sola volta su aprile, massimizzando i trade/giorno tra i punti
 preregistrati che superano tutti i gate. La soglia viene poi congelata per maggio-giugno.
 

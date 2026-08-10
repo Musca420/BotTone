@@ -566,7 +566,7 @@ def score(rows: pd.DataFrame, model: dict[str, Any], cost_bps: float) -> pd.Data
         predicted_probability = model["probability_calibrator"].predict_proba(
             _logit(raw_probability)
         )[:, 1]
-        candidate = predicted_gross - cost_bps
+        candidate = raw_ev - cost_bps
         better = candidate > best
         best[better] = candidate[better]
         selected[better] = number
