@@ -1160,6 +1160,7 @@ def _metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> di
             "max_drawdown": None,
             "bootstrap_lcb_95_bps": None,
             "spa_pvalue": None,
+            "risk_budget_violations": 0,
         }
     net = trades["net_bps"].to_numpy(float)
     gains = net[net > 0].sum()
@@ -1184,6 +1185,7 @@ def _metrics(trades: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> di
         "win_rate": float((net > 0).mean()),
         "positive_calendar_days": float((daily > 0).mean()),
         "max_drawdown": float((1 - equity / peak).max(initial=0.0)),
+        "risk_budget_violations": int((strategy_returns < -0.010001).sum()),
         "bootstrap_lcb_95_bps": _bootstrap_lcb(trades),
         "spa_pvalue": _spa_pvalue(trades, start, end),
         "stress_1_5x_expectancy_bps": float(trades["stress_1_5x_bps"].mean()),
@@ -1205,6 +1207,7 @@ def _selection_gates(value: dict[str, Any]) -> dict[str, bool]:
         and float(value["profit_factor"]) >= 1.10,
         "positive_days": float(value["positive_calendar_days"]) > 0.5,
         "drawdown": value["max_drawdown"] is not None and float(value["max_drawdown"]) <= 0.10,
+        "risk_budget": int(value["risk_budget_violations"]) == 0,
     }
 
 
@@ -1219,6 +1222,7 @@ def _audit_gates(value: dict[str, Any]) -> dict[str, bool]:
         and float(value["profit_factor"]) >= 1.15,
         "positive_days": float(value["positive_calendar_days"]) > 0.5,
         "drawdown": value["max_drawdown"] is not None and float(value["max_drawdown"]) <= 0.10,
+        "risk_budget": int(value["risk_budget_violations"]) == 0,
         "bootstrap_lcb": lcb is not None and float(lcb) > 0,
         "spa": pvalue is not None and float(pvalue) <= 0.05,
     }

@@ -107,6 +107,7 @@ def test_gate_accepts_normal_losing_trades_when_aggregate_is_positive() -> None:
         "bootstrap_lcb_95_bps": 0.5,
         "spa_pvalue": 0.04,
         "win_rate": 0.45,
+        "risk_budget_violations": 0,
     }
     assert value["win_rate"] < 0.5
     assert all(moe._audit_gates(value).values())
