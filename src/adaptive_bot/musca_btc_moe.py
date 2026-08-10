@@ -16,7 +16,7 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import brier_score_loss, mean_absolute_error
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier, XGBRegressor
+from xgboost import XGBClassifier, XGBRanker, XGBRegressor
 
 from adaptive_bot.btc_vwap_alpha import _historical_features
 
@@ -196,8 +196,29 @@ DIRECTIONAL_FEATURES = frozenset(
     }
 )
 EXPERT_COLUMNS = tuple(f"expert_{horizon}m_{view}" for horizon in HORIZONS for view in VIEWS)
+GATING_CONTEXT = (
+    "vwap_distance_bps",
+    "vwap_tests_30m",
+    "vwap_rejections_30m",
+    "time_since_vwap_cross_minutes",
+    "vwap_band_position",
+    "atr_5m_bps",
+    "atr_30m_bps",
+    "realized_volatility_30m_bps",
+    "volatility_percentile",
+    "volume_percentile",
+    "efficiency_15m",
+    "efficiency_60m",
+    "oi_change_1h",
+    "basis_bps",
+    "funding_z",
+    "hour_sin",
+    "hour_cos",
+    "weekday_sin",
+    "weekday_cos",
+)
 META_FEATURES = (
-    *FEATURES,
+    *GATING_CONTEXT,
     *EXPERT_COLUMNS,
     "side",
     "horizon_fraction",
@@ -228,7 +249,10 @@ PROTOCOL = {
         "per_side_horizon": ["favorable_q50", "favorable_q75", "adverse_q75"],
         "components": len(HORIZONS) * len(SIDES) * 3,
     },
-    "gating": "Ridge/logistic baseline; five-seed XGBoost GPU challenger on OOF expert predictions",
+    "gating": (
+        "regime context plus OOF expert predictions; Ridge/XGBoost EV heads and "
+        "five-seed XGBoost pairwise ranker"
+    ),
     "management": "half at q50, half at q75, q75 adverse stop and non-widening trail",
     "same_minute": "stop wins",
     "round_trip_cost_bps": ROUND_TRIP_COST_BPS,
@@ -656,8 +680,11 @@ def _meta_x(rows: pd.DataFrame) -> np.ndarray:
 
 
 def _fit_meta(rows: pd.DataFrame) -> dict[str, Any]:
-    x = _meta_x(rows)
-    y = rows["net_bps"].to_numpy(float)
+    ordered = rows.sort_values(["entry_timestamp", "side", "horizon_minutes"]).reset_index(
+        drop=True
+    )
+    x = _meta_x(ordered)
+    y = ordered["net_bps"].to_numpy(float)
     positive = (y > 0).astype(int)
     ridge_reg = make_pipeline(StandardScaler(), Ridge(alpha=20.0)).fit(x, y)
     ridge_cls = make_pipeline(
@@ -665,6 +692,12 @@ def _fit_meta(rows: pd.DataFrame) -> dict[str, Any]:
     ).fit(x, positive)
     xgb_reg: list[Any] = []
     xgb_cls: list[Any] = []
+    rankers: list[Any] = []
+    groups = ordered.groupby("entry_timestamp", sort=False).size().to_numpy(int)
+    relevance = (
+        ordered.groupby("entry_timestamp", sort=False)["net_bps"].rank(method="first").to_numpy(int)
+        - 1
+    )
     for number, seed in enumerate(FINAL_SEEDS, start=1):
         regressor = XGBRegressor(
             objective="reg:squarederror",
@@ -694,12 +727,28 @@ def _fit_meta(rows: pd.DataFrame) -> dict[str, Any]:
             n_jobs=4,
             random_state=seed,
         ).fit(x, positive, verbose=False)
+        ranker = XGBRanker(
+            objective="rank:pairwise",
+            tree_method="hist",
+            device="cuda",
+            n_estimators=260,
+            learning_rate=0.03,
+            max_depth=5,
+            min_child_weight=100,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_lambda=30.0,
+            n_jobs=4,
+            random_state=seed,
+        ).fit(x, relevance, group=groups, verbose=False)
         xgb_reg.append(regressor)
         xgb_cls.append(classifier)
+        rankers.append(ranker)
         _status("gating", f"XGBoost meta seed {number}/{len(FINAL_SEEDS)}", 83 + number)
     return {
         "ridge": {"regressors": [ridge_reg], "classifiers": [ridge_cls]},
         "xgboost": {"regressors": xgb_reg, "classifiers": xgb_cls},
+        "ranker": {"models": rankers},
     }
 
 
@@ -714,7 +763,15 @@ def _raw_meta(
     return evs.mean(axis=0), probabilities.mean(axis=0), evs.std(axis=0)
 
 
-def _decision_regret(rows: pd.DataFrame, prediction: np.ndarray) -> float:
+def _ranker_score(rows: pd.DataFrame, ranker: dict[str, Any]) -> np.ndarray:
+    x = _meta_x(rows)
+    values = np.vstack([np.asarray(item.predict(x), dtype=float) for item in ranker["models"]])
+    return np.asarray(values.mean(axis=0), dtype=float)
+
+
+def _decision_regret(
+    rows: pd.DataFrame, prediction: np.ndarray, *, allow_flat: bool = True
+) -> float:
     scored = rows.loc[:, ["entry_timestamp", "net_bps"]].copy()
     scored["prediction"] = prediction
     regrets: list[float] = []
@@ -722,7 +779,7 @@ def _decision_regret(rows: pd.DataFrame, prediction: np.ndarray) -> float:
         predicted = group["prediction"].to_numpy(float)
         actual = group["net_bps"].to_numpy(float)
         choice = int(np.argmax(predicted))
-        chosen = actual[choice] if predicted[choice] > 0 else 0.0
+        chosen = actual[choice] if not allow_flat or predicted[choice] > 0 else 0.0
         regrets.append(max(0.0, float(actual.max())) - chosen)
     return float(np.mean(regrets))
 
@@ -751,13 +808,16 @@ def _fit_calibrators(rows: pd.DataFrame, model: dict[str, Any]) -> dict[str, Any
 
 
 def _score_meta(
-    rows: pd.DataFrame, model: dict[str, Any], calibrators: dict[str, Any]
+    rows: pd.DataFrame,
+    model: dict[str, Any],
+    calibrators: dict[str, Any],
+    ranker: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     raw_ev, raw_probability, dispersion = _raw_meta(rows, model)
     clipped = np.clip(raw_probability, 1e-6, 1 - 1e-6)
     logit = np.log(clipped / (1 - clipped)).reshape(-1, 1)
     output = rows.copy()
-    output["score"] = raw_ev
+    output["score"] = raw_ev if ranker is None else _ranker_score(rows, ranker)
     output["calibrated_ev_bps"] = calibrators["ev"].predict(raw_ev)
     output["probability_net_positive"] = calibrators["probability"].predict_proba(logit)[:, 1]
     output["ensemble_dispersion_bps"] = dispersion
@@ -980,7 +1040,11 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         timestamps.ge(POLICY_SELECTION_END) & timestamps.lt(HISTORICAL_AUDIT_END - PURGE)
     ].copy()
     candidate_metrics = {
-        name: _model_metrics(model_audit, model) for name, model in meta_models.items()
+        name: _model_metrics(model_audit, meta_models[name]) for name in ("ridge", "xgboost")
+    }
+    ranker_audit_score = _ranker_score(model_audit, meta_models["ranker"])
+    candidate_metrics["ranker"] = {
+        "decision_regret_bps": _decision_regret(model_audit, ranker_audit_score, allow_flat=False)
     }
     ridge_metrics = candidate_metrics["ridge"]
     xgb_metrics = candidate_metrics["xgboost"]
@@ -988,13 +1052,19 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         float(xgb_metrics[key]) < float(ridge_metrics[key])
         for key in ("mae_bps", "brier", "decision_regret_bps")
     )
-    champion = "xgboost" if xgb_wins else "ridge"
-    calibrators = _fit_calibrators(calibration, meta_models[champion])
-    calibration_scored = _score_meta(calibration, meta_models[champion], calibrators)
-    selection_scored = _score_meta(policy_selection, meta_models[champion], calibrators)
+    ev_champion = "xgboost" if xgb_wins else "ridge"
+    ranker_wins = float(candidate_metrics["ranker"]["decision_regret_bps"]) < float(
+        candidate_metrics[ev_champion]["decision_regret_bps"]
+    )
+    gating_champion = "xgboost_ranker" if ranker_wins else ev_champion
+    active_ranker = meta_models["ranker"] if ranker_wins else None
+    calibrators = _fit_calibrators(calibration, meta_models[ev_champion])
+    selection_scored = _score_meta(
+        policy_selection, meta_models[ev_champion], calibrators, active_ranker
+    )
     curve: list[dict[str, Any]] = []
     for coverage in COVERAGES:
-        threshold = float(calibration_scored["score"].quantile(1 - coverage))
+        threshold = float(selection_scored["score"].quantile(1 - coverage))
         trades = _execute(selection_scored, threshold)
         value = _metrics(trades, CALIBRATION_END, POLICY_SELECTION_END)
         curve.append(
@@ -1019,8 +1089,10 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         ),
     )
     frozen = selected or diagnostic
-    audit_scored = _score_meta(historical_audit, meta_models[champion], calibrators)
-    audit_threshold = float(selection_scored["score"].quantile(1 - float(frozen["coverage"])))
+    audit_scored = _score_meta(
+        historical_audit, meta_models[ev_champion], calibrators, active_ranker
+    )
+    audit_threshold = float(frozen["threshold"])
     audit_trades = _execute(audit_scored, audit_threshold)
     audit_metrics = _metrics(audit_trades, POLICY_SELECTION_END, HISTORICAL_AUDIT_END)
     audit_gates = _audit_gates(audit_metrics)
@@ -1034,9 +1106,10 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "oof_action_rows": len(oof),
         "meta_fit_action_rows": len(meta_fit),
         "future_action_rows": len(future_actions),
-        "final_model_components": int(final_pool["component_count"]) + 10,
+        "final_model_components": int(final_pool["component_count"]) + 17,
         "candidate_metrics": candidate_metrics,
-        "champion": champion,
+        "ev_champion": ev_champion,
+        "gating_champion": gating_champion,
         "policy_selection": {"curve": curve, "selected": selected},
         "diagnostic_when_no_selection": None if selected is not None else diagnostic,
         "historical_audit": {
@@ -1079,9 +1152,11 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "protocol": PROTOCOL,
         "protocol_hash": PROTOCOL_HASH,
         "expert_pool": final_pool,
-        "meta_model": meta_models[champion],
+        "meta_model": meta_models[ev_champion],
+        "ranker": active_ranker,
         "calibrators": calibrators,
-        "champion": champion,
+        "ev_champion": ev_champion,
+        "gating_champion": gating_champion,
         "coverage": frozen["coverage"],
         "score_threshold": audit_threshold,
         "historical_pass": historical_pass,

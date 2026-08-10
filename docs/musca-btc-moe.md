@@ -59,9 +59,13 @@ stop entro soli limiti di sicurezza, senza una griglia di segnali manuali.
 
 ## Gating e meta-modello
 
-Le previsioni OOF degli esperti diventano input di un gating model. Ridge/logistic è il champion
-predefinito; un ensemble di cinque XGBoost GPU può sostituirlo soltanto se migliora sulle stesse
-righe cronologiche errore EV, Brier score e regret decisionale.
+Le previsioni OOF degli esperti diventano input di un gating model insieme al solo contesto di
+regime. Il gating non riceve nuovamente tutte le feature alpha: in questo modo deve scegliere quali
+esperti ascoltare invece di riapprendere direttamente il rendimento. Ridge/logistic è il champion
+EV predefinito; un ensemble di cinque XGBoost GPU può sostituirlo soltanto se migliora sulle stesse
+righe cronologiche errore EV, Brier score e regret decisionale. Un ensemble separato di cinque
+`XGBRanker` con loss pairwise può determinare l'ordinamento delle otto azioni soltanto se riduce il
+regret OOS rispetto al champion EV.
 
 Per ogni decisione il gating confronta otto azioni: LONG/SHORT per quattro orizzonti. La policy
 sceglie l'azione con EV calibrata più alta e può restare FLAT. Il livello di copertura è scelto

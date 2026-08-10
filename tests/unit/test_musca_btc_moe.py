@@ -27,6 +27,12 @@ def test_protocol_contains_100_return_experts_and_only_btc() -> None:
     assert "ETHUSDT" not in str(moe.PROTOCOL)
 
 
+def test_gating_must_listen_to_experts_instead_of_relearning_alpha() -> None:
+    assert set(moe.EXPERT_COLUMNS).issubset(moe.META_FEATURES)
+    assert "volatility_percentile" in moe.META_FEATURES
+    assert "return_1m_bps" not in moe.META_FEATURES
+
+
 def test_stop_and_target_same_minute_uses_stop() -> None:
     source = _source([100, 100], [100, 100.2], [100, 99.9], [100, 100.1])
     gross, minutes, outcome = moe._simulate_management(
