@@ -20,6 +20,9 @@ data/ml/*
 data/models/*
 data/research/*
 data/pytest-*/
+data/freshness-*/
+data/runtime-*/
+data/test-temp/
 data/meme/raw/*
 data/meme/processed/*
 data/meme/reports/*
