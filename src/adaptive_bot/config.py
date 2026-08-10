@@ -19,6 +19,9 @@ class ConfigModel(BaseModel):
 
 
 class StrategyConfig(ConfigModel):
+    entry_mode: Literal[
+        "range", "weighted_reversion", "weighted_reversion_v11", "weighted_reversion_v2"
+    ] = "range"
     timeframe_minutes: int = Field(default=15, gt=0)
     atr_period: int = Field(default=14, gt=1)
     adx_period: int = Field(default=14, gt=1)
@@ -29,8 +32,13 @@ class StrategyConfig(ConfigModel):
     slope_threshold: float = Field(default=0.05, ge=0)
     atr_change_threshold: float = Field(default=0.5, gt=0)
     cumulative_move_atr: float = Field(default=3.0, gt=0)
+    range_adx_threshold: float = Field(default=20.0, gt=0)
+    trend_adx_threshold: float = Field(default=25.0, gt=0)
     range_multiplier: float = Field(default=2.0, gt=0)
     entry_z: float = Field(default=1.5, gt=0)
+    weighted_entry_threshold: float = Field(default=0.65, gt=0, le=1)
+    v11_exit_z: float = Field(default=0.5, ge=0)
+    v11_cooldown_bars: int = Field(default=6, ge=0)
     stop_atr: float = Field(default=2.5, gt=0)
     time_stop_bars: int = Field(default=8, gt=0)
     confirmation_bars: int = Field(default=3, gt=0)
@@ -45,6 +53,8 @@ class StrategyConfig(ConfigModel):
 
     @model_validator(mode="after")
     def fixed_risk_reward_is_complete(self) -> StrategyConfig:
+        if self.range_adx_threshold > self.trend_adx_threshold:
+            raise ValueError("range ADX threshold must not exceed trend ADX threshold")
         if (self.fixed_stop_fraction is None) != (self.fixed_target_fraction is None):
             raise ValueError("fixed stop and target fractions must be configured together")
         if (
@@ -77,6 +87,8 @@ class BacktestConfig(ConfigModel):
     spread_bps: Decimal = Field(default=Decimal("2"), ge=0)
     slippage_bps: Decimal = Field(default=Decimal("1"), ge=0)
     commission_per_unit: Decimal = Field(default=Decimal("0.005"), ge=0)
+    maker_fee_bps: Decimal = Field(default=Decimal("0"), ge=0)
+    taker_fee_bps: Decimal = Field(default=Decimal("0"), ge=0)
     max_volume_participation: Decimal = Field(default=Decimal("0.10"), gt=0, le=1)
     minimum_quality_score: float = Field(default=1.0, ge=0, le=1)
 
@@ -99,6 +111,69 @@ class BitunixConfig(ConfigModel):
     margin_coin: Literal["USDT"] = "USDT"
     margin_mode: Literal["isolated"] = "isolated"
     leverage: Decimal = Field(default=Decimal("10"), ge=1)
+
+
+class ResearchConfig(ConfigModel):
+    enabled: bool = False
+    history_months: int = Field(default=12, gt=0)
+    broad_candidates: int = Field(default=200, ge=0)
+    random_seed: int = 20260802
+    database_path: Path = Path("data/research/research.duckdb")
+    report_path: Path = Path("data/reports/research.json")
+    history_path: Path = Path("data/processed/bitunix_btcusdt_mark_5m.parquet")
+    top_shadow_candidates: int = Field(default=10, gt=0)
+    gpu_enabled: bool = False
+    parallel_workers: int = Field(default=1, gt=0, le=16)
+
+
+class MachineLearningConfig(ConfigModel):
+    enabled: bool = False
+    protocol_version: Literal["legacy_v1", "scientific_v2"] = "scientific_v2"
+    history_path: Path = Path("data/processed/bitunix_btcusdt_observed_5m.parquet")
+    archive_directory: Path = Path("data/ml/raw")
+    manifest_path: Path = Path("data/ml/dataset_manifest.json")
+    report_path: Path = Path("data/reports/ml_research.json")
+    status_path: Path = Path("data/reports/ml_research.status.json")
+    model_path: Path = Path("data/models/adaptive_range_ml.joblib")
+    candidate_directory: Path = Path("data/models/candidates")
+    model_card_path: Path = Path("data/reports/ml_model_card.md")
+    optuna_path: Path = Path("data/research/ml_optuna.db")
+    trials: int = Field(default=20, gt=0)
+    n_splits: int = Field(default=5, ge=3, le=10)
+    max_holding_bars: int = Field(default=12, gt=1)
+    stop_atr: float = Field(default=2.5, gt=0)
+    probability_threshold: float = Field(default=0.67, gt=0.5, lt=1)
+    taker_fee_bps: float = Field(default=6.0, ge=0)
+    random_seed: int = 20260803
+    symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+    timeframes: tuple[int, ...] = (5, 15, 30)
+    strategy_candidates: int = Field(default=3000, gt=0)
+    full_candidates: int = Field(default=120, gt=0)
+    meta_candidates: int = Field(default=12, gt=0)
+    model_trials_per_side: int = Field(default=40, gt=0)
+    gpu_required: bool = True
+    download_workers: int = Field(default=4, gt=0, le=8)
+    parallel_workers: int = Field(default=4, gt=0, le=16)
+    holdout_weeks: int = Field(default=12, gt=0)
+    minimum_oos_trades: int = Field(default=300, gt=0)
+    minimum_holdout_trades: int = Field(default=30, gt=0)
+    minimum_side_trades: int = Field(default=100, gt=0)
+    minimum_profit_factor: float = Field(default=1.15, gt=0)
+    maximum_pbo: float = Field(default=0.20, ge=0, le=1)
+    minimum_dsr_probability: float = Field(default=0.95, ge=0, le=1)
+    maximum_reality_check_pvalue: float = Field(default=0.05, ge=0, le=1)
+    outer_train_weeks: int = Field(default=52, gt=0)
+    outer_calibration_weeks: int = Field(default=4, gt=0)
+    outer_test_weeks: int = Field(default=4, gt=0)
+    outer_step_weeks: int = Field(default=4, gt=0)
+    v6_microstructure_directory: Path = Path("data/raw/bitunix_microstructure")
+    v6_report_path: Path = Path("data/reports/ml_expert_research_v6.json")
+    v6_status_path: Path = Path("data/reports/ml_expert_research_v6.status.json")
+    maker_fee_bps: float = Field(default=2.0, ge=0)
+    maker_taker_fee_bps: float = Field(default=6.0, ge=0)
+    maker_fit_weeks: int = Field(default=6, gt=0)
+    maker_calibration_weeks: int = Field(default=2, gt=0)
+    maker_holdout_weeks: int = Field(default=4, gt=0)
 
 
 class EnvironmentSettings(BaseSettings):
@@ -126,6 +201,8 @@ class AppConfig(ConfigModel):
     backtest: BacktestConfig
     alpaca: AlpacaConfig | None = None
     bitunix: BitunixConfig | None = None
+    research: ResearchConfig | None = None
+    machine_learning: MachineLearningConfig | None = None
     allow_live_trading: str | None = None
     allowed_instruments: tuple[str, ...] = ("QQQ",)
     allowed_accounts: tuple[str, ...] = ("SIM-QQQ",)

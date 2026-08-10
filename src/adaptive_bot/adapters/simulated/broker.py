@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
-from adaptive_bot.domain.enums import OrderStatus, OrderType, Side
+from adaptive_bot.domain.enums import LiquidityRole, OrderStatus, OrderType, Side
 from adaptive_bot.domain.models import (
     AccountSnapshot,
     Candle,
@@ -25,6 +25,8 @@ class SimulatedBroker:
         spread_bps: Decimal = Decimal("2"),
         slippage_bps: Decimal = Decimal("1"),
         commission_per_unit: Decimal = Decimal("0.005"),
+        maker_fee_bps: Decimal = Decimal("0"),
+        taker_fee_bps: Decimal = Decimal("0"),
         max_volume_participation: Decimal = Decimal("0.10"),
     ) -> None:
         self.instrument = instrument
@@ -33,6 +35,8 @@ class SimulatedBroker:
         self.spread_bps = spread_bps
         self.slippage_bps = slippage_bps
         self.commission_per_unit = commission_per_unit
+        self.maker_fee_bps = maker_fee_bps
+        self.taker_fee_bps = taker_fee_bps
         self.max_volume_participation = max_volume_participation
         self.orders: dict[str, Order] = {}
         self.position: Position | None = None
@@ -61,6 +65,7 @@ class SimulatedBroker:
             stop_price=request.stop_price,
             reduce_only=request.reduce_only,
             protective=request.protective,
+            post_only=request.post_only,
             status=status,
         )
         self.orders[order.client_order_id] = order
@@ -130,6 +135,16 @@ class SimulatedBroker:
             if quantity <= 0:
                 continue
             theoretical = self._theoretical_price(order, candle)
+            liquidity_role = (
+                LiquidityRole.MAKER
+                if order.order_type is OrderType.LIMIT and order.post_only
+                else LiquidityRole.TAKER
+            )
+            fee_bps = (
+                self.maker_fee_bps
+                if liquidity_role is LiquidityRole.MAKER
+                else self.taker_fee_bps
+            )
             fill = Fill(
                 exchange_timestamp=candle.exchange_timestamp,
                 received_timestamp=candle.received_timestamp,
@@ -141,8 +156,12 @@ class SimulatedBroker:
                 side=order.side,
                 price=price,
                 quantity=quantity,
-                commission=quantity * self.commission_per_unit,
+                commission=(
+                    quantity * self.commission_per_unit
+                    + price * quantity * fee_bps / Decimal("10000")
+                ),
                 slippage=abs(price - theoretical) * quantity,
+                liquidity_role=liquidity_role,
             )
             self._apply_fill(fill, order)
             filled = order.filled_quantity + quantity

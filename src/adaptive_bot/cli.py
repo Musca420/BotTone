@@ -5,17 +5,23 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from adaptive_bot.adapters.alpaca.broker import AlpacaPaperBroker
 from adaptive_bot.adapters.alpaca.market_data import AlpacaMarketData
 from adaptive_bot.adapters.alpaca.trade_updates import AlpacaTradeUpdates
-from adaptive_bot.adapters.bitunix.collector import collect_futures_candles
+from adaptive_bot.adapters.bitunix.collector import (
+    collect_futures_candles,
+    collect_futures_microstructure,
+)
 from adaptive_bot.adapters.bitunix.market_data import BitunixMarketData
 from adaptive_bot.backtest.engine import BacktestEngine
-from adaptive_bot.config import alpaca_credentials, load_config
+from adaptive_bot.config import AppConfig, alpaca_credentials, load_config
 from adaptive_bot.dashboard.meme_server import serve_meme_dashboard
 from adaptive_bot.dashboard.server import serve_dashboard
 from adaptive_bot.data.interfaces import MarketDataProvider
@@ -23,6 +29,38 @@ from adaptive_bot.data.repository import ParquetRepository, SQLiteStateStore
 from adaptive_bot.data.validation import validate_candles
 from adaptive_bot.domain.enums import Side
 from adaptive_bot.domain.models import Position
+from adaptive_bot.expert_policy import finalize_expert_training, run_expert_training
+from adaptive_bot.expert_policy_v6 import finalize_v6_training, run_v6_training
+from adaptive_bot.hybrid_policy import (
+    REPORT_PATH as HYBRID_REPORT_PATH,
+)
+from adaptive_bot.hybrid_policy import (
+    STATUS_PATH as HYBRID_STATUS_PATH,
+)
+from adaptive_bot.hybrid_policy import (
+    download_alpha_archives,
+    preregister_hybrid,
+    run_hybrid_training,
+    write_hybrid_failure,
+)
+from adaptive_bot.hybrid_policy_v11 import REPORT_PATH as HYBRID_V11_REPORT_PATH
+from adaptive_bot.hybrid_policy_v11 import STATUS_PATH as HYBRID_V11_STATUS_PATH
+from adaptive_bot.hybrid_policy_v11 import run_v11
+from adaptive_bot.hybrid_policy_v12 import REPORT_PATH as HYBRID_V12_REPORT_PATH
+from adaptive_bot.hybrid_policy_v12 import STATUS_PATH as HYBRID_V12_STATUS_PATH
+from adaptive_bot.hybrid_policy_v12 import run_v12, write_v12_failure
+from adaptive_bot.hybrid_policy_v13 import REPORT_PATH as HYBRID_V13_REPORT_PATH
+from adaptive_bot.hybrid_policy_v13 import STATUS_PATH as HYBRID_V13_STATUS_PATH
+from adaptive_bot.hybrid_policy_v13 import run_v13, write_v13_failure
+from adaptive_bot.hybrid_policy_v14 import FORWARD_LOCK_PATH as HYBRID_V14_FORWARD_LOCK_PATH
+from adaptive_bot.hybrid_policy_v14 import REPORT_PATH as HYBRID_V14_REPORT_PATH
+from adaptive_bot.hybrid_policy_v14 import STATUS_PATH as HYBRID_V14_STATUS_PATH
+from adaptive_bot.hybrid_policy_v14 import (
+    forward_readiness,
+    freeze_research_candidate,
+    run_v14,
+    write_v14_failure,
+)
 from adaptive_bot.meme.collector import collect_meme_market, download_meme_history
 from adaptive_bot.meme.config import MemeBotConfig, load_meme_config
 from adaptive_bot.meme.luna import (
@@ -41,7 +79,25 @@ from adaptive_bot.meme.runtime import (
     load_recorded_frames,
     run_meme_paper,
 )
+from adaptive_bot.ml_research import (
+    download_official_ml_history,
+    run_ml_research,
+    write_ml_status,
+)
+from adaptive_bot.policy_discovery import policy_research_config, run_policy_discovery
+from adaptive_bot.research import (
+    ResearchRegistry,
+    refresh_research_shadow,
+    run_research,
+    write_research_status,
+)
 from adaptive_bot.risk.kill_switch import KillSwitch
+from adaptive_bot.scientific_ml import (
+    download_scientific_archive,
+    finalize_scientific_research,
+    run_scientific_research,
+    scientific_archive_path,
+)
 from adaptive_bot.services.bitunix_paper_service import run_bitunix_paper
 from adaptive_bot.services.market_data_service import download_history
 from adaptive_bot.services.paper_service import PaperRuntime, run_paper
@@ -83,15 +139,31 @@ def _parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect-bitunix")
     collect.add_argument("--config", type=Path, required=True)
     collect.add_argument(
-        "--output", type=Path, default=Path("data/raw/bitunix_btcusdt_mark_futures_5m.jsonl")
+        "--output", type=Path, default=Path("data/raw/bitunix_btcusdt_last_futures_5m.jsonl")
     )
     collect.add_argument("--duration-hours", type=float, default=168)
     collect.add_argument("--poll-seconds", type=float, default=60)
+    collect.add_argument("--timeframe-minutes", type=int)
+    collect.add_argument(
+        "--price-type",
+        choices=("LAST_PRICE", "MARK_PRICE"),
+        default="LAST_PRICE",
+    )
+
+    microstructure = commands.add_parser("collect-bitunix-microstructure")
+    microstructure.add_argument("--config", type=Path, required=True)
+    microstructure.add_argument(
+        "--output-directory",
+        type=Path,
+        default=Path("data/raw/bitunix_microstructure"),
+    )
+    microstructure.add_argument("--duration-hours", type=float, default=168)
+    microstructure.add_argument("--symbol", choices=("BTCUSDT", "ETHUSDT"))
 
     bitunix_paper = commands.add_parser("paper-bitunix")
     bitunix_paper.add_argument("--config", type=Path, required=True)
     bitunix_paper.add_argument(
-        "--input", type=Path, default=Path("data/raw/bitunix_btcusdt_mark_futures_5m.jsonl")
+        "--input", type=Path, default=Path("data/raw/bitunix_btcusdt_last_futures_5m.jsonl")
     )
     bitunix_paper.add_argument(
         "--output", type=Path, default=Path("data/reports/bitunix_paper.json")
@@ -146,10 +218,113 @@ def _parser() -> argparse.ArgumentParser:
     dashboard = commands.add_parser("dashboard")
     dashboard.add_argument("--report", type=Path, default=Path("data/reports/backtest.json"))
     dashboard.add_argument(
-        "--live-data", type=Path, default=Path("data/raw/bitunix_btcusdt_mark_futures_5m.jsonl")
+        "--live-data", type=Path, default=Path("data/raw/bitunix_btcusdt_last_futures_5m.jsonl")
     )
     dashboard.add_argument("--host", default="127.0.0.1")
     dashboard.add_argument("--port", type=int, default=8080)
+    dashboard.add_argument(
+        "--research-report", type=Path, default=Path("data/reports/research.json")
+    )
+    dashboard.add_argument(
+        "--ml-report",
+        type=Path,
+        default=Path("data/reports/ml_expert_research_v5.json"),
+    )
+    research_init = commands.add_parser("research-init")
+    research_init.add_argument("--config", type=Path, required=True)
+    research_init.add_argument("--skip-download", action="store_true")
+    research_init.add_argument("--core-only", action="store_true")
+    research_init.add_argument("--candidate-limit", type=int)
+    research_worker = commands.add_parser("research-worker")
+    research_worker.add_argument("--config", type=Path, required=True)
+    ml_research = commands.add_parser("ml-research")
+    ml_research.add_argument("--config", type=Path, required=True)
+    ml_research.add_argument("--input", type=Path)
+    ml_research.add_argument("--resume", action="store_true")
+    ml_policy = commands.add_parser("ml-policy-research")
+    ml_policy.add_argument("--config", type=Path, required=True)
+    ml_policy.add_argument("--input", type=Path)
+    ml_status = commands.add_parser("ml-status")
+    ml_status.add_argument("--config", type=Path, required=True)
+    ml_status.add_argument("--watch", action="store_true")
+    ml_status.add_argument("--interval", type=float, default=5.0)
+    ml_download = commands.add_parser("ml-download-data")
+    ml_download.add_argument("--config", type=Path, required=True)
+    ml_download.add_argument("--start", type=_utc_datetime)
+    ml_download.add_argument("--end", type=_utc_datetime)
+    ml_download.add_argument("--all-available", action="store_true")
+    ml_finalize = commands.add_parser("ml-finalize")
+    ml_finalize.add_argument("--config", type=Path, required=True)
+    ml_finalize.add_argument("--input", type=Path)
+    ml_finalize.add_argument("--run-id", required=True)
+    ml_finalize.add_argument("--open-holdout", action="store_true", required=True)
+    expert_train = commands.add_parser("ml-expert-train")
+    expert_train.add_argument("--config", type=Path, required=True)
+    expert_train.add_argument("--input", type=Path)
+    expert_train.add_argument("--resume", action="store_true")
+    expert_train.add_argument("--protocol", choices=("v5", "v6"), default="v5")
+    expert_train.add_argument("--preregister-only", action="store_true")
+    expert_status = commands.add_parser("ml-expert-status")
+    expert_status.add_argument("--config", type=Path, required=True)
+    expert_status.add_argument("--watch", action="store_true")
+    expert_status.add_argument("--interval", type=float, default=5.0)
+    expert_status.add_argument("--protocol", choices=("v5", "v6"), default="v5")
+    expert_finalize = commands.add_parser("ml-expert-finalize")
+    expert_finalize.add_argument("--config", type=Path, required=True)
+    expert_finalize.add_argument("--run-id", required=True)
+    expert_finalize.add_argument("--open-holdout", action="store_true", required=True)
+    expert_finalize.add_argument("--protocol", choices=("v5", "v6"), default="v5")
+    hybrid_init = commands.add_parser("ml-hybrid-init")
+    hybrid_init.add_argument("--config", type=Path, required=True)
+    hybrid_init.add_argument("--start", type=_utc_datetime, required=True)
+    hybrid_init.add_argument("--end", type=_utc_datetime, required=True)
+    hybrid_train = commands.add_parser("ml-hybrid-train")
+    hybrid_train.add_argument("--config", type=Path, required=True)
+    hybrid_train.add_argument("--download", action="store_true")
+    hybrid_status = commands.add_parser("ml-hybrid-status")
+    hybrid_status.add_argument("--watch", action="store_true")
+    hybrid_status.add_argument("--interval", type=float, default=5.0)
+    hybrid_v11_train = commands.add_parser("ml-hybrid-v11-train")
+    hybrid_v11_train.add_argument("--config", type=Path, required=True)
+    hybrid_v11_train.add_argument("--resume", action="store_true")
+    hybrid_v11_train.add_argument("--smoke", action="store_true")
+    hybrid_v11_status = commands.add_parser("ml-hybrid-v11-status")
+    hybrid_v11_status.add_argument("--watch", action="store_true")
+    hybrid_v11_status.add_argument("--interval", type=float, default=5.0)
+    hybrid_v12_train = commands.add_parser("ml-hybrid-v12-train")
+    hybrid_v12_train.add_argument("--config", type=Path, required=True)
+    hybrid_v12_train.add_argument("--resume", action="store_true")
+    hybrid_v12_train.add_argument("--smoke", action="store_true")
+    hybrid_v12_status = commands.add_parser("ml-hybrid-v12-status")
+    hybrid_v12_status.add_argument("--watch", action="store_true")
+    hybrid_v12_status.add_argument("--interval", type=float, default=5.0)
+    hybrid_v13_train = commands.add_parser("ml-hybrid-v13-train")
+    hybrid_v13_train.add_argument("--config", type=Path, required=True)
+    hybrid_v13_train.add_argument("--resume", action="store_true")
+    hybrid_v13_train.add_argument("--smoke", action="store_true")
+    hybrid_v13_status = commands.add_parser("ml-hybrid-v13-status")
+    hybrid_v13_status.add_argument("--watch", action="store_true")
+    hybrid_v13_status.add_argument("--interval", type=float, default=5.0)
+    hybrid_v14_train = commands.add_parser("ml-hybrid-v14-train")
+    hybrid_v14_train.add_argument("--config", type=Path, required=True)
+    hybrid_v14_train.add_argument("--resume", action="store_true")
+    hybrid_v14_train.add_argument("--smoke", action="store_true")
+    hybrid_v14_status = commands.add_parser("ml-hybrid-v14-status")
+    hybrid_v14_status.add_argument("--watch", action="store_true")
+    hybrid_v14_status.add_argument("--interval", type=float, default=5.0)
+    hybrid_v14_freeze = commands.add_parser("ml-hybrid-v14-freeze-forward")
+    hybrid_v14_freeze.add_argument("--config", type=Path, required=True)
+    hybrid_v14_forward = commands.add_parser("ml-hybrid-v14-forward-status")
+    hybrid_v14_forward.add_argument("--config", type=Path, required=True)
+    hybrid_v14_forward.add_argument("--watch", action="store_true")
+    hybrid_v14_forward.add_argument("--interval", type=float, default=3600.0)
+    research_worker.add_argument("--once", action="store_true")
+    research_status = commands.add_parser("research-status")
+    research_status.add_argument("--config", type=Path, required=True)
+    research_pin = commands.add_parser("research-pin")
+    research_pin.add_argument("--config", type=Path, required=True)
+    research_pin.add_argument("candidate_id")
+    research_pin.add_argument("--unpin", action="store_true")
     reconcile = commands.add_parser("reconcile")
     reconcile.add_argument("--config", type=Path, required=True)
     reconcile.add_argument("--accept-broker-state", action="store_true")
@@ -212,6 +387,175 @@ async def _download(arguments: argparse.Namespace) -> int:
     return 0
 
 
+async def _research_init(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    research = config.research
+    if research is None or not research.enabled:
+        raise ValueError("research mode is disabled")
+    write_research_status(config, "starting", detail="Preparing historical data")
+    if not arguments.skip_download:
+        end = datetime.now(UTC)
+        start = end - timedelta(days=round(research.history_months * 365.25 / 12))
+        provider = BitunixMarketData(
+            "futures",
+            timeframe_minutes=config.strategy.timeframe_minutes,
+            futures_price_type="MARK_PRICE",
+            progress_callback=lambda count, fraction: write_research_status(
+                config,
+                "downloading",
+                round(fraction * 1000),
+                1000,
+                f"{count:,} MARK_PRICE candles",
+            ),
+        )
+        await download_history(
+            provider,
+            config.instrument.symbol,
+            start,
+            end,
+            research.history_path,
+            timeframe_minutes=config.strategy.timeframe_minutes,
+            regular_session=False,
+        )
+    write_research_status(config, "validating", detail="Checking historical dataset")
+    frame = ParquetRepository.read(research.history_path)
+    payload = await run_research(
+        config,
+        frame,
+        include_broad=not arguments.core_only,
+        candidate_limit=arguments.candidate_limit,
+    )
+    print(
+        json.dumps(
+            {
+                "run_id": payload["run_id"],
+                "evaluated": len(payload["evaluations"]),
+                "report": str(research.report_path),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+async def _research_worker(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    research = config.research
+    if research is None or not research.enabled:
+        raise ValueError("research mode is disabled")
+    while True:
+        frame = await _update_research_history(config)
+        now = datetime.now(UTC)
+        payload = None
+        if research.report_path.exists():
+            payload = json.loads(research.report_path.read_text(encoding="utf-8"))
+        last_full = (
+            datetime.fromisoformat(payload["completed_at"]).astimezone(UTC)
+            if payload is not None
+            else None
+        )
+        full_due = payload is None or (
+            (now.hour, now.minute) >= (0, 15)
+            and (last_full is None or last_full.date() < now.date())
+        )
+        if full_due:
+            await run_research(config, frame, include_broad=now.weekday() == 6)
+        else:
+            assert payload is not None
+            await refresh_research_shadow(config, frame, payload)
+        if arguments.once:
+            return 0
+        await asyncio.sleep(300)
+
+
+async def _update_research_history(config: AppConfig) -> pd.DataFrame:
+    if config.research is None:
+        raise ValueError("research configuration is missing")
+    research = config.research
+    existing = ParquetRepository.read(research.history_path)
+    timestamps = pd.to_datetime(existing["timestamp"], utc=True)
+    start = timestamps.max().to_pydatetime() + timedelta(minutes=config.strategy.timeframe_minutes)
+    end = datetime.now(UTC)
+    if start >= end - timedelta(minutes=config.strategy.timeframe_minutes):
+        return existing
+    update_path = research.history_path.with_name(f"{research.history_path.stem}.update.parquet")
+    await download_history(
+        BitunixMarketData(
+            "futures",
+            timeframe_minutes=config.strategy.timeframe_minutes,
+            futures_price_type="MARK_PRICE",
+            progress_callback=lambda count, fraction: write_research_status(
+                config,
+                "updating_history",
+                round(fraction * 1000),
+                1000,
+                f"{count:,} new candles scanned",
+            ),
+        ),
+        config.instrument.symbol,
+        start,
+        end,
+        update_path,
+        timeframe_minutes=config.strategy.timeframe_minutes,
+        regular_session=False,
+    )
+    combined = pd.concat((existing, ParquetRepository.read(update_path)), ignore_index=True)
+    combined["timestamp"] = pd.to_datetime(combined["timestamp"], utc=True)
+    combined = combined.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    validate_candles(
+        combined, timeframe_minutes=config.strategy.timeframe_minutes, calendar_name=None
+    ).require(1.0)
+    merged_path = research.history_path.with_name(f"{research.history_path.stem}.merge.parquet")
+    ParquetRepository.write(combined, merged_path)
+    merged_path.replace(research.history_path)
+    return combined
+
+
+def _research_status(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    research = config.research
+    if research is None:
+        raise ValueError("research configuration is missing")
+    if not research.report_path.exists():
+        print(json.dumps({"available": False, "error": "No research run is available."}, indent=2))
+        return 2
+    payload = json.loads(research.report_path.read_text(encoding="utf-8"))
+    print(
+        json.dumps(
+            {
+                "available": True,
+                "run_id": payload["run_id"],
+                "completed_at": payload["completed_at"],
+                "evaluated": len(payload["evaluations"]),
+                "champions": payload.get("champions", []),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _research_pin(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    research = config.research
+    if research is None:
+        raise ValueError("research configuration is missing")
+    changed = ResearchRegistry(research.database_path).pin(
+        arguments.candidate_id, not arguments.unpin
+    )
+    print(
+        json.dumps(
+            {
+                "candidate_id": arguments.candidate_id,
+                "pinned": not arguments.unpin,
+                "updated": changed,
+            },
+            indent=2,
+        )
+    )
+    return 0 if changed else 2
+
+
 async def _collect_bitunix(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     if config.bitunix is None or config.bitunix.market != "futures":
@@ -220,10 +564,396 @@ async def _collect_bitunix(arguments: argparse.Namespace) -> int:
         arguments.output,
         duration_hours=arguments.duration_hours,
         poll_seconds=arguments.poll_seconds,
-        timeframe_minutes=config.strategy.timeframe_minutes,
+        timeframe_minutes=arguments.timeframe_minutes or config.strategy.timeframe_minutes,
+        price_type=arguments.price_type,
     )
     print(json.dumps({"collected": count, "output": str(arguments.output)}, indent=2))
     return 0
+
+
+async def _collect_bitunix_microstructure(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    if config.bitunix is None or config.bitunix.market != "futures":
+        raise ValueError("microstructure collector requires Bitunix futures")
+    result = await collect_futures_microstructure(
+        arguments.output_directory,
+        symbol=arguments.symbol or config.instrument.symbol,
+        duration_hours=arguments.duration_hours,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _ml_research(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    ml = config.machine_learning
+    if ml is None or not ml.enabled:
+        raise ValueError("machine-learning research is disabled")
+    source = arguments.input or (
+        scientific_archive_path(ml, "BTCUSDT")
+        if ml.protocol_version == "scientific_v2"
+        else ml.history_path
+    )
+    frame = ParquetRepository.read(source)
+    result = (
+        run_scientific_research(config, frame, resume=arguments.resume)
+        if ml.protocol_version == "scientific_v2"
+        else run_ml_research(config, frame)
+    )
+    print(
+        json.dumps(
+            {
+                "run_id": result.get("run_id"),
+                "verdict": result.get("development_verdict", result.get("verdict")),
+                "gate_passed": result.get("development_gate_passed", result.get("accepted")),
+                "report": str(ml.report_path),
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    return 0
+
+
+def _ml_policy_research(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    ml = config.machine_learning
+    if ml is None or not ml.enabled:
+        raise ValueError("machine-learning research is disabled")
+    source = arguments.input or scientific_archive_path(ml, "BTCUSDT")
+    write_ml_status(
+        policy_research_config(config),
+        "archive_load",
+        f"Loading existing real archive: {source}",
+        1,
+        backend="cuda",
+    )
+    result = run_policy_discovery(config, ParquetRepository.read(source))
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_download(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    end = arguments.end or datetime.now(UTC)
+    ml = config.machine_learning
+    if ml is None:
+        raise AssertionError("machine-learning configuration disappeared")
+    if ml.protocol_version == "scientific_v2":
+        start = arguments.start or (
+            datetime(2022, 4, 1, tzinfo=UTC)
+            if arguments.all_available
+            else end - timedelta(days=365)
+        )
+        manifest = download_scientific_archive(config, start, end)
+        print(json.dumps(manifest, indent=2))
+        return 0
+    start = arguments.start or end - timedelta(days=365)
+    frame = download_official_ml_history(config, start, end)
+    print(json.dumps({"rows": len(frame), "output": str(ml.history_path)}, indent=2))
+    return 0
+
+
+def _ml_status(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    ml = config.machine_learning
+    if ml is None:
+        raise ValueError("machine-learning configuration is missing")
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not ml.status_path.exists()
+            else json.loads(ml.status_path.read_text(encoding="utf-8"))
+        )
+        if arguments.watch:
+            completed = payload.get("completed")
+            total = payload.get("total")
+            if completed is None and payload.get("completed_chunks") is not None:
+                completed = payload["completed_chunks"]
+                total = payload.get("total_chunks")
+            count = f" | {completed}/{total}" if completed is not None and total else ""
+            rows = (
+                f" | righe {int(str(payload['downloaded_rows'])):,}"
+                if payload.get("downloaded_rows") is not None
+                else ""
+            )
+            cursor = f" | fino a {payload['cursor']}" if payload.get("cursor") else ""
+            backend = f" | {payload['backend']}" if payload.get("backend") else ""
+            workers = (
+                f" | worker {payload['active_workers']}"
+                if payload.get("active_workers") is not None
+                else ""
+            )
+            eta = (
+                f" | ETA {timedelta(seconds=int(str(payload['eta_seconds'])))}"
+                if payload.get("eta_seconds") is not None
+                else ""
+            )
+            finding = ""
+            if payload.get("best_candidate"):
+                finding = (
+                    f" | BEST {payload['best_candidate']}"
+                    f" E={payload.get('best_expectancy_r')}R"
+                    f" PF={payload.get('best_profit_factor')}"
+                    f" trade={payload.get('best_trades')}"
+                )
+            elif payload.get("selected_mode"):
+                finding = (
+                    f" | mode={payload['selected_mode']}"
+                    f" det={payload.get('deterministic_score_r')}R"
+                    f" ML={payload.get('meta_score_r')}R"
+                )
+            print(
+                f"[{payload.get('updated_at', '-')}] {payload.get('percent', 0):>5}%"
+                f" | {payload.get('phase', 'unknown')}{count}{rows}{cursor}{eta}"
+                f"{workers}{backend}"
+                f"{finding} | {payload.get('detail', '')}",
+                flush=True,
+            )
+        else:
+            print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {
+            "complete",
+            "development_complete",
+            "failed",
+        }:
+            return 0 if payload.get("phase") != "failed" else 2
+        time.sleep(arguments.interval)
+
+
+def _ml_finalize(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    ml = config.machine_learning
+    if ml is None:
+        raise ValueError("machine-learning configuration is missing")
+    source = arguments.input or scientific_archive_path(ml, "BTCUSDT")
+    frame = ParquetRepository.read(source)
+    eth_path = scientific_archive_path(ml, "ETHUSDT")
+    external = ParquetRepository.read(eth_path) if eth_path.exists() else None
+    result = finalize_scientific_research(
+        config, frame, arguments.run_id, external_control=external
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result["accepted"] else 2
+
+
+def _ml_expert_train(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    ml = config.machine_learning
+    if ml is None or not ml.enabled:
+        raise ValueError("machine-learning research is disabled")
+    if arguments.protocol == "v6":
+        result = run_v6_training(config, preregister_only=arguments.preregister_only)
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+    source = arguments.input or scientific_archive_path(ml, "BTCUSDT")
+    result = run_expert_training(config, ParquetRepository.read(source), resume=arguments.resume)
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result["verdict"] == "ELIGIBLE_FOR_FINAL_HOLDOUT" else 2
+
+
+def _ml_expert_status(arguments: argparse.Namespace) -> int:
+    path = Path(
+        "data/reports/ml_expert_research_v6.status.json"
+        if arguments.protocol == "v6"
+        else "data/reports/ml_expert_research.status.json"
+    )
+    while True:
+        if arguments.protocol == "v6":
+            run_v6_training(load_config(arguments.config))
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not path.exists()
+            else json.loads(path.read_text(encoding="utf-8"))
+        )
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {
+            "development_complete",
+            "final_holdout_complete",
+            "complete",
+            "failed",
+        }:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_expert_finalize(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    result = (
+        finalize_v6_training(config, arguments.run_id)
+        if arguments.protocol == "v6"
+        else finalize_expert_training(config, arguments.run_id)
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_init(arguments: argparse.Namespace) -> int:
+    config = load_config(arguments.config)
+    protocol = preregister_hybrid(config)
+    manifest = download_alpha_archives(config, arguments.start, arguments.end)
+    print(json.dumps({"protocol": protocol, "manifest": manifest}, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_train(arguments: argparse.Namespace) -> int:
+    try:
+        result = run_hybrid_training(load_config(arguments.config), download=arguments.download)
+    except Exception as error:
+        write_hybrid_failure(str(error))
+        raise
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("verdict") in {"ALPHA_SHADOW_READY", "PAPER_CHALLENGER_READY"} else 2
+
+
+def _ml_hybrid_status(arguments: argparse.Namespace) -> int:
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not HYBRID_STATUS_PATH.exists()
+            else json.loads(HYBRID_STATUS_PATH.read_text(encoding="utf-8"))
+        )
+        if HYBRID_REPORT_PATH.exists():
+            payload["report"] = str(HYBRID_REPORT_PATH)
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {"hybrid_complete", "failed"}:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_hybrid_v11_train(arguments: argparse.Namespace) -> int:
+    result = run_v11(
+        load_config(arguments.config),
+        arguments.config,
+        resume=arguments.resume,
+        smoke=arguments.smoke,
+    )
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_v11_status(arguments: argparse.Namespace) -> int:
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not HYBRID_V11_STATUS_PATH.exists()
+            else json.loads(HYBRID_V11_STATUS_PATH.read_text(encoding="utf-8"))
+        )
+        if HYBRID_V11_REPORT_PATH.exists():
+            payload["report"] = str(HYBRID_V11_REPORT_PATH)
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {"complete", "failed"}:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_hybrid_v12_train(arguments: argparse.Namespace) -> int:
+    try:
+        result = run_v12(
+            load_config(arguments.config),
+            arguments.config,
+            resume=arguments.resume,
+            smoke=arguments.smoke,
+        )
+    except Exception as error:
+        write_v12_failure(error)
+        raise
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_v12_status(arguments: argparse.Namespace) -> int:
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not HYBRID_V12_STATUS_PATH.exists()
+            else json.loads(HYBRID_V12_STATUS_PATH.read_text(encoding="utf-8"))
+        )
+        if HYBRID_V12_REPORT_PATH.exists():
+            payload["report"] = str(HYBRID_V12_REPORT_PATH)
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {"complete", "failed"}:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_hybrid_v13_train(arguments: argparse.Namespace) -> int:
+    try:
+        result = run_v13(
+            load_config(arguments.config),
+            arguments.config,
+            resume=arguments.resume,
+            smoke=arguments.smoke,
+        )
+    except Exception as error:
+        write_v13_failure(error)
+        raise
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_v13_status(arguments: argparse.Namespace) -> int:
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not HYBRID_V13_STATUS_PATH.exists()
+            else json.loads(HYBRID_V13_STATUS_PATH.read_text(encoding="utf-8"))
+        )
+        if HYBRID_V13_REPORT_PATH.exists():
+            payload["report"] = str(HYBRID_V13_REPORT_PATH)
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {"complete", "failed"}:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_hybrid_v14_train(arguments: argparse.Namespace) -> int:
+    try:
+        result = run_v14(
+            load_config(arguments.config),
+            arguments.config,
+            resume=arguments.resume,
+            smoke=arguments.smoke,
+        )
+    except Exception as error:
+        write_v14_failure(error)
+        raise
+    print(json.dumps(result, indent=2, default=str))
+    return 0
+
+
+def _ml_hybrid_v14_status(arguments: argparse.Namespace) -> int:
+    while True:
+        payload = (
+            {"phase": "not_started", "percent": 0}
+            if not HYBRID_V14_STATUS_PATH.exists()
+            else json.loads(HYBRID_V14_STATUS_PATH.read_text(encoding="utf-8"))
+        )
+        if HYBRID_V14_REPORT_PATH.exists():
+            payload["report"] = str(HYBRID_V14_REPORT_PATH)
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch or payload.get("phase") in {"complete", "failed"}:
+            return 2 if payload.get("phase") == "failed" else 0
+        time.sleep(arguments.interval)
+
+
+def _ml_hybrid_v14_freeze(arguments: argparse.Namespace) -> int:
+    result = freeze_research_candidate(load_config(arguments.config), arguments.config)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _ml_hybrid_v14_forward_status(arguments: argparse.Namespace) -> int:
+    load_config(arguments.config)
+    if not HYBRID_V14_FORWARD_LOCK_PATH.exists():
+        raise RuntimeError("V14 forward protocol is not frozen")
+    lock = json.loads(HYBRID_V14_FORWARD_LOCK_PATH.read_text(encoding="utf-8"))
+    while True:
+        payload = forward_readiness(cutoff=pd.Timestamp(lock["cutoff"]))
+        print(json.dumps(payload, indent=2), flush=True)
+        if not arguments.watch:
+            return 0
+        time.sleep(arguments.interval)
 
 
 async def _paper_bitunix(arguments: argparse.Namespace) -> int:
@@ -571,6 +1301,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_download(arguments))
     if arguments.command == "collect-bitunix":
         return asyncio.run(_collect_bitunix(arguments))
+    if arguments.command == "collect-bitunix-microstructure":
+        return asyncio.run(_collect_bitunix_microstructure(arguments))
     if arguments.command == "paper-bitunix":
         return asyncio.run(_paper_bitunix(arguments))
     if arguments.command == "meme-collect":
@@ -602,6 +1334,84 @@ def main(argv: list[str] | None = None) -> int:
         return _meme_luna_status(arguments)
     if arguments.command == "backtest":
         return asyncio.run(_backtest(arguments))
+    if arguments.command == "research-init":
+        try:
+            return asyncio.run(_research_init(arguments))
+        except Exception as error:
+            research_config = load_config(arguments.config)
+            write_research_status(research_config, "failed", detail=str(error))
+            raise
+    if arguments.command == "research-worker":
+        return asyncio.run(_research_worker(arguments))
+    if arguments.command == "ml-research":
+        try:
+            return _ml_research(arguments)
+        except BrokenPipeError:
+            return 0
+        except Exception as error:
+            failed = load_config(arguments.config).machine_learning
+            if failed is not None:
+                write_ml_status(failed, "failed", str(error), 0)
+            raise
+    if arguments.command == "ml-policy-research":
+        return _ml_policy_research(arguments)
+    if arguments.command == "ml-status":
+        return _ml_status(arguments)
+    if arguments.command == "ml-download-data":
+        return _ml_download(arguments)
+    if arguments.command == "ml-finalize":
+        return _ml_finalize(arguments)
+    if arguments.command == "ml-expert-train":
+        try:
+            return _ml_expert_train(arguments)
+        except BrokenPipeError:
+            return 0
+        except Exception as error:
+            failed = load_config(arguments.config).machine_learning
+            if failed is not None:
+                write_ml_status(
+                    failed.model_copy(
+                        update={"status_path": Path("data/reports/ml_expert_research.status.json")}
+                    ),
+                    "failed",
+                    str(error),
+                    0,
+                )
+            raise
+    if arguments.command == "ml-expert-status":
+        return _ml_expert_status(arguments)
+    if arguments.command == "ml-expert-finalize":
+        return _ml_expert_finalize(arguments)
+    if arguments.command == "ml-hybrid-init":
+        return _ml_hybrid_init(arguments)
+    if arguments.command == "ml-hybrid-train":
+        return _ml_hybrid_train(arguments)
+    if arguments.command == "ml-hybrid-status":
+        return _ml_hybrid_status(arguments)
+    if arguments.command == "ml-hybrid-v11-train":
+        return _ml_hybrid_v11_train(arguments)
+    if arguments.command == "ml-hybrid-v11-status":
+        return _ml_hybrid_v11_status(arguments)
+    if arguments.command == "ml-hybrid-v12-train":
+        return _ml_hybrid_v12_train(arguments)
+    if arguments.command == "ml-hybrid-v12-status":
+        return _ml_hybrid_v12_status(arguments)
+    if arguments.command == "ml-hybrid-v13-train":
+        return _ml_hybrid_v13_train(arguments)
+    if arguments.command == "ml-hybrid-v13-status":
+        return _ml_hybrid_v13_status(arguments)
+    if arguments.command == "ml-hybrid-v14-train":
+        return _ml_hybrid_v14_train(arguments)
+    if arguments.command == "ml-hybrid-v14-status":
+        return _ml_hybrid_v14_status(arguments)
+    if arguments.command == "ml-hybrid-v14-freeze-forward":
+        return _ml_hybrid_v14_freeze(arguments)
+    if arguments.command == "ml-hybrid-v14-forward-status":
+        return _ml_hybrid_v14_forward_status(arguments)
+    if arguments.command == "research-status":
+        return _research_status(arguments)
+    if arguments.command == "research-pin":
+        return _research_pin(arguments)
     if arguments.command == "dashboard":
         try:
             serve_dashboard(
@@ -609,6 +1419,8 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.host,
                 arguments.port,
                 arguments.live_data,
+                arguments.research_report,
+                arguments.ml_report,
             )
         except KeyboardInterrupt:
             return 0

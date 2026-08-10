@@ -49,9 +49,9 @@ class RegimeClassifier:
             or abs(features.cumulative_move) > self.config.cumulative_move_atr
         ):
             return MarketRegime.SHOCK
-        if features.adx < 20:
+        if features.adx < self.config.range_adx_threshold:
             return MarketRegime.RANGE
-        if features.adx > 25:
+        if features.adx > self.config.trend_adx_threshold:
             if features.ema_slope >= self.config.slope_threshold and features.cumulative_move >= 0:
                 return MarketRegime.TREND_UP
             if features.ema_slope <= -self.config.slope_threshold and features.cumulative_move <= 0:

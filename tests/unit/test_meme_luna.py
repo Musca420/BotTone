@@ -101,3 +101,7 @@ def test_luna_max_prompt_covers_long_short_and_directional_funding(tmp_path, mon
     assert run_luna_max(config, {}) == policy
     assert "long-and-short" in captured
     assert "Positive funding is adverse to longs" in captured
+    assert "Evaluate both directions independently" in captured
+    assert "missing/uncertain macro evidence must not pause every entry" in captured
+    assert "adaptive_range, breakout_retest, momentum_pullback" in captured
+    assert "sources must not be empty" in captured

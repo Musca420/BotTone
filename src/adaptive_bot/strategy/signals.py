@@ -14,6 +14,7 @@ class MarketSnapshot:
     atr: Decimal
     center: Decimal
     z_score: float
+    atr_percentile: float
     spread_bps: float
     regime: MarketRegime
     session_open: datetime

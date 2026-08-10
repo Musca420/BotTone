@@ -4,13 +4,19 @@ import asyncio
 import json
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 
+from adaptive_bot.adapters.bitunix.market_data import _candle as map_bitunix_candle
 from adaptive_bot.backtest.engine import BacktestEngine
 from adaptive_bot.config import AppConfig
+
+ADX_VARIANTS = (20.0, 22.0, 23.0, 24.0, 25.0)
+WEIGHTED_PROFILE = "mr_score"
+WEIGHTED_V11_PROFILE = "mr_score_v11"
+WEIGHTED_V2_PROFILE = "mr_score_v2"
 
 
 async def run_bitunix_paper(
@@ -40,12 +46,43 @@ async def run_bitunix_paper(
                 minutes=config.strategy.timeframe_minutes * (config.strategy.crypto_vwap_window - 1)
             )
             replay = frame[frame["timestamp"] >= warmup_start].reset_index(drop=True)
-            result = await BacktestEngine(config).run(
-                replay,
-                trade_after=baseline.to_pydatetime(),
-                mode="paper",
-            )
-            result.write_json(output)
+            for threshold in ADX_VARIANTS:
+                variant = config.model_copy(
+                    update={
+                        "strategy": config.strategy.model_copy(
+                            update={"range_adx_threshold": threshold}
+                        )
+                    }
+                )
+                result = await BacktestEngine(variant).run(
+                    replay,
+                    trade_after=baseline.to_pydatetime(),
+                    mode="paper",
+                )
+                result.write_json(variant_report_path(output, threshold))
+                if threshold == ADX_VARIANTS[0]:
+                    result.write_json(output)
+            for profile, entry_mode, threshold in (
+                (WEIGHTED_PROFILE, "weighted_reversion", 0.65),
+                (WEIGHTED_V11_PROFILE, "weighted_reversion_v11", 0.65),
+                (WEIGHTED_V2_PROFILE, "weighted_reversion_v2", 0.70),
+            ):
+                weighted = config.model_copy(
+                    update={
+                        "strategy": config.strategy.model_copy(
+                            update={
+                                "entry_mode": entry_mode,
+                                "weighted_entry_threshold": threshold,
+                            }
+                        )
+                    }
+                )
+                result = await BacktestEngine(weighted).run(
+                    replay,
+                    trade_after=baseline.to_pydatetime(),
+                    mode="paper",
+                )
+                result.write_json(profile_report_path(output, profile))
             last_written = latest
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -58,14 +95,26 @@ def read_collected_candles(path: str | Path) -> pd.DataFrame:
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         envelope = json.loads(line)
         candle = envelope["candle"]
+        source = str(envelope.get("source", ""))
+        normalized, _ = map_bitunix_candle(candle, "BTCUSDT", "futures", 5)
         rows.append(
             {
-                "timestamp": datetime.fromtimestamp(int(candle["time"]) / 1000, UTC),
-                "open": candle["open"],
-                "high": candle["high"],
-                "low": candle["low"],
-                "close": candle["close"],
-                "volume": candle.get("baseVol", candle.get("volume", "0")),
+                "timestamp": normalized.exchange_timestamp,
+                "open": normalized.open,
+                "high": normalized.high,
+                "low": normalized.low,
+                "close": normalized.close,
+                "volume": candle.get("quoteVol", candle.get("volume", "0")),
+                "quote_volume": candle.get("baseVol"),
+                "ohlc_adjusted": (
+                    normalized.high != Decimal(str(candle["high"]))
+                    or normalized.low != Decimal(str(candle["low"]))
+                ),
+                "price_type": (
+                    "MARK_PRICE"
+                    if "mark" in source
+                    else str(candle.get("type", "LAST_PRICE"))
+                ),
                 "spread_bps": envelope.get("spread_bps"),
             }
         )
@@ -73,31 +122,10 @@ def read_collected_candles(path: str | Path) -> pd.DataFrame:
         raise ValueError("Bitunix paper mode requires collected candles")
     frame = pd.DataFrame(rows).drop_duplicates("timestamp", keep="last").sort_values("timestamp")
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-    for column in ("open", "high", "low", "close", "volume"):
+    for column in ("open", "high", "low", "close", "volume", "quote_volume"):
         frame[column] = pd.to_numeric(frame[column]).astype(float)
     if (frame[["open", "high", "low", "close"]] <= 0).any().any() or (frame["volume"] < 0).any():
         raise ValueError("Bitunix OHLCV values must be positive")
-    outside = (
-        (frame["open"] < frame["low"])
-        | (frame["open"] > frame["high"])
-        | (frame["close"] < frame["low"])
-        | (frame["close"] > frame["high"])
-    )
-    envelope_high = frame[["open", "high", "close"]].max(axis=1)
-    envelope_low = frame[["open", "low", "close"]].min(axis=1)
-    deviation_bps = (
-        (
-            (envelope_high - frame["high"]).clip(lower=0)
-            + (frame["low"] - envelope_low).clip(lower=0)
-        )
-        / frame["close"]
-        * 10_000
-    )
-    if (deviation_bps[outside] > 1).any():
-        raise ValueError("Bitunix OHLC deviation exceeds the 1 bps quarantine boundary")
-    frame.loc[outside, "high"] = envelope_high[outside]
-    frame.loc[outside, "low"] = envelope_low[outside]
-    frame["ohlc_adjusted"] = outside
     return frame.reset_index(drop=True)
 
 
@@ -113,3 +141,16 @@ def _baseline(path: Path, frame: pd.DataFrame) -> pd.Timestamp:
     temporary.write_text(baseline.isoformat(), encoding="utf-8")
     temporary.replace(path)
     return baseline
+
+
+def variant_report_path(path: str | Path, threshold: float) -> Path:
+    target = Path(path)
+    label = f"{threshold:g}"
+    return target.with_name(f"{target.stem}.adx{label}{target.suffix}")
+
+
+def profile_report_path(path: str | Path, profile: str) -> Path:
+    if profile.startswith("adx"):
+        return variant_report_path(path, float(profile.removeprefix("adx")))
+    target = Path(path)
+    return target.with_name(f"{target.stem}.{profile}{target.suffix}")

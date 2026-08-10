@@ -350,6 +350,7 @@ async def _select_adaptive_range(
     ranked = sorted(
         scan,
         key=lambda item: (
+            not bool(item["volume_eligible"]),
             not bool(item["range_favorable"]),
             -Decimal(str(item["score"])),
             -volumes.get(str(item["symbol"]), Decimal("0")),

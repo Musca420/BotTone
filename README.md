@@ -171,12 +171,18 @@ uv run adaptive-bot paper-bitunix --config configs/bitunix_btc_futures_simulated
 
 Il paper engine persiste il timestamp di avvio, usa lo storico precedente soltanto come warm-up e
 può simulare ordini esclusivamente sulle candele successive. La dashboard deve leggere
-`data/reports/bitunix_paper.json` per mostrare decisioni e operazioni BTCUSDT.
+`data/reports/bitunix_paper.json` per mostrare decisioni e operazioni BTCUSDT. Ogni candela reale
+alimenta otto portafogli simulati indipendenti: cinque con soglia range ADX 20, 22, 23, 24 e 25,
+`MR SCORE v1`, `MR SCORE v1.1` e `MR SCORE v2`. V1.1 conserva l'ingresso rapido di v1 ma
+evita il counter-trend, prende profitto vicino al VWAP e applica invalidazione e cooldown. V2
+richiede tre candele di rientro, opera soltanto con
+`1,5 <= abs(Z) <= 4`, evita ingressi contro trend e usa soglia score 0,70. Il selettore
+`Strategy profile` cambia tra equity, PnL, posizione, score e operazioni degli otto report.
 
 L'esecuzione privata Bitunix resta disabilitata finché il testnet non dispone di endpoint ufficiali
 verificati. I limiti strumento locali sono conservativi e dovranno essere confrontati con i metadati
 pubblici correnti prima di una futura modalità paper collegata all'exchange. Il downloader rifiuta
-deviazioni OHLC superiori a 1 bps; entro tale soglia il dataset processato espande conservativamente
+deviazioni OHLC superiori a 100 bps; entro tale soglia il dataset processato espande conservativamente
 high/low per includere open e close, registra il conteggio e conserva immutato il raw originale.
 
 La simulazione usa candele da 5 minuti e VWAP rolling su 288 barre (24 ore), leva 10×,
@@ -186,6 +192,94 @@ esposizione massima del 20% dell'equity e quindi margine previsto del
 
 Approfondimenti: `docs/architecture.md`, `docs/risk-model.md`, `docs/strategy.md`,
 `docs/backtesting.md` e `docs/live-readiness-checklist.md`.
+
+## Ricerca deterministica dei parametri
+
+Il laboratorio research e separato dagli otto profili paper: usa sempre la stessa
+`AdaptiveRangeStrategy` della V1.1 (`weighted_reversion_v11`), soltanto il
+broker simulato e non puo inviare ordini, cambiare configurazioni operative o promuovere da solo un
+candidato. Rischio per trade 1%, leva 10x, BTCUSDT e timeframe 5 minuti restano fissi.
+
+L'inizializzazione scarica 12 mesi di candele Bitunix `MARK_PRICE`, valida il Parquet, valuta 60
+combinazioni V1.1 core e un campione deterministico di 200 combinazioni V1.1 ampie, quindi salva
+ogni tentativo e gli eventuali champion in DuckDB. La selezione applica CSCV, mostra la probabilita
+di backtest overfitting (PBO) e calcola il Deflated Sharpe Ratio (DSR) tenendo conto di tutti i
+tentativi. Gli orizzonti recenti 1d/7d/30d sono diagnostici e non partecipano alla classifica:
+
+```powershell
+uv run adaptive-bot research-init --config configs/bitunix_btc_futures_simulated.yaml
+uv run adaptive-bot research-status --config configs/bitunix_btc_futures_simulated.yaml
+uv run adaptive-bot research-worker --config configs/bitunix_btc_futures_simulated.yaml
+uv run adaptive-bot research-pin --config configs/bitunix_btc_futures_simulated.yaml CANDIDATE_ID
+```
+
+Per prove rapide locali usare `research-init --skip-download --core-only --candidate-limit 3`. Il
+worker aggiorna dati e shadow dei migliori candidati ogni cinque minuti, esegue il core ogni notte
+alle 00:15 UTC e include la ricerca ampia la domenica. La dashboard
+espone la classifica read-only con filtri per famiglia, stato e orizzonte 1d/7d/30d/all. Un candidato
+resta `insufficient` sotto 30 trade OOS, `provisional` tra 30 e 299 e puo diventare `validated` da
+300 trade soltanto se supera anche expectancy, profit factor, drawdown, costi 2x, maggioranza delle
+finestre, sicurezza, stabilita del vicinato, DSR >= 95% e PBO <= 20%. Queste ultime due soglie sono
+gate prudenziali del progetto, non garanzie di profitto futuro.
+
+## Machine learning Adaptive Range (solo ricerca/shadow)
+
+Il protocollo `scientific_v2` separa long e short e confronta timeframe 5m/15m/30m, VWAP rolling,
+ATR, ADX, regime, conferma, stop, target, time stop e cooldown. La ricerca usa 3.000 strategie,
+porta 120 configurazioni alla validazione completa e applica Logistic Regression e XGBoost CUDA ai
+12 finalisti. Il modello puo soltanto rifiutare un segnale deterministico: rischio 1%, leva 10x,
+sizing e ordini non sono apprendibili.
+
+L'archivio usa candele 1m `LAST_PRICE`/`MARK_PRICE`, volumi e funding osservati dalle REST ufficiali
+Bitunix. I timeframe superiori sono aggregati soltanto dopo la chiusura. Funding assente e spread
+storico restano `unavailable`; non vengono stimati. La selezione usa walk-forward cronologico
+purgato, PBO, Deflated Sharpe, bootstrap e costi 1x/2x/3x. Il holdout 5 maggioâ€“3 agosto 2025 resta
+sigillato fino al comando esplicito `ml-finalize` e puo essere aperto una sola volta per run.
+
+Protocollo corrente: nested purged walk-forward, Reality Check e replay event-driven; il holdout è
+la coda più recente di 12 settimane, determinata automaticamente prima della selezione.
+
+```powershell
+uv sync --extra gpu
+uv run adaptive-bot ml-download-data --config configs/bitunix_btc_futures_simulated.yaml --all-available
+uv run adaptive-bot collect-bitunix-microstructure --config configs/bitunix_btc_futures_simulated.yaml --duration-hours 168
+uv run adaptive-bot ml-research --config configs/bitunix_btc_futures_simulated.yaml
+uv run adaptive-bot ml-status --config configs/bitunix_btc_futures_simulated.yaml --watch
+uv run adaptive-bot ml-research --config configs/bitunix_btc_futures_simulated.yaml --resume
+uv run adaptive-bot ml-finalize --config configs/bitunix_btc_futures_simulated.yaml --run-id RUN_ID --open-holdout
+```
+
+Il candidato, anche se approvato, resta sotto `data/models/candidates/RUN_ID/` e non sostituisce i
+profili paper. Dettagli e gate: `docs/ml-research-protocol.md`.
+
+### Multi-Expert v5
+
+La pipeline v5 importa le 2.847 configurazioni valide congelate dallo screen scientifico, le
+separa LONG/SHORT e aggiunge 3.072 azioni preregistrate (8.766 al massimo). Costruisce esiti
+controfattuali dal minuto successivo, seleziona al massimo 24 esperti sul solo train e stima EV
+netto con due ensemble XGBoost CUDA calibrati; `FLAT=0` prevale se EV o limite inferiore 95% non
+sono positivi. Il bundle non viene mai promosso automaticamente a paper/live.
+
+```powershell
+uv run adaptive-bot ml-expert-train --config configs/bitunix_btc_futures_simulated.yaml
+uv run adaptive-bot ml-expert-status --config configs/bitunix_btc_futures_simulated.yaml --watch
+uv run adaptive-bot ml-expert-train --config configs/bitunix_btc_futures_simulated.yaml --resume
+uv run adaptive-bot ml-expert-finalize --config configs/bitunix_btc_futures_simulated.yaml --run-id RUN_ID --open-holdout
+```
+
+Il protocollo maker-first V6 e il comando di raccolta BTC/ETH sono documentati in
+[`docs/expert-policy-v6.md`](docs/expert-policy-v6.md). V6 richiede otto settimane reali prima del
+fit di sviluppo e mantiene sigillate le quattro settimane finali.
+
+Il percorso ML corrente è V8 Hybrid: Alpha trasferibile con audit leave-one-exchange-out e
+Execution calibrata esclusivamente su Bitunix, documentati in
+[`docs/hybrid-policy-v8.md`](docs/hybrid-policy-v8.md). V7 resta diagnostica; nessun bundle V8 può
+attivare automaticamente denaro reale.
+
+Matrice, bundle e report sono rispettivamente in `data/ml/counterfactual_v5/`,
+`data/models/expert_policy/` e `data/reports/ml_expert_research_v5.json`. Il protocollo è
+descritto in `docs/expert-policy-training-v5.md`. L'apertura holdout è
+atomica e monouso; un verdetto `NO_DEPLOYABLE_POLICY` la lascia sigillata.
 
 ## Meme Futures Lab — Bitunix paper 24/7
 

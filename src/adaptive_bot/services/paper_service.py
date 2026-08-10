@@ -237,6 +237,7 @@ class PaperRuntime:
             atr=Decimal(str(row["atr"])),
             center=Decimal(str(row["center"])),
             z_score=float(row["z"]),
+            atr_percentile=float(row["atr_percentile"]),
             spread_bps=spread,
             regime=classified.regime,
             session_open=session_open,
@@ -255,7 +256,13 @@ class PaperRuntime:
                 activity = (
                     f"{signal.action.value}: {signal.reason}. Paper position flatten requested"
                 )
-        self.strategy_state = self.strategy_state.model_copy(update={"last_z": snapshot.z_score})
+        self.strategy_state = self.strategy_state.model_copy(
+            update={
+                "previous_z": self.strategy_state.last_z,
+                "last_z": snapshot.z_score,
+                "last_close": candle.close,
+            }
+        )
         self._record(candle, account.equity, position, classified.regime, row, activity, spread)
         await self._save_risk_state()
         await self.persist_kill_switch()
@@ -516,6 +523,7 @@ class PaperRuntime:
                 atr=atr,
                 adx=self._finite(row.get("adx")),
                 z_score=self._finite(row.get("z")),
+                entry_score=None,
                 atr_percentile=self._finite(row.get("atr_percentile")),
                 ema_slope=self._finite(row.get("ema_slope")),
                 spread_bps=spread,

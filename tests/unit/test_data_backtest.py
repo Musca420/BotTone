@@ -6,13 +6,16 @@ import pytest
 
 from adaptive_bot.backtest.engine import BacktestEngine
 from adaptive_bot.config import load_config
+from adaptive_bot.dashboard import server as dashboard_server
 from adaptive_bot.dashboard.server import (
     build_dashboard_payload,
     build_live_market_payload,
+    build_ml_payload,
     serve_dashboard,
 )
 from adaptive_bot.data.repository import ParquetRepository
 from adaptive_bot.data.validation import validate_candles
+from adaptive_bot.services.bitunix_paper_service import profile_report_path, variant_report_path
 
 
 def test_data_validation_and_parquet_round_trip(rth_frame: pd.DataFrame, tmp_path: Path) -> None:
@@ -93,6 +96,48 @@ async def test_dashboard_payload_uses_backtest_telemetry(
     assert payload["no_trade_reason"].startswith("No order was filled")
 
 
+@pytest.mark.asyncio
+async def test_dashboard_selects_independent_adx_variant(
+    rth_frame: pd.DataFrame, tmp_path: Path
+) -> None:
+    result = await BacktestEngine(load_config("configs/backtest.yaml")).run(rth_frame)
+    report = tmp_path / "paper.json"
+    result.write_json(report)
+    for threshold, pnl in ((20, "0"), (23, "7")):
+        payload = result.model_dump(mode="json")
+        payload["range_adx_threshold"] = threshold
+        payload["net_pnl"] = pnl
+        variant_report_path(report, threshold).write_text(json.dumps(payload), encoding="utf-8")
+
+    selected = build_dashboard_payload(report, 23)
+    assert selected["summary"]["range_adx_threshold"] == 23
+    assert selected["summary"]["net_pnl"] == "7"
+    assert [
+        item["range_adx_threshold"]
+        for item in selected["variants"]
+        if item["profile_id"].startswith("adx")
+    ] == [20, 23]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_selects_weighted_profile(rth_frame: pd.DataFrame, tmp_path: Path) -> None:
+    result = await BacktestEngine(load_config("configs/backtest.yaml")).run(rth_frame)
+    report = tmp_path / "paper.json"
+    result.write_json(report)
+    payload = result.model_dump(mode="json")
+    payload["strategy_profile"] = "weighted_reversion"
+    profile_report_path(report, "mr_score").write_text(json.dumps(payload), encoding="utf-8")
+
+    selected = build_dashboard_payload(report, "mr_score")
+    assert selected["summary"]["profile_id"] == "mr_score"
+    assert any(variant["profile_label"] == "MR SCORE v1" for variant in selected["variants"])
+
+    payload["strategy_profile"] = "weighted_reversion_v11"
+    profile_report_path(report, "mr_score_v11").write_text(json.dumps(payload), encoding="utf-8")
+    selected = build_dashboard_payload(report, "mr_score_v11")
+    assert selected["summary"]["profile_label"] == "MR SCORE v1.1"
+
+
 def test_dashboard_labels_open_and_close_operations(tmp_path: Path) -> None:
     report = tmp_path / "operations.json"
     fill = {
@@ -118,10 +163,75 @@ def test_dashboard_labels_open_and_close_operations(tmp_path: Path) -> None:
     assert payload["current_position"] == {"status": "FLAT", "quantity": "0"}
 
 
+def test_dashboard_selects_independent_musca_v5_fee_account(tmp_path: Path, monkeypatch) -> None:
+    shadow = tmp_path / "musca_v5_shadow.json"
+    audit = tmp_path / "btc_cross_exchange_forward_audit.json"
+    shadow.write_text(
+        json.dumps(
+            {
+                "mode": "shadow",
+                "instrument": "BTCUSDT",
+                "timeframe_minutes": 1,
+                "strategy_profile": "musca_v5_stable_multi_horizon_vwap",
+                "fills": [],
+                "telemetry": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    accounts = {
+        f"VIP{level}": {
+            "initial_equity": 10_000,
+            "final_equity": 10_000 + level,
+            "net_pnl": level,
+            "max_drawdown": 0,
+            "trades": [{"balance": 10_000 + level}] if level else [],
+        }
+        for level in range(6)
+    }
+    audit.write_text(
+        json.dumps(
+            {
+                "one_position_diagnostics": {"paper_accounts": accounts},
+                "alpha": {
+                    "accepted_candidates_by_profile": {f"VIP{level}": level for level in range(6)}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard_server, "MUSCA_V5_REPORT_PATH", shadow)
+    monkeypatch.setattr(dashboard_server, "CROSS_EXCHANGE_AUDIT_PATH", audit)
+
+    payload = build_dashboard_payload(tmp_path / "unused.json", "musca-v5-vip5")
+
+    assert payload["summary"]["profile_id"] == "musca-v5-vip5"
+    assert payload["summary"]["fee_profile"] == "VIP5"
+    assert payload["summary"]["forward_audit"]["selected_fee_profile"] == "VIP5"
+    vip_variants = [
+        variant
+        for variant in payload["variants"]
+        if variant["profile_id"].startswith("musca-v5-vip")
+    ]
+    assert len(vip_variants) == 6
+    assert vip_variants[-1]["final_equity"] == 10_005
+
+
 def test_dashboard_missing_report_and_remote_bind_are_safe(tmp_path: Path) -> None:
     assert build_dashboard_payload(tmp_path / "missing.json")["available"] is False
     with pytest.raises(ValueError, match="loopback-only"):
         serve_dashboard(tmp_path / "missing.json", host="0.0.0.0", port=0)
+
+
+def test_expert_dashboard_reads_shared_training_status(tmp_path: Path) -> None:
+    report = tmp_path / "ml_expert_research_v5.json"
+    report.write_text('{"protocol":"adaptive_range_multi_expert_v5"}', encoding="utf-8")
+    report.with_name("ml_expert_research.status.json").write_text(
+        '{"phase":"counterfactual","completed_chunks":12}', encoding="utf-8"
+    )
+    payload = build_ml_payload(report)
+    assert payload["available"] is True
+    assert payload["status"]["completed_chunks"] == 12
 
 
 def test_dashboard_reads_live_bitunix_candles_fail_closed(tmp_path: Path) -> None:
@@ -138,7 +248,8 @@ def test_dashboard_reads_live_bitunix_candles_fail_closed(tmp_path: Path) -> Non
                             "high": "102",
                             "low": "99",
                             "close": "101",
-                            "baseVol": "12",
+                            "quoteVol": "0.12",
+                            "baseVol": "12.12",
                         },
                     }
                 ),
@@ -153,3 +264,4 @@ def test_dashboard_reads_live_bitunix_candles_fail_closed(tmp_path: Path) -> Non
     assert payload["invalid_rows"] == 1
     assert payload["latest"]["close"] == 101
     assert payload["latest"]["center"] is None
+    assert payload["latest"]["daily_vwap"] == pytest.approx(101)

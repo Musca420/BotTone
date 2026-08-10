@@ -1,0 +1,17 @@
+mode: paper
+symbol: BTCUSDT
+market: USD-M perpetual
+execution:
+  maker_fee_bps: 2.0
+  taker_fee_bps: 4.0
+  non_fee_reserve_bps: 1.0
+  fee_source: official_commissionRate_example_fallback
+  max_book_age_seconds: 5
+risk:
+  initial_equity: 10000
+  risk_per_trade: 0.01
+  margin_fraction: 0.10
+  max_leverage: 10
+  max_daily_loss: 0.02
+  max_drawdown: 0.08
+live_trading_enabled: false

@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="dark">
     <meta name="description" content="Local operational dashboard for Adaptive Range Bot">
     <title>Adaptive Range Bot — Operations</title>
-    <link rel="stylesheet" href="/styles.css">
-    <script src="/app.js" defer></script>
+    <link rel="stylesheet" href="/styles-v5.css?v=3">
+    <script src="/app-v5.js?v=3" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -15,11 +15,12 @@
         <span class="brand-mark" aria-hidden="true">AR</span>
         <div>
           <p class="eyebrow">OPERATIONS CONSOLE</p>
-          <h1>Adaptive Range Bot</h1>
+          <h1 id="bot-title">Adaptive Range Bot</h1>
         </div>
       </div>
       <div class="topbar-status">
         <span class="pill danger">LIVE DISABLED</span>
+        <a class="pill research-link generic-profile-only" href="#research-panel">RESEARCH LAB</a>
         <span class="connection"><span class="status-dot"></span>Local dashboard</span>
         <span id="last-updated" class="muted">Waiting for data</span>
       </div>
@@ -33,41 +34,48 @@
         <code>uv run adaptive-bot backtest --config configs/backtest.yaml</code>
       </section>
 
-      <div id="dashboard" class="dashboard hidden">
+      <div id="dashboard" class="dashboard">
         <section class="context-strip" aria-label="Run context">
           <div><span>Mode</span><strong id="mode">—</strong></div>
           <div><span>Report instrument</span><strong id="instrument">—</strong></div>
-          <div><span>Active profile</span><strong>BTCUSDT FUTURES · 5M · 10×</strong></div>
+          <div><span>Active profile</span><strong id="active-profile">—</strong></div>
           <div><span>Timeframe</span><strong id="timeframe">—</strong></div>
+          <div>
+            <label for="adx-profile">Strategy profile</label>
+            <select id="adx-profile" aria-label="Select simulated strategy profile">
+              <option value="musca-v5-binance">MUSCA V5 · BINANCE PAPER</option>
+              <option value="musca-v2">MUSCA V2 · Open position</option>
+            </select>
+          </div>
           <div><span>Latest bar</span><strong id="latest-bar">—</strong></div>
           <div><span>Engine</span><strong class="safe">Deterministic</strong></div>
         </section>
 
         <section class="kpi-grid" aria-label="Performance summary">
           <article class="kpi-card primary">
-            <span>Account equity</span><strong id="equity">—</strong><small id="equity-change">—</small>
+            <span id="equity-label">Account equity</span><strong id="equity">—</strong><small id="equity-change">—</small>
           </article>
           <article class="kpi-card">
-            <span>Net P&amp;L</span><strong id="net-pnl">—</strong><small>After modeled costs</small>
+            <span id="net-pnl-label">Net P&amp;L</span><strong id="net-pnl">—</strong><small>After modeled costs</small>
           </article>
           <article class="kpi-card">
-            <span>Max drawdown</span><strong id="drawdown">—</strong><small>Limit: 8.00%</small>
+            <span id="drawdown-label">Max drawdown</span><strong id="drawdown">—</strong><small>Limit: 8.00%</small>
           </article>
           <article class="kpi-card">
-            <span>Signals</span><strong id="signals">—</strong><small id="rejected">—</small>
+            <span id="signals-label">Signals</span><strong id="signals">—</strong><small id="rejected">—</small>
           </article>
           <article class="kpi-card">
-            <span>Current position</span><strong id="position-status">—</strong><small id="position-quantity">—</small>
+            <span id="position-label">Current position</span><strong id="position-status">—</strong><small id="position-quantity">—</small>
           </article>
           <article class="kpi-card">
-            <span>Modeled costs</span><strong id="costs">—</strong><small>Fees + slippage</small>
+            <span id="costs-label">Modeled costs</span><strong id="costs">—</strong><small id="costs-detail">Fees + slippage</small>
           </article>
         </section>
 
         <section class="main-grid">
           <article class="panel live-panel">
             <div class="panel-heading">
-              <div><p class="eyebrow">BITUNIX PUBLIC FEED</p><h2>BTCUSDT 5-minute market monitor</h2></div>
+              <div><p class="eyebrow">BINANCE PUBLIC FEED</p><h2>BTCUSDT 5-minute market monitor</h2></div>
               <span id="live-status" class="pill">WAITING</span>
             </div>
             <p id="live-activity" class="decision-copy">Waiting for closed candles.</p>
@@ -86,7 +94,7 @@
             </dl>
             <div class="market-charts">
               <section class="chart-box">
-                <div class="chart-title"><strong>5-minute candlesticks</strong><span>Bitunix mark price</span></div>
+                <div class="chart-title"><strong>5-minute candlesticks</strong><span>Binance mark price</span></div>
                 <canvas id="live-candle-chart" role="img" aria-label="Live BTCUSDT five-minute candlestick chart"></canvas>
               </section>
               <section class="chart-box realtime-box">
@@ -102,7 +110,7 @@
             </div>
           </article>
 
-          <article class="panel chart-panel wide">
+          <article class="panel chart-panel wide musca-runtime-only">
             <div class="panel-heading">
               <div><p class="eyebrow">ACCOUNT</p><h2>Equity curve</h2></div>
               <span class="legend"><i class="equity-line"></i>Equity</span>
@@ -110,7 +118,7 @@
             <canvas id="equity-chart" role="img" aria-label="Equity curve over time"></canvas>
           </article>
 
-          <article class="panel decision-panel">
+          <article class="panel decision-panel musca-runtime-only">
             <div class="panel-heading">
               <div><p class="eyebrow">LATEST DECISION</p><h2>What the bot sees</h2></div>
               <span id="regime" class="pill">UNKNOWN</span>
@@ -118,28 +126,119 @@
             <p id="activity" class="decision-copy">Waiting for calculations.</p>
             <dl class="calculation-grid">
               <div><dt>Close</dt><dd id="calc-close">—</dd></div>
-              <div><dt>VWAP center</dt><dd id="calc-center">—</dd></div>
-              <div><dt>ATR (14)</dt><dd id="calc-atr">—</dd></div>
-              <div><dt>ADX (14)</dt><dd id="calc-adx">—</dd></div>
-              <div><dt>Normalized z</dt><dd id="calc-z">—</dd></div>
-              <div><dt>ATR percentile</dt><dd id="calc-atr-pct">—</dd></div>
-              <div><dt>EMA50 slope</dt><dd id="calc-slope">—</dd></div>
+              <div><dt id="center-label">VWAP center</dt><dd id="calc-center">—</dd></div>
+              <div><dt id="atr-label">ATR (14)</dt><dd id="calc-atr">—</dd></div>
+              <div class="generic-profile-only"><dt>ADX (14)</dt><dd id="calc-adx">—</dd></div>
+              <div class="generic-profile-only"><dt>Normalized z</dt><dd id="calc-z">—</dd></div>
+              <div><dt id="entry-score-label">MR score</dt><dd id="calc-entry-score">—</dd></div>
+              <div class="musca-v4-only hidden"><dt id="anchor-label">Execution anchored VWAP</dt><dd id="calc-anchor">—</dd></div>
+              <div class="generic-profile-only"><dt>ATR percentile</dt><dd id="calc-atr-pct">—</dd></div>
+              <div class="generic-profile-only"><dt>EMA50 slope</dt><dd id="calc-slope">—</dd></div>
               <div><dt>Spread</dt><dd id="calc-spread">—</dd></div>
-              <div><dt>Lower band</dt><dd id="calc-lower">—</dd></div>
-              <div><dt>Upper band</dt><dd id="calc-upper">—</dd></div>
+              <div class="generic-profile-only"><dt>Lower band</dt><dd id="calc-lower">—</dd></div>
+              <div class="generic-profile-only"><dt>Upper band</dt><dd id="calc-upper">—</dd></div>
             </dl>
+          </article>
+
+          <article class="panel decision-panel musca-v5-only hidden">
+            <div class="panel-heading">
+              <div><p class="eyebrow">DECISION PIPELINE</p><h2>Decisione corrente e piano operativo</h2></div>
+              <span id="v5-decision" class="pill">WAIT</span>
+            </div>
+            <p id="v5-decision-reason" class="decision-copy">In attesa di un'osservazione sincronizzata.</p>
+            <dl class="calculation-grid">
+              <div><dt>Contesto mostrato</dt><dd id="v5-model-context">-</dd></div>
+              <div><dt>Osservazione valutata</dt><dd id="v5-evaluated-at">-</dd></div>
+              <div><dt>Setup piu vicino</dt><dd id="v5-setup">-</dd></div>
+              <div><dt>Direzione</dt><dd id="v5-direction">-</dd></div>
+              <div><dt>Probabilita target / stop / timeout</dt><dd id="v5-probability">Non addestrata</dd></div>
+              <div><dt>EV netto previsto</dt><dd id="v5-ev">-</dd></div>
+              <div><dt>MFE / MAE attesi (60m)</dt><dd id="v5-excursion">-</dd></div>
+              <div><dt>EV per commissioni</dt><dd id="v5-vip-ev">-</dd></div>
+              <div><dt>Modello Alpha</dt><dd id="v5-alpha-status">-</dd></div>
+              <div><dt>Target</dt><dd id="v5-target">-</dd></div>
+              <div><dt>Stop dinamico</dt><dd id="v5-stop">-</dd></div>
+              <div><dt>Break-even economico</dt><dd id="v5-break-even">-</dd></div>
+              <div><dt>Costo round-trip</dt><dd id="v5-cost">-</dd></div>
+              <div><dt>Execution quote</dt><dd id="v5-execution">-</dd></div>
+              <div><dt>Stato execution</dt><dd id="v5-execution-status">-</dd></div>
+              <div><dt>Size / notional</dt><dd id="v5-size">-</dd></div>
+              <div><dt>Risk check</dt><dd id="v5-risk">-</dd></div>
+              <div><dt>Anchored VWAP Binance</dt><dd id="v5-anchor-state">-</dd></div>
+              <div><dt>Controllo setup</dt><dd id="v5-gates">-</dd></div>
+              <div><dt>Orizzonti previsione</dt><dd id="v5-horizons">5 / 15 / 30 / 60 min</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel wide musca-v5-only hidden">
+            <div class="panel-heading">
+              <div><p class="eyebrow">DATA RELIABILITY</p><h2>Fonti osservate e freschezza</h2></div>
+              <span id="v5-data-status" class="pill">WAIT</span>
+            </div>
+            <p id="v5-data-note" class="decision-copy">Binance genera Alpha, esecuzione paper, costi e funding.</p>
+            <div class="source-grid">
+              <section class="source-card">
+                <div><strong>Binance BTCUSDT perpetual</strong><span id="v5-alpha-source-state" class="pill">WAIT</span></div>
+                <p id="v5-alpha-source-purpose">Alpha</p>
+                <dl><div><dt>Osservato</dt><dd id="v5-alpha-source-time">-</dd></div><div><dt>Eta</dt><dd id="v5-alpha-source-age">-</dd></div></dl>
+              </section>
+              <section class="source-card">
+                <div><strong>Binance USD-M BTCUSDT</strong><span id="v5-execution-source-state" class="pill">WAIT</span></div>
+                <p id="v5-execution-source-purpose">Execution paper</p>
+                <dl><div><dt>Osservato</dt><dd id="v5-execution-source-time">-</dd></div><div><dt>Eta</dt><dd id="v5-execution-source-age">-</dd></div></dl>
+              </section>
+            </div>
+            <div class="table-wrap">
+              <table class="v5-input-table">
+                <thead><tr><th>Input valutato</th><th>Venue</th><th>Valore</th><th>Uso</th></tr></thead>
+                <tbody id="v5-inputs-body"><tr><td colspan="4" class="empty-cell">In attesa di dati osservati.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel wide musca-v5-only hidden">
+            <div class="panel-heading">
+              <div><p class="eyebrow">TRADE SIGNALS</p><h2>Quattro setup valutati adesso</h2></div>
+              <span id="v5-setup-status" class="pill">0 / 4</span>
+            </div>
+            <p class="decision-copy">Un setup completo diventa soltanto un candidato. L'ordine paper nasce dopo quote Binance valida, Alpha economica positiva e approvazione del Risk Engine; il fill avviene sul primo book successivo, mai sul prezzo che ha generato il segnale.</p>
+            <div class="table-wrap">
+              <table class="v5-setup-table">
+                <thead><tr><th>Setup</th><th>Lato</th><th>Gate</th><th>Stato</th><th>Primo blocco</th><th>Controlli osservati</th></tr></thead>
+                <tbody id="v5-setups-body"><tr><td colspan="6" class="empty-cell">In attesa della prima valutazione.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel wide musca-v5-only hidden">
+            <div class="panel-heading">
+              <div><p class="eyebrow">ALPHA WALK-FORWARD</p><h2>Binance costi reali · stessa policy</h2></div>
+              <span id="v5-economic-status" class="pill">NOT TRAINED</span>
+            </div>
+            <p id="v5-economic-note" class="decision-copy">VIP0 e il criterio conservativo; gli altri livelli ricalcolano EV e gate senza riaddestrare la direzione.</p>
+            <div class="table-wrap">
+              <table class="v5-vip-table">
+                <thead><tr><th>Profilo</th><th>Trade OOS</th><th>EV netto</th><th>LCB 95%</th><th>Profit factor</th><th>Drawdown</th><th>Stress esecuzione 2× (non leva)</th><th>Esito</th></tr></thead>
+                <tbody id="v5-vip-profile-body"><tr><td colspan="8" class="empty-cell">Training non disponibile.</td></tr></tbody>
+              </table>
+            </div>
           </article>
 
           <article class="panel chart-panel wide">
             <div class="panel-heading">
-              <div><p class="eyebrow">STRATEGY</p><h2>Price, center and adaptive range</h2></div>
+              <div><p class="eyebrow">STRATEGY</p><h2 id="strategy-chart-title">Price, center and adaptive range</h2></div>
               <div class="legend-group">
-                <span class="legend"><i class="price-line"></i>Price</span>
-                <span class="legend"><i class="center-line"></i>VWAP</span>
-                <span class="legend"><i class="band-line"></i>Bands</span>
+                <span class="legend"><i class="price-line"></i><span id="price-legend">Price</span></span>
+                <span class="legend musca-v5-only hidden"><i class="execution-line"></i>Binance execution price</span>
+                <span class="legend"><i class="center-line"></i><span id="center-legend">VWAP</span></span>
+                <span class="legend musca-v4-only hidden"><i class="anchor-line"></i><span id="anchor-legend">Anchored VWAP</span></span>
+                <span class="legend musca-v5-only hidden"><i class="target-line"></i>Target</span>
+                <span class="legend musca-v5-only hidden"><i class="stop-line"></i>Stop</span>
+                <span class="legend musca-v5-only hidden"><i class="break-even-line"></i>Break-even</span>
+                <span class="legend generic-profile-only"><i class="band-line"></i>Bands</span>
               </div>
             </div>
-            <canvas id="range-chart" role="img" aria-label="Price, VWAP center and adaptive bands"></canvas>
+            <canvas id="range-chart" role="img" aria-label="Price and VWAP references"></canvas>
           </article>
 
           <article class="panel risk-panel">
@@ -151,20 +250,104 @@
             <div class="risk-meter"><span id="risk-meter-fill"></span></div>
             <ul class="guardrail-list">
               <li><span>Risk per trade</span><strong id="risk-per-trade">1.00%</strong></li>
-              <li><span>Daily loss limit</span><strong id="daily-loss-limit">2.00%</strong></li>
-              <li><span>Weekly loss limit</span><strong id="weekly-loss-limit">10.00%</strong></li>
+              <li class="generic-profile-only"><span>Daily loss limit</span><strong id="daily-loss-limit">2.00%</strong></li>
+              <li class="generic-profile-only"><span>Weekly loss limit</span><strong id="weekly-loss-limit">10.00%</strong></li>
               <li><span>Max open positions</span><strong>1</strong></li>
-              <li><span>Market</span><strong>BTCUSDT perpetual</strong></li>
-              <li><span>Margin</span><strong>USDT isolated</strong></li>
-              <li><span>Leverage</span><strong>10×</strong></li>
-              <li><span>Target exposure</span><strong>20%</strong></li>
-              <li><span>Expected margin</span><strong>2% · max 10%</strong></li>
-              <li><span>Stop / target</span><strong>−10% / +10% ROE</strong></li>
-              <li><span>Manual reset after breach</span><strong>Required</strong></li>
+              <li class="musca-v2-only hidden"><span>Entry</span><strong>Daily VWAP reclaim</strong></li>
+              <li class="musca-v2-only hidden"><span>Direction</span><strong>7d/30d trend</strong></li>
+              <li class="musca-v2-only hidden"><span>Stop</span><strong>7d structure + ATR buffer</strong></li>
+              <li class="musca-v2-only hidden"><span>Exit</span><strong>VWAP recross ignored · reversal after 288 bars / 14d timeout</strong></li>
+              <li class="musca-v2-only hidden"><span>Trailing</span><strong>Structural tightening after 576 bars</strong></li>
+              <li class="musca-v2-only hidden"><span>Execution</span><strong>Shadow only</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Entry</span><strong>15m impulse → AVWAP pullback → restart</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Direction</span><strong>1h/4h + spot/perp + taker flow</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Exit</span><strong>Structural stop / AVWAP acceptance failure</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Management</span><strong>50% at 1.5R + 15m swing trailing</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Time stop</span><strong>6 hours</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Leverage cap</span><strong>10× simulated</strong></li>
+              <li class="legacy-musca-v4-only hidden"><span>Execution</span><strong>Shadow only</strong></li>
+              <li class="musca-v5-only hidden"><span>Test</span><strong>Binance Alpha · Binance USD-M Paper</strong></li>
+              <li class="musca-v5-only hidden"><span>Setups</span><strong>Impulse · VWAP pullback · restart causale</strong></li>
+              <li class="musca-v5-only hidden"><span>Valutazione</span><strong>Alpha ed esecuzione Binance</strong></li>
+              <li class="musca-v5-only hidden"><span>Orizzonti</span><strong>Breakout 3 / 6 / 12 / 24 / 48 barre da 5m</strong></li>
+              <li class="musca-v5-only hidden"><span>Entry</span><strong>Primo book Binance successivo al segnale causale</strong></li>
+              <li class="musca-v5-only hidden"><span>Exit</span><strong>50% a 1,5R · stop protetto dai costi · trailing · max 6h</strong></li>
+              <li class="musca-v5-only hidden"><span>Re-entry</span><strong>Only after the observed prior exit</strong></li>
+              <li class="musca-v5-only hidden"><span>Selector</span><strong>Policy V8 congelata; ML negativo escluso dagli ordini</strong></li>
+              <li class="musca-v5-only hidden"><span>Costs</span><strong>Fee account Binance + profondità + riserva + funding</strong></li>
+              <li class="musca-v5-only hidden"><span>Conto paper</span><strong>$10.000 · margine 10% · leva massima 10x</strong></li>
+              <li class="musca-v5-only hidden"><span>Execution</span><strong>Paper exchange persistente · denaro reale disabilitato</strong></li>
+              <li class="musca-v4-only hidden"><span>Forward audit</span><strong id="forward-audit-status">Waiting</strong></li>
+              <li class="generic-profile-only"><span>Market</span><strong>BTCUSDT perpetual</strong></li>
+              <li class="generic-profile-only"><span>Margin</span><strong>USDT isolated</strong></li>
+              <li class="generic-profile-only"><span>Leverage</span><strong>10×</strong></li>
+              <li class="generic-profile-only"><span>Target exposure</span><strong>20%</strong></li>
+              <li class="generic-profile-only"><span>Expected margin</span><strong>2% · max 10%</strong></li>
+              <li class="generic-profile-only"><span>Stop / target</span><strong>−10% / +10% ROE</strong></li>
+              <li class="generic-profile-only"><span>Manual reset after breach</span><strong>Required</strong></li>
             </ul>
           </article>
 
-          <article class="panel fills-panel wide">
+          <article class="panel fills-panel wide musca-v5-only hidden">
+            <div class="panel-heading">
+              <div><p class="eyebrow">BINANCE USD-M PAPER</p><h2 id="forward-protocol-name">Ordini e posizioni Musca V5</h2></div>
+              <span id="forward-trade-count" class="muted">0 completed</span>
+            </div>
+            <div class="table-wrap">
+              <table class="v5-paper-table">
+                <thead><tr><th>Segnale</th><th>Stato</th><th>Ingresso / ordine</th><th>Entrata → uscita</th><th>Size</th><th>Costi</th><th>P&amp;L netto</th><th>Saldo</th><th>Motivo uscita</th></tr></thead>
+                <tbody id="forward-trades-body"><tr><td colspan="9" class="empty-cell">Nessun ordine paper eseguito.</td></tr></tbody>
+              </table>
+            </div>
+            <p class="decision-copy">Conto paper persistente da $10.000: una posizione alla volta, margine massimo 10% del saldo, leva massima 10x e perdita pianificata massima 1% del patrimonio. Entrata e uscita attraversano la profondità Binance realmente osservata; se non basta, il fill viene rifiutato. Stop e costi devono rientrare insieme nel budget di rischio.</p>
+            <p class="decision-copy"><strong>Validazione:</strong> Alpha, book, mark price, funding e costi provengono da Binance. Il denaro reale resta vietato finché i gate paper e holdout non passano.</p>
+            <p id="forward-portfolio-status" class="decision-copy">Waiting for one-position diagnostics.</p>
+            <p id="forward-selector-status" class="decision-copy">Adaptive selector waiting for forward data.</p>
+          </article>
+
+          <article id="ml-panel" class="panel decision-panel wide generic-profile-only">
+            <div class="panel-heading">
+              <div><p class="eyebrow">RESEARCH / SHADOW ONLY</p><h2>Adaptive Range machine learning</h2></div>
+              <span id="ml-status" class="pill">WAITING</span>
+            </div>
+            <p id="ml-summary" class="decision-copy">No ML run loaded.</p>
+            <dl class="calculation-grid">
+              <div><dt>Historical data</dt><dd id="ml-data">Observed archive required</dd></div>
+              <div><dt>Final holdout</dt><dd id="ml-result">No model trained</dd></div>
+              <div><dt>Progress</dt><dd id="ml-progress">0%</dd></div>
+              <div><dt>Compute</dt><dd id="ml-compute">Waiting for preflight</dd></div>
+            </dl>
+            <div id="expert-policy-details" class="hidden">
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Expert</th><th>Side</th><th>TF</th><th>Entry z</th><th>Stop ATR</th><th>Exit z</th></tr></thead>
+                  <tbody id="expert-policy-body"></tbody>
+                </table>
+              </div>
+              <p id="expert-policy-gates" class="decision-copy"></p>
+            </div>
+          </article>
+
+          <article id="research-panel" class="panel fills-panel wide generic-profile-only">
+            <div class="panel-heading">
+              <div><p class="eyebrow">RESEARCH ONLY</p><h2>V1.1 Adaptive Range robustness search</h2></div>
+              <span id="research-status" class="pill">WAITING</span>
+            </div>
+            <p id="research-summary" class="decision-copy">No research run loaded.</p>
+            <div class="research-controls">
+              <label>Family<select id="research-family"><option value="all">All V1.1</option><option value="v11_core">V1.1 core 60</option><option value="v11_broad">V1.1 broad 200</option></select></label>
+              <label>Status<select id="research-state"><option value="all">All</option><option value="validated">Validated</option><option value="provisional">Provisional</option><option value="insufficient">Insufficient data</option></select></label>
+              <label>Horizon<select id="research-horizon"><option value="1d">1 day</option><option value="7d">7 days</option><option value="30d">30 days</option><option value="all" selected>All OOS</option></select></label>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Rank</th><th>Candidate</th><th>Family</th><th>Status</th><th>Parameters</th><th>Trades</th><th>Expectancy</th><th>PF 2x</th><th>Drawdown</th><th>Positive windows</th><th>DSR</th></tr></thead>
+                <tbody id="research-body"><tr><td colspan="11" class="empty-cell">No research results.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="panel fills-panel wide musca-v2-runtime-only">
             <div class="panel-heading">
               <div><p class="eyebrow">EXECUTION</p><h2>Operation history</h2></div>
               <span id="fill-count" class="muted">0 operations</span>
@@ -177,12 +360,12 @@
             </div>
           </article>
 
-          <article class="panel timeline-panel">
+          <article class="panel timeline-panel musca-v2-runtime-only">
             <div class="panel-heading"><div><p class="eyebrow">AUDIT TRAIL</p><h2>Decision timeline</h2></div></div>
             <ol id="timeline" class="timeline"></ol>
           </article>
 
-          <article class="panel milestones-panel">
+          <article class="panel milestones-panel generic-profile-only">
             <div class="panel-heading"><div><p class="eyebrow">PROJECT</p><h2>Delivery progress</h2></div></div>
             <ol id="milestones" class="milestones"></ol>
           </article>
