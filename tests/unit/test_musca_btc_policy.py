@@ -160,6 +160,20 @@ def test_negative_result_has_explicit_non_operational_verdict() -> None:
     assert policy._verdict(economics, [], {}) == "NO_ECONOMIC_ACTION_SET"
 
 
+def test_four_week_selection_does_not_require_twenty_week_bootstrap() -> None:
+    metrics = {
+        "expectancy_bps": 2.0,
+        "daily_lcb_95": 0.0001,
+        "weekly_lcb_95": None,
+        "profit_factor": 1.2,
+        "maximum_drawdown": 0.02,
+        "positive_active_days": 0.6,
+        "risk_violations": 0,
+    }
+    assert all(policy.selection_gates(metrics).values())
+    assert not policy.policy_gates(metrics)["lower_confidence_bound_positive"]
+
+
 def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:
     if not policy._gpu_info().get("available"):
         pytest.skip("CUDA unavailable")

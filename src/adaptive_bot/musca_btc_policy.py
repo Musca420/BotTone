@@ -1415,6 +1415,18 @@ def policy_gates(metrics: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def selection_gates(metrics: dict[str, Any]) -> dict[str, bool]:
+    """Four-week tuning can validate days, but cannot manufacture 20 independent weeks."""
+    return {
+        "expectancy_positive": float(metrics.get("expectancy_bps") or 0) > 0,
+        "daily_lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -1) > 0,
+        "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
+        "drawdown_8pct": float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN,
+        "majority_active_days_positive": float(metrics.get("positive_active_days") or 0) > 0.5,
+        "risk_respected": int(metrics.get("risk_violations", 1)) == 0,
+    }
+
+
 def _choose_frequency_threshold(
     scored: pd.DataFrame, fee: FeeContract, start: pd.Timestamp, end: pd.Timestamp
 ) -> tuple[float, list[dict[str, Any]]]:
@@ -1423,7 +1435,7 @@ def _choose_frequency_threshold(
         trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps)
         metrics = policy_metrics(trades, start, end)
         frontier.append(
-            {"threshold_bps": threshold, "metrics": metrics, "gates": policy_gates(metrics)}
+            {"threshold_bps": threshold, "metrics": metrics, "gates": selection_gates(metrics)}
         )
     sustainable = [item for item in frontier if all(item["gates"].values())]
     if not sustainable:
