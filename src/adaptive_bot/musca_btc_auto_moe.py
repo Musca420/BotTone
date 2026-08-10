@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from collections import Counter, defaultdict
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -22,14 +23,14 @@ from xgboost import XGBClassifier, XGBRegressor, XGBRFRegressor
 
 from adaptive_bot import musca_btc_moe as base
 
-ROOT = Path("data/ml/musca_btc_auto_moe")
+ROOT = Path(f"data/ml/musca_{base.ASSET_SLUG}_auto_moe")
 CANDIDATES = ROOT / "candidates.parquet"
 LIBRARY = ROOT / "expert_library.joblib"
 ACTIONS = ROOT / "expert_actions.parquet"
 AUDIT_TRADES = ROOT / "audit_trades.parquet"
-REPORT = Path("data/reports/musca_btc_auto_moe.json")
-STATUS = Path("data/reports/musca_btc_auto_moe.status.json")
-BUNDLE = Path("data/models/musca_btc_auto_moe/research_bundle.joblib")
+REPORT = Path(f"data/reports/musca_{base.ASSET_SLUG}_auto_moe.json")
+STATUS = Path(f"data/reports/musca_{base.ASSET_SLUG}_auto_moe.status.json")
+BUNDLE = Path(f"data/models/musca_{base.ASSET_SLUG}_auto_moe/research_bundle.joblib")
 
 DISCOVERY_FIT_END = pd.Timestamp("2026-01-01T00:00:00Z")
 LIBRARY_FREEZE_END = pd.Timestamp("2026-03-01T00:00:00Z")
@@ -49,7 +50,12 @@ GATE_SEEDS = (20260820, 20260821, 20260822)
 EXPERT_VALIDATION_PROFIT_FACTOR = 1.02
 MAX_PROFIT_FACTOR_FEATURE = 100.0
 LIVE_OFFICIAL_DERIVATIVE_FEATURES = frozenset(
-    {"oi_change_1h", "return_oi_interaction_raw", "basis_bps", "funding_z"}
+    {"basis_bps", "funding_z"}
+    | (
+        {"oi_change_1h", "return_oi_interaction_raw"}
+        if base.REQUIRE_OPEN_INTEREST
+        else set()
+    )
 )
 MODEL_FEATURES = base.FEATURES
 GATE_CONTEXT = base.GATING_CONTEXT
@@ -70,7 +76,7 @@ EXPERT_META_FEATURES = (
 GATE_FEATURES = (*GATE_CONTEXT, *EXPERT_META_FEATURES)
 
 PROTOCOL = {
-    "name": "musca_btc_automatic_two_stage_mixture_of_experts",
+    "name": f"musca_{base.ASSET_SLUG}_automatic_two_stage_mixture_of_experts",
     "parent_protocol_hash": base.PROTOCOL_HASH,
     "symbol": base.SYMBOL,
     "source": base.PROTOCOL["source"],
@@ -88,10 +94,14 @@ PROTOCOL = {
         "model_features": list(MODEL_FEATURES),
         "live_official_derivative_features": sorted(LIVE_OFFICIAL_DERIVATIVE_FEATURES),
         "live_feature_sources": {
-            "oi_change_1h": "GET /futures/data/openInterestHist period=5m",
             "basis_bps": "closed GET /fapi/v1/markPriceKlines / spot api/v3/klines",
             "funding_z": "GET /fapi/v1/fundingRate reconstructed on the minute grid",
-        },
+        }
+        | (
+            {"oi_change_1h": "GET /futures/data/openInterestHist period=5m"}
+            if base.REQUIRE_OPEN_INTEREST
+            else {}
+        ),
         "validation_profit_factor": EXPERT_VALIDATION_PROFIT_FACTOR,
         "expert_selection_target": "managed net PnL using the production exit rules",
         "validation_cost_stress": "reported only; applied to the combined policy audit",
@@ -126,6 +136,11 @@ PROTOCOL = {
 PROTOCOL_HASH = hashlib.sha256(
     json.dumps(PROTOCOL, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
+LEGACY_DISCOVERY_PROTOCOL_HASHES = frozenset(
+    {"57167b3200409981efb2cbd73133e07d6e8d0f8f5cc65864104d41f59637c7af"}
+    if base.SYMBOL == "DOGEUSDT"
+    else set()
+)
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -151,7 +166,8 @@ def _status(phase: str, detail: str, percent: float) -> None:
         "protocol_hash": PROTOCOL_HASH,
     }
     _atomic_json(STATUS, payload)
-    print(f"[{payload['percent']:6.2f}%] {phase}: {detail}", flush=True)
+    with suppress(BrokenPipeError, OSError):
+        print(f"[{payload['percent']:6.2f}%] {phase}: {detail}", flush=True)
 
 
 def _period(rows: pd.DataFrame, start: pd.Timestamp | None, end: pd.Timestamp) -> pd.DataFrame:
@@ -173,7 +189,7 @@ def _expert_id(side: int, horizon: int, tree: int, leaf: int) -> str:
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:20]
-    return f"btc-{'long' if side > 0 else 'short'}-{horizon}s-{digest}"
+    return f"{base.ASSET_SLUG}-{'long' if side > 0 else 'short'}-{horizon}s-{digest}"
 
 
 def _generator(seed: int) -> XGBRFRegressor:
@@ -452,6 +468,24 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
         cached = joblib.load(LIBRARY)
         if cached.get("protocol_hash") == PROTOCOL_HASH:
             return cast(dict[str, Any], cached)
+        previous_hash = str(cached.get("protocol_hash", ""))
+        if previous_hash in LEGACY_DISCOVERY_PROTOCOL_HASHES:
+            cached["protocol_hash"] = PROTOCOL_HASH
+            cached["migrated_from_protocol_hash"] = previous_hash
+            cached["migration_reason"] = (
+                "DOGE discovery inputs were unchanged; unavailable open-interest fields "
+                "were removed only from the downstream regime and gating views"
+            )
+            _atomic_joblib(LIBRARY, cached)
+            if CANDIDATES.exists():
+                catalog = pd.read_parquet(CANDIDATES)
+                catalog_hashes = set(catalog["protocol_hash"].astype(str).unique())
+                if catalog_hashes == {previous_hash}:
+                    catalog["protocol_hash"] = PROTOCOL_HASH
+                    temporary = CANDIDATES.with_suffix(".parquet.migration.tmp")
+                    catalog.to_parquet(temporary, index=False)
+                    temporary.replace(CANDIDATES)
+            return cast(dict[str, Any], cached)
 
     fit = _period(matrix, None, DISCOVERY_FIT_END)
     validation = _period(matrix, DISCOVERY_FIT_END, LIBRARY_FREEZE_END)
@@ -508,6 +542,21 @@ def discover_library(matrix: pd.DataFrame, *, force: bool = False) -> dict[str, 
                     action_signals[cast(str, candidate["expert_id"])] = signal
                     batch_new += 1
             trees_used = min(start + TREE_BATCH, fit_leaves.shape[1])
+            _status(
+                "expert_candidates",
+                (
+                    f"azione {action_number}/{len(actions)}: alberi "
+                    f"{trees_used}/{MAX_TREES_PER_ACTION}, validi {len(action_candidates)}"
+                ),
+                5
+                + 45
+                * (
+                    action_number
+                    - 0.5
+                    + 0.5 * trees_used / MAX_TREES_PER_ACTION
+                )
+                / len(actions),
+            )
             if batch_new == 0:
                 empty_batches += 1
                 if empty_batches >= SATURATION_PATIENCE:
@@ -591,7 +640,7 @@ def _expert_action_rows(
                 np.full(len(active), expert["trailing_bps"], dtype=float),
             )
             action = active.loc[:, ["available_at", "entry_timestamp", "decision_position"]].copy()
-            for feature in base.GATING_CONTEXT:
+            for feature in GATE_CONTEXT:
                 values = active[feature].to_numpy(np.float32)
                 action[feature] = values * side if feature in base.DIRECTIONAL_FEATURES else values
             action["expert_id"] = expert["expert_id"]
@@ -1017,7 +1066,7 @@ def live_candidate(
         "direction": direction,
         "available_at": available_at.isoformat(),
         "expert_id": expert["expert_id"],
-        "policy_source": "BTC_AUTO_MOE_RESEARCH_PAPER",
+        "policy_source": f"{base.SYMBOL}_AUTO_MOE_RESEARCH_PAPER",
         "operating_vwap": float(latest["rolling_vwap"]),
         "impulse_anchor_at": None,
         "stop_price": price * (1 - side * float(expert["stop_bps"]) / 10_000),
@@ -1195,7 +1244,7 @@ def _prequential_audit(
 
 
 def train(*, force: bool = False) -> dict[str, Any]:
-    _status("start", "BTC automatic expert discovery", 0)
+    _status("start", f"{base.SYMBOL} automatic expert discovery", 0)
     matrix = base.build_matrix(force=False)
     library = discover_library(matrix, force=force)
     report: dict[str, Any] = {
@@ -1340,7 +1389,9 @@ def train(*, force: bool = False) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BTC automatic two-stage expert training")
+    parser = argparse.ArgumentParser(
+        description=f"{base.SYMBOL} automatic two-stage expert training"
+    )
     parser.add_argument("--force", action="store_true")
     arguments = parser.parse_args()
     print(json.dumps(train(force=arguments.force), indent=2, default=str))

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -24,16 +26,17 @@ from adaptive_bot.musca_v5_micro_model import (
     MICRO_FEATURES,
 )
 
-SOURCE = Path("data/ml/hybrid_v25/asset=BTCUSDT/minutes.parquet")
+SYMBOL = os.environ.get("MUSCA_SYMBOL", "BTCUSDT").upper()
+ASSET_SLUG = SYMBOL.removesuffix("USDT").lower()
+SOURCE = Path(f"data/ml/hybrid_v25/asset={SYMBOL}/minutes.parquet")
 MICRO_ROOT = Path("data/ml/musca_v5/aggtrades")
-ROOT = Path("data/ml/musca_btc_moe")
+ROOT = Path(f"data/ml/musca_{ASSET_SLUG}_moe")
 MATRIX = ROOT / "matrix.parquet"
 CHECKPOINTS = ROOT / "checkpoints"
-REPORT = Path("data/reports/musca_btc_moe.json")
-STATUS = Path("data/reports/musca_btc_moe.status.json")
-BUNDLE = Path("data/models/musca_btc_moe/research_bundle.joblib")
+REPORT = Path(f"data/reports/musca_{ASSET_SLUG}_moe.json")
+STATUS = Path(f"data/reports/musca_{ASSET_SLUG}_moe.status.json")
+BUNDLE = Path(f"data/models/musca_{ASSET_SLUG}_moe/research_bundle.joblib")
 
-SYMBOL = "BTCUSDT"
 BUCKET_SECONDS = 5
 DECISION_CADENCE_SECONDS = 60
 HORIZONS = (60, 300, 900, 3_600, 21_600)
@@ -44,7 +47,9 @@ MICRO_MONTHS = tuple(
 SIDES = (1, -1)
 FINAL_SEEDS = (20260810, 20260811, 20260812, 20260813, 20260814)
 TAKER_FEE_PER_SIDE_BPS = 4.0
-EXECUTION_RESERVE_ROUND_TRIP_BPS = 1.0
+EXECUTION_RESERVE_ROUND_TRIP_BPS = float(
+    os.environ.get("MUSCA_EXECUTION_RESERVE_ROUND_TRIP_BPS", "1.0")
+)
 ROUND_TRIP_COST_BPS = 2 * TAKER_FEE_PER_SIDE_BPS + EXECUTION_RESERVE_ROUND_TRIP_BPS
 MINIMUM_NET_TARGET_BPS = 2.0
 MAX_TARGET_BPS = 300.0
@@ -59,7 +64,7 @@ HISTORICAL_AUDIT_END = pd.Timestamp("2026-08-01T00:00:00Z")
 PURGE = pd.Timedelta(seconds=max(HORIZONS))
 COVERAGES = (0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50)
 
-CONTEXT_FEATURES = (
+BASE_CONTEXT_FEATURES = (
     "return_1m_bps",
     "return_2m_bps",
     "return_3m_bps",
@@ -109,6 +114,28 @@ CONTEXT_FEATURES = (
     "weekday_sin",
     "weekday_cos",
 )
+BTC_INFORMATIVE_FEATURES = (
+    "btc_return_1m_bps",
+    "btc_return_5m_bps",
+    "btc_return_15m_bps",
+    "btc_return_60m_bps",
+    "btc_realized_volatility_60m_bps",
+    "btc_beta_4h",
+    "btc_correlation_1h",
+    "btc_correlation_4h",
+    "residual_return_1m_bps",
+    "residual_return_5m_bps",
+    "residual_return_15m_bps",
+    "btc_shock_5m",
+    "direction_agreement_5m",
+)
+REQUIRE_OPEN_INTEREST = SYMBOL == "BTCUSDT"
+CONTEXT_FEATURES = tuple(
+    name
+    for name in BASE_CONTEXT_FEATURES
+    if REQUIRE_OPEN_INTEREST
+    or name not in {"oi_change_1h", "return_oi_interaction_raw"}
+) + (() if SYMBOL == "BTCUSDT" else BTC_INFORMATIVE_FEATURES)
 FEATURES = (*CONTEXT_FEATURES, *MICRO_FEATURES)
 
 VWAP_VIEW = (
@@ -164,7 +191,9 @@ FLOW_VIEW = (
     "wick_imbalance_bps",
     *MICRO_FEATURES,
 )
-REGIME_VIEW = (
+REGIME_VIEW = tuple(
+    name
+    for name in (
     "return_5m_bps",
     "return_30m_bps",
     "return_60m_bps",
@@ -187,7 +216,10 @@ REGIME_VIEW = (
     "ofi_5m",
     "trade_intensity_1m",
     "absorption_1m",
-)
+    )
+    if REQUIRE_OPEN_INTEREST
+    or name not in {"oi_change_1h", "return_oi_interaction_raw"}
+) + (() if SYMBOL == "BTCUSDT" else BTC_INFORMATIVE_FEATURES)
 VIEWS: dict[str, tuple[str, ...]] = {
     "full": FEATURES,
     "vwap": VWAP_VIEW,
@@ -216,11 +248,20 @@ DIRECTIONAL_FEATURES = frozenset(
         "return_oi_interaction_raw",
         "basis_bps",
         "funding_z",
+        "btc_return_1m_bps",
+        "btc_return_5m_bps",
+        "btc_return_15m_bps",
+        "btc_return_60m_bps",
+        "residual_return_1m_bps",
+        "residual_return_5m_bps",
+        "residual_return_15m_bps",
         *DIRECTIONAL_MICRO_FEATURES,
     }
 )
 EXPERT_COLUMNS = tuple(f"expert_{horizon}s_{view}" for horizon in HORIZONS for view in VIEWS)
-GATING_CONTEXT = (
+GATING_CONTEXT = tuple(
+    name
+    for name in (
     "vwap_distance_bps",
     "vwap_tests_30m",
     "vwap_rejections_30m",
@@ -249,7 +290,9 @@ GATING_CONTEXT = (
     "absorption_1m",
     "price_velocity_15s",
     "price_velocity_1m",
-)
+    )
+    if REQUIRE_OPEN_INTEREST or name != "oi_change_1h"
+) + (() if SYMBOL == "BTCUSDT" else BTC_INFORMATIVE_FEATURES)
 META_FEATURES = (
     *GATING_CONTEXT,
     *EXPERT_COLUMNS,
@@ -265,9 +308,16 @@ META_FEATURES = (
 )
 
 PROTOCOL = {
-    "name": "musca_btc_mixture_of_experts_microstructure",
+    "name": f"musca_{ASSET_SLUG}_mixture_of_experts_microstructure",
     "symbol": SYMBOL,
-    "source": "Binance official USD-M aggTrades 5s plus causal one-minute context",
+    "source": (
+        "Binance official USD-M aggTrades 5s plus causal one-minute context"
+        if SYMBOL == "BTCUSDT"
+        else (
+            f"Binance official {SYMBOL} USD-M aggTrades 5s, spot/perpetual/mark/funding "
+            "plus causal BTCUSDT informative context"
+        )
+    ),
     "micro_months": list(MICRO_MONTHS),
     "decision_cadence_seconds": DECISION_CADENCE_SECONDS,
     "entry": "next 5-second bucket after the completed decision bucket",
@@ -291,7 +341,7 @@ PROTOCOL = {
     "same_5s_bucket": "stop wins",
     "binance_taker_fee_per_side_bps": TAKER_FEE_PER_SIDE_BPS,
     "execution_reserve_round_trip_bps": EXECUTION_RESERVE_ROUND_TRIP_BPS,
-    "fee_source": "signed GET /fapi/v1/commissionRate; official BTCUSDT fallback",
+    "fee_source": f"signed GET /fapi/v1/commissionRate; official {SYMBOL} fallback",
     "round_trip_cost_bps": ROUND_TRIP_COST_BPS,
     "minimum_net_target_bps": MINIMUM_NET_TARGET_BPS,
     "risk_per_trade": 0.01,
@@ -305,10 +355,22 @@ PROTOCOL = {
     "future_holdout_start": FUTURE_HOLDOUT_START.isoformat(),
     "holdout_status": "sealed and empty at protocol freeze",
     "real_capital_allowed": False,
-}
+} | (
+    {}
+    if SYMBOL == "BTCUSDT"
+    else {
+        "informative_symbol": "BTCUSDT",
+        "open_interest": "excluded: no common multi-year official archive",
+    }
+)
 PROTOCOL_HASH = hashlib.sha256(
     json.dumps(PROTOCOL, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
+LEGACY_COMPATIBLE_PROTOCOL_HASHES = frozenset(
+    {"091e2025e8f9c2e56d642f0d434a365196bdc4d5387d5f0f44bf3cf8633f40d1"}
+    if SYMBOL == "DOGEUSDT"
+    else set()
+)
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -334,16 +396,27 @@ def _status(phase: str, detail: str, percent: float) -> None:
         "protocol_hash": PROTOCOL_HASH,
     }
     _atomic_json(STATUS, payload)
-    print(f"[{payload['percent']:6.2f}%] {phase}: {detail}", flush=True)
+    with suppress(BrokenPipeError, OSError):
+        print(f"[{payload['percent']:6.2f}%] {phase}: {detail}", flush=True)
 
 
 def _read_protocol_parquet(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     protocol = pd.read_parquet(path, columns=["protocol_hash"])
-    if protocol.empty or not protocol["protocol_hash"].eq(PROTOCOL_HASH).all():
+    if protocol.empty:
         return pd.DataFrame()
-    return pd.read_parquet(path)
+    if protocol["protocol_hash"].eq(PROTOCOL_HASH).all():
+        return pd.read_parquet(path)
+    previous = set(protocol["protocol_hash"].astype(str).unique())
+    if previous.issubset(LEGACY_COMPATIBLE_PROTOCOL_HASHES):
+        rows = pd.read_parquet(path)
+        _attach_protocol(rows)
+        temporary = path.with_suffix(path.suffix + ".migration.tmp")
+        rows.to_parquet(temporary, index=False)
+        temporary.replace(path)
+        return rows
+    return pd.DataFrame()
 
 
 def _attach_protocol(rows: pd.DataFrame) -> None:
@@ -363,7 +436,7 @@ def _load_source() -> pd.DataFrame:
 
 def _load_micro_source() -> pd.DataFrame:
     paths = [
-        MICRO_ROOT / f"BTCUSDT-aggTrades-5s-{month}.parquet" for month in MICRO_MONTHS
+        MICRO_ROOT / f"{SYMBOL}-aggTrades-5s-{month}.parquet" for month in MICRO_MONTHS
     ]
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
@@ -399,6 +472,13 @@ def _load_micro_source() -> pd.DataFrame:
 
 def _regularize_micro_buckets(rows: pd.DataFrame) -> pd.DataFrame:
     """Represent checksum-complete intervals without trades; never interpolate prices."""
+    rows = rows.copy()
+    rows["timestamp"] = pd.to_datetime(rows["timestamp"], utc=True).astype(
+        "datetime64[ns, UTC]"
+    )
+    rows["available_at"] = pd.to_datetime(rows["available_at"], utc=True).astype(
+        "datetime64[ns, UTC]"
+    )
     index = pd.date_range(
         rows["timestamp"].iloc[0], rows["timestamp"].iloc[-1], freq=f"{BUCKET_SECONDS}s"
     )
@@ -453,7 +533,7 @@ def _micro_manifest(source: pd.DataFrame) -> dict[str, Any]:
     file_hashes: list[str] = []
     source_month = source["timestamp"].dt.strftime("%Y-%m")
     for month in MICRO_MONTHS:
-        path = MICRO_ROOT / f"BTCUSDT-aggTrades-5s-{month}.parquet"
+        path = MICRO_ROOT / f"{SYMBOL}-aggTrades-5s-{month}.parquet"
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             while chunk := stream.read(8 * 1024 * 1024):
@@ -550,15 +630,23 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     context["context_valid"] = (
         context["is_available"].fillna(False)
         & context["feature_contract_valid"].fillna(False)
-        & context["oi_feature_available"].fillna(False)
+        & (
+            context["oi_feature_available"].fillna(False)
+            if REQUIRE_OPEN_INTEREST
+            else True
+        )
     )
-    context["context_available_at"] = pd.to_datetime(context["feature_available_at"], utc=True)
+    context["context_available_at"] = pd.to_datetime(
+        context["feature_available_at"], utc=True
+    ).astype("datetime64[ns, UTC]")
     context = context.loc[
         :, ["context_available_at", "context_valid", *CONTEXT_FEATURES]
     ].sort_values("context_available_at")
+    _status("matrix_context", f"{len(context):,} minuti causali", 3)
 
     source = _load_micro_source()
     micro = _build_moe_micro_features(source)
+    _status("matrix_microstructure", f"{len(source):,} bucket regolarizzati", 4)
     indexed = source.loc[:, ["timestamp", "available_at"]].reset_index(
         names="decision_position"
     )
@@ -571,6 +659,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
         direction="backward",
         allow_exact_matches=True,
     )
+    _status("matrix_join", f"{len(rows):,} stati uniti senza look-ahead", 4.5)
     available = pd.to_datetime(rows["available_at"], utc=True)
     positions_all = rows["decision_position"].to_numpy(int)
     if DECISION_CADENCE_SECONDS != 60:
@@ -611,13 +700,18 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     low = source["low"].to_numpy(float)
     close = source["close"].to_numpy(float)
     entry = open_price[positions + 1]
-    for horizon in HORIZONS:
+    for number, horizon in enumerate(HORIZONS, start=1):
         steps = horizon // BUCKET_SECONDS
         future_high = _forward_extreme(high, steps, "max")
         future_low = _forward_extreme(low, steps, "min")
         matrix[f"terminal_{horizon}s_bps"] = (close[positions + steps] / entry - 1) * 10_000
         matrix[f"max_up_{horizon}s_bps"] = (future_high[positions] / entry - 1) * 10_000
         matrix[f"max_down_{horizon}s_bps"] = (1 - future_low[positions] / entry) * 10_000
+        _status(
+            "matrix_labels",
+            f"orizzonte {number}/{len(HORIZONS)}: {horizon}s",
+            4.5 + 0.4 * number / len(HORIZONS),
+        )
     numeric_columns = [
         *FEATURES,
         *(f"terminal_{horizon}s_bps" for horizon in HORIZONS),
@@ -635,6 +729,7 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     temporary = MATRIX.with_suffix(".parquet.tmp")
     matrix.to_parquet(temporary, index=False)
     temporary.replace(MATRIX)
+    _status("matrix_complete", f"{len(matrix):,} decisioni controfattuali", 5)
     return cast(pd.DataFrame, matrix.reset_index(drop=True))
 
 
@@ -1393,7 +1488,7 @@ def _audit_gates(value: dict[str, Any]) -> dict[str, bool]:
 
 def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
     del resume  # checkpoints are always protocol-hash guarded and safe to reuse
-    _status("start", "BTCUSDT Mixture of Experts", 0)
+    _status("start", f"{SYMBOL} Mixture of Experts", 0)
     matrix = build_matrix(force=force_matrix)
     source = _load_micro_source()
     source_manifest = _micro_manifest(source)
@@ -1562,7 +1657,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "verdict": (
             "HISTORICAL_ALPHA_READY_FOR_FUTURE_HOLDOUT"
             if historical_pass
-            else "NO_HISTORICALLY_STABLE_BTC_MOE_ALPHA"
+            else f"NO_HISTORICALLY_STABLE_{SYMBOL}_MOE_ALPHA"
         ),
         "future_holdout": {
             "starts_at": FUTURE_HOLDOUT_START.isoformat(),
@@ -1598,7 +1693,9 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BTC Binance Mixture of Experts research training")
+    parser = argparse.ArgumentParser(
+        description=f"{SYMBOL} Binance Mixture of Experts research training"
+    )
     parser.add_argument("--force-matrix", action="store_true")
     parser.add_argument("--no-resume", action="store_true")
     arguments = parser.parse_args()

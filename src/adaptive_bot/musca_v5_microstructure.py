@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import urllib.request
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -32,9 +34,15 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _status(month: str, phase: str, percent: float, detail: str) -> None:
+def _status(
+    month: str,
+    phase: str,
+    percent: float,
+    detail: str,
+    status_path: Path = STATUS,
+) -> None:
     _atomic_json(
-        STATUS,
+        status_path,
         {
             "month": month,
             "phase": phase,
@@ -45,10 +53,15 @@ def _status(month: str, phase: str, percent: float, detail: str) -> None:
     )
 
 
-def _download(month: str) -> Path:
+def _download(
+    month: str, symbol: str = "BTCUSDT", status_path: Path | None = STATUS
+) -> Path:
     ROOT.mkdir(parents=True, exist_ok=True)
-    target = ROOT / f"BTCUSDT-aggTrades-{month}.zip"
-    url = f"{BASE_URL}/{target.name}"
+    target = ROOT / f"{symbol}-aggTrades-{month}.zip"
+    url = (
+        "https://data.binance.vision/data/futures/um/monthly/aggTrades/"
+        f"{symbol}/{target.name}"
+    )
     with urllib.request.urlopen(f"{url}.CHECKSUM", timeout=60) as response:
         expected = response.read().decode("ascii").split()[0].lower()
     if target.exists() and _sha256(target) == expected:
@@ -63,22 +76,33 @@ def _download(month: str) -> Path:
             output.write(chunk)
             digest.update(chunk)
             downloaded += len(chunk)
-            _status(
-                month,
-                "download",
-                100 * downloaded / max(total, downloaded),
-                f"{downloaded / 1024**3:.2f}/{total / 1024**3:.2f} GB",
-            )
+            if status_path is not None:
+                _status(
+                    month,
+                    "download",
+                    100 * downloaded / max(total, downloaded),
+                    f"{downloaded / 1024**3:.2f}/{total / 1024**3:.2f} GB",
+                    status_path,
+                )
     if digest.hexdigest() != expected:
         raise RuntimeError(f"Binance checksum mismatch for {month}")
     temporary.replace(target)
     return target
 
 
-def _aggregate(path: Path, month: str, *, seconds: int = 5) -> pd.DataFrame:
+def _aggregate(
+    path: Path,
+    month: str,
+    *,
+    seconds: int = 5,
+    symbol: str = "BTCUSDT",
+    status_path: Path = STATUS,
+    progress_percent: float = 0,
+    report_progress: bool = True,
+) -> pd.DataFrame:
     if seconds not in {1, 5}:
         raise ValueError("Supported aggregation intervals are one and five seconds")
-    output = ROOT / f"BTCUSDT-aggTrades-{seconds}s-{month}.parquet"
+    output = ROOT / f"{symbol}-aggTrades-{seconds}s-{month}.parquet"
     if output.exists():
         cached = pd.read_parquet(output)
         if {"base_volume", "open"}.issubset(cached.columns):
@@ -131,7 +155,14 @@ def _aggregate(path: Path, month: str, *, seconds: int = 5) -> pd.DataFrame:
                     close=("price", "last"),
                 )
             )
-            _status(month, "aggregate", 0, f"chunk {number}")
+            if report_progress:
+                _status(
+                    month,
+                    "aggregate",
+                    progress_percent,
+                    f"{symbol} month {month} chunk {number}",
+                    status_path,
+                )
     result = (
         pd.concat(pieces, ignore_index=True)
         .groupby("timestamp", as_index=False)
@@ -155,24 +186,122 @@ def _aggregate(path: Path, month: str, *, seconds: int = 5) -> pd.DataFrame:
     return result
 
 
-def build() -> dict[str, Any]:
-    audit: dict[str, Any] = {"source": "Binance official aggTrades", "months": {}}
-    for month in MONTHS:
-        archive = _download(month)
-        frame = _aggregate(archive, month)
-        one_second = _aggregate(archive, month, seconds=1)
-        audit["months"][month] = {
-            "archive_bytes": archive.stat().st_size,
-            "archive_sha256": _sha256(archive),
-            "buckets_5s": len(frame),
-            "buckets_1s": len(one_second),
-            "start": frame["timestamp"].min().isoformat(),
-            "end": frame["timestamp"].max().isoformat(),
+def _aggregate_month(
+    month: str,
+    archive: Path,
+    intervals: tuple[int, ...],
+    symbol: str,
+) -> dict[str, Any]:
+    aggregates = {
+        seconds: _aggregate(
+            archive,
+            month,
+            seconds=seconds,
+            symbol=symbol,
+            report_progress=False,
+        )
+        for seconds in intervals
+    }
+    frame = aggregates[min(intervals)]
+    return {
+        "archive_bytes": archive.stat().st_size,
+        "archive_sha256": _sha256(archive),
+        **{
+            f"buckets_{seconds}s": len(rows) for seconds, rows in aggregates.items()
+        },
+        "start": frame["timestamp"].min().isoformat(),
+        "end": frame["timestamp"].max().isoformat(),
+    }
+
+
+def build(
+    symbol: str = "BTCUSDT",
+    months: tuple[str, ...] = MONTHS,
+    intervals: tuple[int, ...] = (1, 5),
+    status_path: Path = STATUS,
+) -> dict[str, Any]:
+    symbol = symbol.upper()
+    audit: dict[str, Any] = {
+        "source": "Binance official aggTrades",
+        "symbol": symbol,
+        "months": {},
+    }
+    archives: dict[str, Path] = {}
+    with ThreadPoolExecutor(max_workers=min(3, len(months))) as executor:
+        download_futures = {
+            executor.submit(_download, month, symbol, None): month for month in months
         }
-    _status(MONTHS[-1], "complete", 100, "verified 1s and 5s aggTrades ready")
-    _atomic_json(Path("data/reports/musca_v5_microstructure_audit.json"), audit)
+        for completed, download_future in enumerate(
+            as_completed(download_futures), start=1
+        ):
+            month = download_futures[download_future]
+            archives[month] = download_future.result()
+            _status(
+                month,
+                "microstructure_download",
+                25 + 10 * completed / len(months),
+                f"{symbol} archive {completed}/{len(months)} verified",
+                status_path,
+            )
+    with ProcessPoolExecutor(max_workers=min(3, len(months))) as executor:
+        aggregate_futures = {
+            executor.submit(
+                _aggregate_month,
+                month,
+                archives[month],
+                intervals,
+                symbol,
+            ): month
+            for month in months
+        }
+        for completed, aggregate_future in enumerate(
+            as_completed(aggregate_futures), start=1
+        ):
+            month = aggregate_futures[aggregate_future]
+            audit["months"][month] = aggregate_future.result()
+            _status(
+                month,
+                "microstructure",
+                35 + 35 * completed / len(months),
+                f"{symbol} month {completed}/{len(months)} ready",
+                status_path,
+            )
+    intervals_text = " and ".join(f"{value}s" for value in intervals)
+    _status(
+        months[-1],
+        "microstructure_complete",
+        70,
+        f"verified {intervals_text} aggTrades ready",
+        status_path,
+    )
+    audit["months"] = {month: audit["months"][month] for month in months}
+    audit_path = Path(
+        "data/reports/musca_v5_microstructure_audit.json"
+        if symbol == "BTCUSDT"
+        else f"data/reports/musca_{symbol.removesuffix('USDT').lower()}_microstructure_audit.json"
+    )
+    _atomic_json(audit_path, audit)
     return audit
 
 
 if __name__ == "__main__":
-    print(json.dumps(build(), indent=2))
+    parser = argparse.ArgumentParser(description="Binance official aggTrades aggregation")
+    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--start", default=MONTHS[0])
+    parser.add_argument("--end", default=MONTHS[-1])
+    parser.add_argument("--five-second-only", action="store_true")
+    args = parser.parse_args()
+    months = tuple(
+        str(value)
+        for value in pd.period_range(args.start, args.end, freq="M")
+    )
+    print(
+        json.dumps(
+            build(
+                args.symbol,
+                months,
+                (5,) if args.five_second_only else (1, 5),
+            ),
+            indent=2,
+        )
+    )
