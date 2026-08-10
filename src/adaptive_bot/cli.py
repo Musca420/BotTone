@@ -348,6 +348,25 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _musca_btc_policy_status(arguments: argparse.Namespace) -> int:
+    path = Path("data/reports/musca_btc_policy.status.json")
+    last = ""
+    while True:
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            if content != last:
+                print(content, flush=True)
+                last = content
+            payload = json.loads(content)
+            if payload.get("phase") in {"complete", "failed"}:
+                return 0 if payload.get("phase") == "complete" else 2
+        else:
+            print(json.dumps({"phase": "not_started", "percent": 0}), flush=True)
+        if not arguments.watch:
+            return 0
+        time.sleep(max(0.5, float(arguments.interval)))
+
+
 async def _backtest(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
     input_path = arguments.input or config.backtest.input_path
@@ -1426,12 +1445,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, default=str))
         return 0
     if arguments.command == "musca-btc-policy-status":
-        from adaptive_bot import musca_btc_policy
-
-        return musca_btc_policy.status(
-            watch=arguments.watch,
-            interval=arguments.interval,
-        )
+        return _musca_btc_policy_status(arguments)
     if arguments.command == "research-status":
         return _research_status(arguments)
     if arguments.command == "research-pin":
