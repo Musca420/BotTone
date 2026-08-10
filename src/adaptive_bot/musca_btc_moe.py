@@ -937,6 +937,43 @@ def _model_metrics(rows: pd.DataFrame, model: dict[str, Any]) -> dict[str, float
     }
 
 
+def _positive_fraction(values: pd.Series) -> float:
+    return float(values.gt(0).mean())
+
+
+def _action_diagnostics(rows: pd.DataFrame) -> dict[str, Any]:
+    oracle = rows.groupby("entry_timestamp", sort=False)["net_bps"].max()
+    distributions = (
+        rows.groupby(["side", "horizon_seconds"], sort=True)["net_bps"]
+        .agg(["count", "mean", "median", _positive_fraction])
+        .reset_index()
+    )
+    distributions.columns = (
+        "side",
+        "horizon_seconds",
+        "count",
+        "mean_net_bps",
+        "median_net_bps",
+        "positive_fraction",
+    )
+    return {
+        "terminal_oracle_positive_fraction": float(oracle.gt(0).mean()),
+        "terminal_oracle_mean_net_bps": float(oracle.mean()),
+        "terminal_oracle_is_not_tradable": True,
+        "labels": distributions.to_dict("records"),
+    }
+
+
+def _prediction_diagnostics(scored: pd.DataFrame) -> dict[str, float]:
+    best = scored.groupby("entry_timestamp", sort=False)["calibrated_ev_bps"].max()
+    return {
+        "timestamps": float(len(best)),
+        "best_calibrated_ev_positive_fraction": float(best.gt(0).mean()),
+        "best_calibrated_ev_median_bps": float(best.median()),
+        "best_calibrated_ev_q90_bps": float(best.quantile(0.90)),
+    }
+
+
 def _fit_calibrators(rows: pd.DataFrame, model: dict[str, Any]) -> dict[str, Any]:
     ev, probability, _ = _raw_meta(rows, model)
     actual = rows["net_bps"].to_numpy(float)
@@ -1279,9 +1316,14 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
         "future_action_rows": len(future_actions),
         "final_model_components": int(final_pool["component_count"]) + 17,
         "candidate_metrics": candidate_metrics,
+        "model_audit_action_diagnostics": _action_diagnostics(model_audit),
         "ev_champion": ev_champion,
         "gating_champion": gating_champion,
-        "policy_selection": {"curve": curve, "selected": selected},
+        "policy_selection": {
+            "curve": curve,
+            "selected": selected,
+            "prediction_diagnostics": _prediction_diagnostics(selection_scored),
+        },
         "diagnostic_when_no_selection": None if selected is not None else diagnostic,
         "historical_audit": {
             "coverage": frozen["coverage"],
@@ -1289,6 +1331,7 @@ def train(*, force_matrix: bool = False, resume: bool = True) -> dict[str, Any]:
             "metrics": audit_metrics,
             "gates": audit_gates,
             "selection_was_gate_passing": selected is not None,
+            "prediction_diagnostics": _prediction_diagnostics(audit_scored),
         },
         "causal_checks": {
             "future_holdout_rows_read": int(
