@@ -111,8 +111,10 @@ timestamp e il gating impara OOS quale combinazione ascoltare nel regime osserva
 
 ## Economia e rischio
 
-Scenario operativo iniziale: Binance USD-M VIP0 taker/taker, 10 bps round-trip più 1 bp di riserva
-slippage, da sostituire nel paper con la commissione account restituita dall'endpoint ufficiale.
+Scenario operativo iniziale: Binance USD-M taker/taker, 8 bps round-trip secondo l'esempio
+`BTCUSDT` della documentazione ufficiale corrente, più 1 bp di riserva esecutiva. Nel paper il
+valore viene sostituito dalla commissione effettiva dell'account restituita dall'endpoint firmato
+`GET /fapi/v1/commissionRate`.
 Il primo target deve coprire il costo reale e almeno 2 bps netti. Costi 1,5× e 2× sono soltanto
 diagnostici.
 
@@ -141,6 +143,7 @@ giorni e 100 trade del final holdout futuro, oltre ai gate completi.
 - `data/reports/musca_btc_moe.status.json`.
 
 Fonti ufficiali: [Binance Public Data](https://github.com/binance/binance-public-data/blob/master/README.md),
+[Binance USD-M commission rate](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account#user-commission-rate),
 [XGBoost GPU](https://xgboost.readthedocs.io/en/stable/gpu/),
 [XGBoost quantile regression](https://xgboost.readthedocs.io/en/stable/tutorials/quantile.html)
 e [XGBoost learning to rank](https://xgboost.readthedocs.io/en/stable/tutorials/learning_to_rank.html).

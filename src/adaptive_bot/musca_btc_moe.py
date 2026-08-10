@@ -43,7 +43,9 @@ MICRO_MONTHS = tuple(
 )
 SIDES = (1, -1)
 FINAL_SEEDS = (20260810, 20260811, 20260812, 20260813, 20260814)
-ROUND_TRIP_COST_BPS = 11.0
+TAKER_FEE_PER_SIDE_BPS = 4.0
+EXECUTION_RESERVE_ROUND_TRIP_BPS = 1.0
+ROUND_TRIP_COST_BPS = 2 * TAKER_FEE_PER_SIDE_BPS + EXECUTION_RESERVE_ROUND_TRIP_BPS
 MINIMUM_NET_TARGET_BPS = 2.0
 MAX_TARGET_BPS = 300.0
 MAX_STOP_BPS = 200.0
@@ -287,6 +289,9 @@ PROTOCOL = {
     ),
     "management": "half at q50, half at q75, q75 adverse stop and non-widening trail",
     "same_5s_bucket": "stop wins",
+    "binance_taker_fee_per_side_bps": TAKER_FEE_PER_SIDE_BPS,
+    "execution_reserve_round_trip_bps": EXECUTION_RESERVE_ROUND_TRIP_BPS,
+    "fee_source": "signed GET /fapi/v1/commissionRate; official BTCUSDT fallback",
     "round_trip_cost_bps": ROUND_TRIP_COST_BPS,
     "minimum_net_target_bps": MINIMUM_NET_TARGET_BPS,
     "risk_per_trade": 0.01,
