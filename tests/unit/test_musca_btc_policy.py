@@ -34,6 +34,22 @@ def test_single_challenger_does_not_replace_frozen_discovery_control() -> None:
     assert policy.PROTOCOL["real_capital_allowed"] is False
 
 
+def test_atomic_replace_retries_transient_windows_reader_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def flaky_replace(source_path: object, destination_path: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("temporary reader lock")
+
+    monkeypatch.setattr(policy.os, "replace", flaky_replace)
+    policy._atomic_replace(policy.Path("status.tmp"), policy.Path("status.json"))
+    assert attempts == 3
+
+
 def test_expert_id_is_deterministic() -> None:
     assert policy.expert_id(1, 300) == policy.expert_id(1, 300)
     assert policy.expert_id(1, 300) != policy.expert_id(-1, 300)

@@ -202,18 +202,30 @@ class FeeContract:
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
     temporary.write_text(
         json.dumps(payload, indent=2, allow_nan=False, default=str), encoding="utf-8"
     )
-    os.replace(temporary, path)
+    _atomic_replace(temporary, path)
+
+
+def _atomic_replace(source: Path, destination: Path) -> None:
+    """Retry transient Windows reader/antivirus locks without weakening atomicity."""
+    for attempt in range(100):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == 99:
+                raise
+            time.sleep(0.05)
 
 
 def _atomic_joblib(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
     joblib.dump(payload, temporary)
-    os.replace(temporary, path)
+    _atomic_replace(temporary, path)
 
 
 def _status(phase: str, detail: str, percent: float, **extra: Any) -> None:
