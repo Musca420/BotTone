@@ -423,6 +423,11 @@ def _forward_extreme(values: np.ndarray, steps: int, operation: str) -> np.ndarr
     raise ValueError(f"unsupported future operation: {operation}")
 
 
+def _decision_time_mask(available: pd.Series) -> pd.Series:
+    timestamps = pd.to_datetime(available, utc=True)
+    return timestamps.dt.second.eq(0) & timestamps.dt.microsecond.eq(0)
+
+
 def build_matrix(*, force: bool = False) -> pd.DataFrame:
     if not force:
         cached = _read_protocol_parquet(MATRIX)
@@ -466,7 +471,9 @@ def build_matrix(*, force: bool = False) -> pd.DataFrame:
     )
     available = pd.to_datetime(rows["available_at"], utc=True)
     positions_all = rows["decision_position"].to_numpy(int)
-    cadence = available.astype("int64").mod(DECISION_CADENCE_SECONDS * 1_000_000_000).eq(0)
+    if DECISION_CADENCE_SECONDS != 60:
+        raise RuntimeError("unsupported decision cadence")
+    cadence = _decision_time_mask(available)
     gaps = source["timestamp"].diff().ne(pd.Timedelta(seconds=BUCKET_SECONDS))
     gaps.iloc[0] = False
     clean_lookback = gaps.rolling(60, min_periods=60).sum().eq(0).to_numpy(bool)

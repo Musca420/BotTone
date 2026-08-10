@@ -43,6 +43,17 @@ def test_future_extrema_start_after_decision_bucket() -> None:
     assert np.isnan(maximum[2:]).all()
 
 
+def test_decision_cadence_does_not_depend_on_parquet_timestamp_resolution() -> None:
+    for unit in ("ms", "us", "ns"):
+        values = pd.Series(
+            pd.date_range("2026-01-01", periods=24, freq="5s", tz="UTC").as_unit(unit)
+        )
+        mask = moe._decision_time_mask(values)
+        assert mask.sum() == 2
+        assert mask.iloc[0]
+        assert mask.iloc[12]
+
+
 def test_micro_features_have_explicit_availability_and_no_zero_fill() -> None:
     assert "available_at" not in moe.FEATURES
     assert set(moe.DIRECTIONAL_MICRO_FEATURES).issubset(moe.DIRECTIONAL_FEATURES)
