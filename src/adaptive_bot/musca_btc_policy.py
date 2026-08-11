@@ -95,6 +95,7 @@ GLOBAL_PROTOCOL_FLOOR = 53
 GLOBAL_EXPERT_FLOOR = 7_691
 INNER_CALIBRATION_WEEKS = 2
 INNER_MODEL_AUDIT_WEEKS = 2
+ROW_CALIBRATION_WEEKS = 2
 CROSSFIT_WARMUP_WEEKS = 8
 CROSSFIT_BLOCK_WEEKS = 4
 CONTINUATION_HALF_LIFE_SECONDS = 24 * 60 * 60
@@ -228,6 +229,10 @@ PROTOCOL = {
         "challenger": "XGBoost CUDA",
         "challenger_rule": "strictly better Brier, EV calibration, EV MAE and decision regret",
         "value_benchmarks": ["decomposed event EV", "direct net return", "direct log utility"],
+        "post_selection_calibration": (
+            "row calibration on the first two weeks followed by winner-only calibration on the "
+            "next two weeks; both precede policy selection and outer test"
+        ),
     },
     "fold_local_experts": {
         "generator": "XGBRFRegressor CUDA critic context trained on exact managed net_bps",
@@ -295,6 +300,8 @@ PROTOCOL = {
             "inner_calibration_weeks": INNER_CALIBRATION_WEEKS,
             "inner_model_audit_weeks": INNER_MODEL_AUDIT_WEEKS,
             "calibration_weeks": WINDOW_WEEKS,
+            "row_calibration_weeks": ROW_CALIBRATION_WEEKS,
+            "winner_calibration_weeks": WINDOW_WEEKS - ROW_CALIBRATION_WEEKS,
             "policy_selection_weeks": WINDOW_WEEKS,
             "outer_test_weeks": WINDOW_WEEKS,
         },
@@ -3032,6 +3039,106 @@ def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
     return "xgboost_cuda" if all(challenger[key] < ridge[key] for key in keys) else "ridge"
 
 
+def _selected_action_positions(
+    rows: pd.DataFrame, value_column: str = "expected_log_utility"
+) -> np.ndarray:
+    """Return one deterministic predicted winner per state, without reading its outcome."""
+    if rows.empty:
+        return np.asarray([], dtype=np.int64)
+    ranking = pd.DataFrame(
+        {
+            "position": np.arange(len(rows), dtype=np.int64),
+            "timestamp": pd.to_datetime(rows["actual_entry_timestamp"], utc=True).to_numpy(),
+            "value": rows[value_column].to_numpy(float),
+            "p_target": rows["p_target"].to_numpy(float),
+            "expert_id": rows["expert_id"].astype(str).to_numpy(),
+        }
+    )
+    return (
+        ranking.sort_values(
+            ["timestamp", "value", "p_target", "expert_id"],
+            ascending=[True, False, False, True],
+            kind="stable",
+        )
+        .drop_duplicates("timestamp", keep="first")["position"]
+        .to_numpy(np.int64)
+    )
+
+
+def fit_post_selection_calibration(rows: pd.DataFrame) -> dict[str, Any]:
+    """Calibrate the action that the policy would select, not the unused action rows."""
+    positions = _selected_action_positions(rows)
+    selected = rows.iloc[positions]
+    if len(selected) < 100:
+        raise ValueError("insufficient winner-only calibration states")
+    raw_ev = selected["calibrated_ev_bps"].to_numpy(float)
+    raw_utility = selected["expected_log_utility"].to_numpy(float)
+    realized_ev = selected["net_bps"].to_numpy(float)
+    realized_utility = selected["log_utility"].to_numpy(float)
+    ev_model = IsotonicRegression(out_of_bounds="clip").fit(raw_ev, realized_ev)
+    utility_model = IsotonicRegression(out_of_bounds="clip").fit(raw_utility, realized_utility)
+    calibrated_ev = np.asarray(ev_model.predict(raw_ev), dtype=float)
+    calibrated_utility = np.asarray(utility_model.predict(raw_utility), dtype=float)
+    timestamp = pd.to_datetime(selected["actual_entry_timestamp"], utc=True)
+    grouped_oracle = rows.groupby("actual_entry_timestamp", sort=False)["net_bps"].max()
+    oracle = timestamp.map(grouped_oracle).to_numpy(float)
+    audit = {
+        "strictly_past_only": True,
+        "rows": len(rows),
+        "selected_states": len(selected),
+        "start": timestamp.min().isoformat(),
+        "end": timestamp.max().isoformat(),
+        "preselection_predicted_ev_bps": float(np.mean(raw_ev)),
+        "realized_selected_ev_bps": float(np.mean(realized_ev)),
+        "winner_optimism_bps": float(np.mean(raw_ev - realized_ev)),
+        "preselection_calibration_error_bps": _calibration_error(realized_ev, raw_ev),
+        "postselection_calibration_error_bps": _calibration_error(realized_ev, calibrated_ev),
+        "preselection_utility_calibration_error": _calibration_error(realized_utility, raw_utility),
+        "postselection_utility_calibration_error": _calibration_error(
+            realized_utility, calibrated_utility
+        ),
+        "selected_best_realized_action_fraction": float(np.mean(realized_ev >= oracle - 1e-12)),
+    }
+    return {"net_bps": ev_model, "log_utility": utility_model, "audit": audit}
+
+
+def apply_post_selection_calibration(
+    rows: pd.DataFrame, calibration: dict[str, Any]
+) -> pd.DataFrame:
+    """Expose only the causally selected winner and correct its post-selection optimism."""
+    output = rows.copy()
+    positions = _selected_action_positions(output)
+    output["preselection_calibrated_ev_bps"] = output["calibrated_ev_bps"]
+    output["preselection_expected_log_utility"] = output["expected_log_utility"]
+    output["post_selection_candidate"] = False
+    output["post_selection_calibrated_ev_bps"] = np.nan
+    output["post_selection_expected_log_utility"] = -1.0
+    if not len(positions):
+        output["expected_log_utility"] = -1.0
+        return output
+    raw_ev = output.iloc[positions]["calibrated_ev_bps"].to_numpy(float)
+    raw_utility = output.iloc[positions]["expected_log_utility"].to_numpy(float)
+    calibrated_ev = np.asarray(calibration["net_bps"].predict(raw_ev), dtype=float)
+    unconstrained_utility = np.asarray(calibration["log_utility"].predict(raw_utility), dtype=float)
+    leverage = output.iloc[positions]["sized_leverage"].to_numpy(float)
+    coherent_upper = np.log1p(np.maximum(leverage * calibrated_ev / 10_000, -0.999999))
+    calibrated_utility = np.minimum(unconstrained_utility, coherent_upper)
+    selected_index = output.index[positions]
+    output.loc[selected_index, "post_selection_candidate"] = True
+    output.loc[selected_index, "post_selection_calibrated_ev_bps"] = calibrated_ev
+    output.loc[selected_index, "post_selection_expected_log_utility"] = calibrated_utility
+    output.loc[selected_index, "calibrated_ev_bps"] = calibrated_ev
+    output["expected_log_utility"] = -1.0
+    output.loc[selected_index, "expected_log_utility"] = calibrated_utility
+    output["expected_ev_bps_per_minute"] = (
+        output["calibrated_ev_bps"] * 60 / output["expected_holding_seconds"]
+    )
+    output["expected_log_utility_per_hour"] = (
+        output["expected_log_utility"] * 3_600 / output["expected_holding_seconds"]
+    )
+    return output
+
+
 def _fit_immediate_backup(rows: pd.DataFrame, seed: int = 20261400) -> Predictor:
     return _fit_regressor(
         "ridge",
@@ -3811,93 +3918,27 @@ def negative_control_metrics(
     constant_plan: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Evaluate causal policy controls without using them for model selection."""
-    controls: dict[str, pd.DataFrame] = {}
-    controls["always_wait"] = scored.iloc[:0].copy()
-
-    random = scored.copy()
-    generator = np.random.default_rng(20261101)
-    random["expected_log_utility"] = generator.permutation(
-        random["expected_log_utility"].to_numpy(float)
-    )
-    controls["random_prediction"] = random
-
-    shifted = scored.sort_values(["side", "actual_entry_timestamp"], kind="stable").copy()
-    shifted["expected_log_utility"] = shifted.groupby("side", sort=False)[
-        "expected_log_utility"
-    ].shift(1)
-    shifted["expected_log_utility"] = shifted["expected_log_utility"].fillna(-1.0)
-    controls["temporally_shifted_prediction"] = shifted
-
-    no_gating = scored.copy()
-    no_gating_return = (
-        _leverage(no_gating["stop_bps"].to_numpy(float), fee.round_trip_bps)
-        * no_gating["managed_expert_mean_bps"].to_numpy(float)
-        / 10_000
-    )
-    no_gating["expected_log_utility"] = np.log1p(np.maximum(no_gating_return, -0.999999))
-    controls["managed_expert_mean_no_gate"] = no_gating
-
-    def expert_control(column: str) -> pd.DataFrame:
-        control = scored.copy()
-        net_prediction = control[column].to_numpy(float) - fee.round_trip_bps
-        predicted_return = (
-            _leverage(control["stop_bps"].to_numpy(float), fee.round_trip_bps)
-            * net_prediction
-            / 10_000
+    result: dict[str, Any] = {
+        "always_wait": policy_metrics(
+            scored.iloc[:0],
+            start,
+            end,
+            daily_bootstrap=False,
+            weekly_bootstrap=False,
         )
-        control["expected_log_utility"] = np.log1p(np.maximum(predicted_return, -0.999999))
-        return control
+    }
 
-    def net_expert_control(column: str) -> pd.DataFrame:
-        control = scored.copy()
-        predicted_return = (
-            _leverage(control["stop_bps"].to_numpy(float), fee.round_trip_bps)
-            * control[column].to_numpy(float)
-            / 10_000
-        )
-        control["expected_log_utility"] = np.log1p(np.maximum(predicted_return, -0.999999))
-        return control
-
-    if "view_full_prediction_bps" in scored:
-        controls["full_only"] = expert_control("view_full_prediction_bps")
-    if "equal_weight_expert_prediction_bps" in scored:
-        controls["equal_weight_experts"] = expert_control("equal_weight_expert_prediction_bps")
-    if "gate_expected_gross_bps" in scored:
-        controls["deterministic_gate_only"] = expert_control("gate_expected_gross_bps")
-    if "managed_expert_best_lcb_bps" in scored:
-        controls["best_active_fold_expert"] = net_expert_control("managed_expert_best_lcb_bps")
-
-    if constant_plan is not None and not constant_plan.empty:
-        constant = constant_plan.copy()
-        direction = np.sign(constant["price_velocity_1m"].to_numpy(float))
-        constant["expected_log_utility"] = np.where(
-            constant["side"].to_numpy(int) == direction, 1e-6, -1.0
-        )
-        constant["p_target"] = 0.5
-        controls["train_median_constant_plan"] = constant
-
-    momentum = scored.copy()
-    momentum_direction = np.sign(momentum["price_velocity_1m"].to_numpy(float))
-    momentum["expected_log_utility"] = np.where(
-        momentum["side"].to_numpy(int) == momentum_direction, 1e-6, -1.0
-    )
-    controls["simple_momentum"] = momentum
-
-    mean_reversion = scored.copy()
-    mean_reversion_direction = -np.sign(mean_reversion["vwap_distance_bps"].to_numpy(float))
-    mean_reversion["expected_log_utility"] = np.where(
-        mean_reversion["side"].to_numpy(int) == mean_reversion_direction, 1e-6, -1.0
-    )
-    controls["simple_mean_reversion"] = mean_reversion
-
-    controls["long_only"] = scored.loc[scored["side"].gt(0)].copy()
-    controls["short_only"] = scored.loc[scored["side"].lt(0)].copy()
-    result: dict[str, Any] = {}
-    for name, rows in controls.items():
-        if name == "always_wait":
-            trades = rows
-        else:
-            trades, _ = sequential_replay(rows, 0.0, fee.round_trip_bps, record_decisions=False)
+    def evaluate(
+        name: str,
+        source: pd.DataFrame,
+        values: np.ndarray | None = None,
+    ) -> None:
+        control = source.copy()
+        if values is not None:
+            control["expected_log_utility"] = values
+        if "p_target" not in control:
+            control["p_target"] = 0.5
+        trades, _ = sequential_replay(control, 0.0, fee.round_trip_bps, record_decisions=False)
         result[name] = policy_metrics(
             trades,
             start,
@@ -3905,13 +3946,88 @@ def negative_control_metrics(
             daily_bootstrap=False,
             weekly_bootstrap=False,
         )
+
+    generator = np.random.default_rng(20261101)
+    evaluate(
+        "random_prediction",
+        scored,
+        generator.permutation(scored["expected_log_utility"].to_numpy(float)),
+    )
+    shifted = scored.sort_values(["side", "actual_entry_timestamp"], kind="stable")
+    shifted_values = (
+        shifted.groupby("side", sort=False)["expected_log_utility"].shift(1).fillna(-1.0)
+    )
+    evaluate("temporally_shifted_prediction", shifted, shifted_values.to_numpy(float))
+
+    no_gating_return = (
+        _leverage(scored["stop_bps"].to_numpy(float), fee.round_trip_bps)
+        * scored["managed_expert_mean_bps"].to_numpy(float)
+        / 10_000
+    )
+    evaluate(
+        "managed_expert_mean_no_gate",
+        scored,
+        np.log1p(np.maximum(no_gating_return, -0.999999)),
+    )
+
+    def expert_control(name: str, column: str, *, already_net: bool = False) -> None:
+        net_prediction = scored[column].to_numpy(float)
+        if not already_net:
+            net_prediction = net_prediction - fee.round_trip_bps
+        predicted_return = (
+            _leverage(scored["stop_bps"].to_numpy(float), fee.round_trip_bps)
+            * net_prediction
+            / 10_000
+        )
+        evaluate(
+            name,
+            scored,
+            np.log1p(np.maximum(predicted_return, -0.999999)),
+        )
+
+    if "view_full_prediction_bps" in scored:
+        expert_control("full_only", "view_full_prediction_bps")
+    if "equal_weight_expert_prediction_bps" in scored:
+        expert_control("equal_weight_experts", "equal_weight_expert_prediction_bps")
+    if "gate_expected_gross_bps" in scored:
+        expert_control("deterministic_gate_only", "gate_expected_gross_bps")
+    if "managed_expert_best_lcb_bps" in scored:
+        expert_control("best_active_fold_expert", "managed_expert_best_lcb_bps", already_net=True)
+
+    if constant_plan is not None and not constant_plan.empty:
+        direction = np.sign(constant_plan["price_velocity_1m"].to_numpy(float))
+        evaluate(
+            "train_median_constant_plan",
+            constant_plan,
+            np.where(constant_plan["side"].to_numpy(int) == direction, 1e-6, -1.0),
+        )
+
+    momentum_direction = np.sign(scored["price_velocity_1m"].to_numpy(float))
+    evaluate(
+        "simple_momentum",
+        scored,
+        np.where(scored["side"].to_numpy(int) == momentum_direction, 1e-6, -1.0),
+    )
+
+    mean_reversion_direction = -np.sign(scored["vwap_distance_bps"].to_numpy(float))
+    evaluate(
+        "simple_mean_reversion",
+        scored,
+        np.where(scored["side"].to_numpy(int) == mean_reversion_direction, 1e-6, -1.0),
+    )
+    evaluate("long_only", scored.loc[scored["side"].gt(0)])
+    evaluate("short_only", scored.loc[scored["side"].lt(0)])
     return result
 
 
 def economic_calibration_buckets(scored: pd.DataFrame) -> dict[str, Any]:
     edges = [-math.inf, 0.0, 2.0, 4.0, 8.0, 12.0, 20.0, math.inf]
     labels = ["<0", "0-2", "2-4", "4-8", "8-12", "12-20", ">20"]
-    values = scored.copy()
+    values = (
+        scored.loc[scored["post_selection_candidate"]].copy()
+        if "post_selection_candidate" in scored
+        else scored.copy()
+    )
     values["ev_bucket"] = pd.cut(
         values["calibrated_ev_bps"], bins=edges, labels=labels, right=False
     )
@@ -4320,6 +4436,21 @@ def walk_forward(
                 fee.round_trip_bps,
                 stop_loss_overrun_reserve_bps,
             )
+        row_calibration_end = fold["calibration_start"] + pd.Timedelta(weeks=ROW_CALIBRATION_WEEKS)
+        row_calibration = _period(
+            calibration,
+            fold["calibration_start"],
+            row_calibration_end,
+            purge_exit=True,
+        )
+        winner_calibration = _period(
+            calibration,
+            row_calibration_end,
+            fold["selection_start"],
+            purge_exit=True,
+        )
+        if min(len(row_calibration), len(winner_calibration)) == 0:
+            raise ValueError("insufficient disjoint row and winner calibration windows")
         _status(
             "plan_efficiency",
             f"fold {number}/{len(folds)} local variants "
@@ -4347,6 +4478,7 @@ def walk_forward(
         value_champions: dict[int, str] = {}
         scored_selection_pieces: list[pd.DataFrame] = []
         scored_test_pieces: list[pd.DataFrame] = []
+        scored_winner_calibration_pieces: list[pd.DataFrame] = []
         permuted_test_pieces: list[pd.DataFrame] = []
         model_counter = 0
         total_models = 2 * len(kinds)
@@ -4354,7 +4486,8 @@ def walk_forward(
             side_fit = fit.loc[fit["side"].eq(side)]
             side_inner = inner_calibration.loc[inner_calibration["side"].eq(side)]
             side_audit = model_audit.loc[model_audit["side"].eq(side)]
-            side_calibration = calibration.loc[calibration["side"].eq(side)]
+            side_row_calibration = row_calibration.loc[row_calibration["side"].eq(side)]
+            side_winner_calibration = winner_calibration.loc[winner_calibration["side"].eq(side)]
             side_selection = selection.loc[selection["side"].eq(side)]
             side_test = test.loc[test["side"].eq(side)]
             side_metrics: dict[str, Any] = {}
@@ -4393,7 +4526,10 @@ def walk_forward(
             internal = "xgboost" if champion == "xgboost_cuda" else champion
             side_refit = pd.concat([side_fit, side_inner, side_audit], ignore_index=True)
             head = fit_probability_head(internal, side_refit)
-            calibrated = fit_calibration(head, side_calibration)
+            calibrated = fit_calibration(head, side_row_calibration)
+            scored_winner_calibration_pieces.append(
+                score_actions(side_winner_calibration, head, calibrated, value_champion)
+            )
             scored_selection_pieces.append(
                 score_actions(side_selection, head, calibrated, value_champion)
             )
@@ -4408,8 +4544,17 @@ def walk_forward(
             permuted_test_pieces.append(
                 score_actions(side_test, permuted_head, permuted_calibration, "decomposed")
             )
-        scored_selection = pd.concat(scored_selection_pieces, ignore_index=True)
-        scored_test = pd.concat(scored_test_pieces, ignore_index=True)
+        post_selection_calibration = fit_post_selection_calibration(
+            pd.concat(scored_winner_calibration_pieces, ignore_index=True)
+        )
+        scored_selection = apply_post_selection_calibration(
+            pd.concat(scored_selection_pieces, ignore_index=True),
+            post_selection_calibration,
+        )
+        scored_test = apply_post_selection_calibration(
+            pd.concat(scored_test_pieces, ignore_index=True),
+            post_selection_calibration,
+        )
         permuted_test = pd.concat(permuted_test_pieces, ignore_index=True)
         continuation_refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
         continuation_model = fit_continuation_models(continuation_refit)
@@ -4529,6 +4674,8 @@ def walk_forward(
                 "inner_calibration_rows": len(inner_calibration),
                 "model_audit_rows": len(model_audit),
                 "calibration_rows": len(calibration),
+                "row_calibration_rows": len(row_calibration),
+                "winner_calibration_rows": len(winner_calibration),
                 "selection_rows": len(selection),
                 "test_rows": len(test),
                 "candidate_metrics": model_metrics,
@@ -4545,6 +4692,7 @@ def walk_forward(
                     "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
                 },
                 "entry_controller_selection": controller_audit,
+                "post_selection_calibration": post_selection_calibration["audit"],
                 "frequency_pnl_frontiers": frontiers,
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
@@ -4575,6 +4723,7 @@ def walk_forward(
             permuted_test,
             scored_selection_pieces,
             scored_test_pieces,
+            scored_winner_calibration_pieces,
             permuted_test_pieces,
             continuation_audit,
             continuation_audit_rows,
@@ -4722,6 +4871,11 @@ def fit_forward_bundle(
             fee.round_trip_bps,
             stop_loss_overrun_reserve_bps,
         )
+    row_calibration_end = calibration_start + pd.Timedelta(weeks=ROW_CALIBRATION_WEEKS)
+    row_calibration = _period(calibration, calibration_start, row_calibration_end, purge_exit=True)
+    winner_calibration = _period(calibration, row_calibration_end, selection_start, purge_exit=True)
+    if min(len(row_calibration), len(winner_calibration)) == 0:
+        raise ValueError("insufficient disjoint forward calibration windows")
     champions: dict[str, str] = {}
     value_champions: dict[str, str] = {}
     heads: dict[int, dict[str, Any]] = {}
@@ -4730,6 +4884,8 @@ def fit_forward_bundle(
     frontiers: dict[str, list[dict[str, Any]]] = {}
     controllers: dict[int, str] = {}
     controller_audit: dict[str, Any] = {}
+    scored_winner_calibration_pieces: list[pd.DataFrame] = []
+    scored_selection_pieces: list[pd.DataFrame] = []
     continuation_model = fit_continuation_models(fit)
     continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
     continuation_blocks = int(continuation_model["crossfit"]["blocks"])
@@ -4750,18 +4906,40 @@ def fit_forward_bundle(
         value_champions[side_name] = value_champion
         internal = "xgboost" if champion == "xgboost_cuda" else champion
         head = fit_probability_head(internal, fit.loc[fit["side"].eq(side)])
-        calibrated = fit_calibration(head, calibration.loc[calibration["side"].eq(side)])
-        scored_selection = score_actions(
-            selection.loc[selection["side"].eq(side)], head, calibrated, value_champion
+        calibrated = fit_calibration(head, row_calibration.loc[row_calibration["side"].eq(side)])
+        scored_winner_calibration_pieces.append(
+            score_actions(
+                winner_calibration.loc[winner_calibration["side"].eq(side)],
+                head,
+                calibrated,
+                value_champion,
+            )
         )
-        scored_selection = score_continuation(
-            scored_selection,
-            continuation_model,
-            continuation_calibration,
-            copy=False,
+        scored_selection_pieces.append(
+            score_actions(
+                selection.loc[selection["side"].eq(side)], head, calibrated, value_champion
+            )
         )
+        heads[side] = head
+        calibrations[side] = calibrated
+        thresholds[side] = 0.0
+    post_selection_calibration = fit_post_selection_calibration(
+        pd.concat(scored_winner_calibration_pieces, ignore_index=True)
+    )
+    scored_selection = apply_post_selection_calibration(
+        pd.concat(scored_selection_pieces, ignore_index=True),
+        post_selection_calibration,
+    )
+    scored_selection = score_continuation(
+        scored_selection,
+        continuation_model,
+        continuation_calibration,
+        copy=False,
+    )
+    for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+        side_selection = scored_selection.loc[scored_selection["side"].eq(side)]
         controller, audit = select_entry_controller(
-            scored_selection,
+            side_selection,
             fee,
             selection_start,
             end,
@@ -4769,17 +4947,16 @@ def fit_forward_bundle(
         )
         controllers[side] = controller
         controller_audit[side_name] = audit
-        scored_selection = apply_entry_controllers(scored_selection, {side: controller})
-        _, frontier = _choose_frequency_threshold(scored_selection, fee, selection_start, end)
-        heads[side] = head
-        calibrations[side] = calibrated
-        thresholds[side] = 0.0
+        side_selection = apply_entry_controllers(side_selection, {side: controller})
+        _, frontier = _choose_frequency_threshold(side_selection, fee, selection_start, end)
         frontiers[side_name] = frontier
     return {
         "champions": champions,
         "value_champions": value_champions,
         "heads": heads,
         "calibrations": calibrations,
+        "post_selection_calibration": post_selection_calibration,
+        "post_selection_calibration_audit": post_selection_calibration["audit"],
         "continuation_models": continuation_model,
         "continuation_calibration": continuation_calibration,
         "entry_controllers": {
@@ -4794,6 +4971,14 @@ def fit_forward_bundle(
         },
         "fit_end": calibration_start.isoformat(),
         "calibration_period": [calibration_start.isoformat(), selection_start.isoformat()],
+        "row_calibration_period": [
+            calibration_start.isoformat(),
+            row_calibration_end.isoformat(),
+        ],
+        "winner_calibration_period": [
+            row_calibration_end.isoformat(),
+            selection_start.isoformat(),
+        ],
         "policy_selection_period": [selection_start.isoformat(), end.isoformat()],
         "frequency_pnl_frontiers": frontiers,
         "local_plan_variants_enabled": local_plan_variants_enabled,
@@ -5013,6 +5198,12 @@ def preflight_gates(
             )
             for item in folds
         ),
+        "post_selection_calibration_past_only": all(
+            bool(item.get("post_selection_calibration", {}).get("strictly_past_only"))
+            and pd.Timestamp(item["post_selection_calibration"]["end"])
+            < pd.Timestamp(item["selection_start"])
+            for item in folds
+        ),
         "local_actions_supported_in_fit": all(
             not item.get("local_plan_variants_enabled")
             or int(item.get("local_plan_training_support", {}).get("fit", {}).get("added_rows", 0))
@@ -5225,6 +5416,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
                 not in {
                     "heads",
                     "calibrations",
+                    "post_selection_calibration",
                     "continuation_models",
                     "continuation_calibration",
                     "expert_library",
@@ -5254,6 +5446,9 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "models_by_side": None if forward_bundle is None else forward_bundle["heads"],
             "calibrations_by_side": (
                 None if forward_bundle is None else forward_bundle["calibrations"]
+            ),
+            "post_selection_calibration": (
+                None if forward_bundle is None else forward_bundle["post_selection_calibration"]
             ),
             "continuation_models": (
                 None if forward_bundle is None else forward_bundle["continuation_models"]

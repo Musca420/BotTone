@@ -1,12 +1,12 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; punti 3 e 4 corretti dopo la terza falsificazione OOS e in preflight
+Stato: punti 1, 2 e 5 verificati; punto 6 corretto dopo il quarto preflight falsificato
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `ec1937faa8a1a694e71a213ed24878060741a607ea8748fb036841d37fd2dc05`.
+Protocollo challenger corrente: `e5560023f084bde0e2b8356112f303b983ff4a65ccec595b2bdc76527bd92f9d`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -37,7 +37,7 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - diagnostica P1 implementata: `expected_ev_bps_per_minute` e
   `expected_log_utility_per_hour`; non partecipano alla promozione o alla scelta dei parametri.
 
-Verifiche locali correnti: 38 test mirati e 375 test completi verdi, Ruff verde e mypy verde sul
+Verifiche locali correnti: 48 test mirati e 385 test completi verdi, Ruff verde e mypy verde sul
 modulo policy modificato. Il mypy globale conserva 33 errori preesistenti in sei moduli legacy fuori
 ambito; non sono stati nascosti né modificati.
 `data/reports/musca_btc_execution_contract.json` rileva 16/16 archivi event-level disponibili ma
@@ -172,6 +172,46 @@ challenger e viene promosso soltanto se, sulla selection antecedente, ha almeno 
 positiva, rischio valido, almeno quattro blocchi temporali e utility superiore al miope. Se nessuno
 dei due è economicamente valido, il lato resta disabilitato. Il test outer non partecipa alla scelta.
 
+## Esito preflight 4735bba9 e quarto audit causale
+
+Il preflight `4735bba967f512b2de21ac2f5550b906b83c59ded098b64da609fa39c2530aa9`
+ha completato due fold e ha correttamente vietato il run completo. Tutti i gate causali e di rischio
+sono passati, ma non è stato eseguito alcun trade. Nel selection set del primo fold il controller
+miope LONG ha prodotto 29 trade, −6,9815 bps/trade e PF 0,7268; SHORT ha prodotto 5 trade,
+−22,2924 bps/trade e PF 0,3281. Nel secondo fold entrambi i lati hanno prodotto zero trade.
+
+Il clamp delle durate e il confronto myopic/Double-Q hanno quindi funzionato: il fallimento si trova
+prima del controller. Nel primo outer test 965 righe previste oltre +20 bps hanno realizzato soltanto
++3,5879 bps medi; nel fold seguente quasi tutte le 885.769 righe sono state calibrate sotto zero.
+Un audit diagnostico sull'intera matrice canonica ha inoltre misurato che gli score ereditati
+scelgono il lato ex-post migliore soltanto nel 49,9–50,4% degli stati. I percentili estremi talvolta
+sono positivi aggregati, ma cambiano segno tra mesi e non costituiscono una policy causale.
+
+Sono registrati tre errori nuovi:
+
+- **E-25 — calibrazione prima dell'argmax.** EV e utility venivano calibrati su tutte le righe, mentre
+  il replay usa soltanto il massimo fra lati e perturbazioni. La buona calibrazione media nascondeva
+  l'ottimismo del vincitore selezionato.
+- **E-26 — nessuna validazione globale del vincitore.** I champion erano confrontati per lato e per
+  riga; nessun set antecedente verificava il candidato finale risultante dalla competizione congiunta
+  LONG/SHORT/piani.
+- **E-27 — controlli negativi con copie simultanee.** Tredici copie larghe del test portavano il
+  processo oltre 24 GB RAM senza aggiungere informazione.
+
+Il protocollo `e5560023f084bde0e2b8356112f303b983ff4a65ccec595b2bdc76527bd92f9d`
+divide ora le quattro settimane di calibrazione in due finestre disgiunte: due settimane per la
+calibrazione delle righe e due per scegliere causalmente un solo vincitore per timestamp e calibrare
+il suo effettivo bias post-selezione. Selection e outer test restano successivi. Gli altri piani non
+vengono valorizzati dal loro outcome e restano non selezionabili in quel timestamp. Il report misura
+ottimismo, errore prima/dopo e frazione di lati realmente scelti correttamente. I controlli negativi
+sono valutati uno alla volta e liberati immediatamente. Nessun gate, costo o label è stato cambiato.
+
+Gli artefatti del protocollo precedente sono preservati in:
+
+- `data/reports/archive/4735bba967f512b2/musca_btc_policy.preflight.json`;
+- `data/ml/musca_btc_policy/audits/4735bba967f512b2/preflight_decisions.parquet`;
+- `data/ml/musca_btc_policy/audits/4735bba967f512b2/preflight_trades.parquet`.
+
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
 Una modifica parziale non conta come completamento.
@@ -293,6 +333,9 @@ Un componente viene mantenuto soltanto se mostra valore incrementale paired OOS.
 | E-22 | 1–2 blocchi continuation | Il critic dell'advantage non aveva supporto temporale indipendente sufficiente. |
 | E-23 | Durata prevista fuori piano | Il regressore ausiliario poteva prevedere giorni per un piano massimo di sei ore. |
 | E-24 | WAIT opaco e replay largo | Mancavano valori del candidato respinto e venivano ordinate copie di tutti i campi. |
+| E-25 | Calibrazione prima dell'argmax | La calibrazione media delle righe non correggeva l'ottimismo del massimo realmente scelto. |
+| E-26 | Vincitore globale non validato | Il confronto dei modelli era per lato/riga, non sul candidato finale LONG/SHORT/piano. |
+| E-27 | Copie simultanee dei negative controls | Tredici frame larghi portavano il processo oltre 24 GB RAM. |
 
 ## Ordine vincolante degli otto interventi
 

@@ -956,6 +956,48 @@ def test_predicted_utility_cannot_be_positive_when_predicted_net_ev_is_negative(
     assert scored.loc[0, "expected_time_to_target_seconds"] == 30
 
 
+def test_winner_only_calibration_corrects_selection_optimism_without_using_oracle() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows: list[dict[str, object]] = []
+    for number, timestamp in enumerate(pd.date_range(start, periods=120, freq="1min")):
+        rows.extend(
+            [
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "expected_log_utility": 0.002 + number % 5 / 100_000,
+                    "p_target": 0.7,
+                    "expert_id": f"predicted-winner-{number}",
+                    "calibrated_ev_bps": 20.0 + number % 5,
+                    "net_bps": -5.0 + number % 2,
+                    "log_utility": -0.0005 + number % 2 / 100_000,
+                    "sized_leverage": 10.0,
+                    "expected_holding_seconds": 60.0,
+                },
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "expected_log_utility": 0.001,
+                    "p_target": 0.6,
+                    "expert_id": f"realized-oracle-{number}",
+                    "calibrated_ev_bps": 10.0,
+                    "net_bps": 10.0,
+                    "log_utility": 0.001,
+                    "sized_leverage": 10.0,
+                    "expected_holding_seconds": 60.0,
+                },
+            ]
+        )
+    frame = pd.DataFrame(rows)
+    calibration = policy.fit_post_selection_calibration(frame)
+    scored = policy.apply_post_selection_calibration(frame, calibration)
+    selected = scored.loc[scored["post_selection_candidate"]]
+    assert len(selected) == 120
+    assert selected["expert_id"].str.startswith("predicted-winner").all()
+    assert selected["expected_log_utility"].lt(0).all()
+    assert scored.loc[~scored["post_selection_candidate"], "expected_log_utility"].eq(-1).all()
+    assert calibration["audit"]["winner_optimism_bps"] > 20
+    assert calibration["audit"]["selected_best_realized_action_fraction"] == 0
+
+
 def test_controller_falls_back_to_positive_myopic_policy_when_continuation_is_unfit() -> None:
     start = pd.Timestamp("2026-01-01T00:00:00Z")
     entries = pd.date_range(start, periods=policy.MINIMUM_CONTROLLER_SELECTION_TRADES, freq="10min")
@@ -1147,6 +1189,7 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
         "risk_violations": 0,
     }
     fold = {
+        "selection_start": "2026-02-01T00:00:00+00:00",
         "test_metrics": {"expectancy_bps": 1.0},
         "economic_calibration": {"utility_ev_consistency_violations": 0},
         "continuation_value_audit": {
@@ -1165,6 +1208,10 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
                 "selection_period_only": True,
                 "outer_test_read_for_selection": False,
             },
+        },
+        "post_selection_calibration": {
+            "strictly_past_only": True,
+            "end": "2026-01-31T23:59:00+00:00",
         },
         "local_plan_variants_enabled": True,
         "local_plan_training_support": {"fit": {"added_rows": 1}},
