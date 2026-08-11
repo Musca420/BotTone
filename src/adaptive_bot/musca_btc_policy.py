@@ -1995,16 +1995,16 @@ def _choose_frequency_threshold(
         trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps, record_decisions=False)
         metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
         returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
-        net_log_equity = (
+        net_log_equity: float | None = (
             float(np.log1p(returns).sum())
             if len(returns) and np.all(returns > -1)
-            else float("-inf")
+            else None
         )
         risk_approved = (
             int(metrics.get("risk_violations", 1)) == 0
             and float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN
         )
-        eligible = risk_approved and net_log_equity > 0
+        eligible = risk_approved and net_log_equity is not None and net_log_equity > 0
         frontier.append(
             {
                 "threshold_bps": threshold,

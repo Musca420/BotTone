@@ -423,6 +423,37 @@ def test_policy_selection_allows_losing_trades_when_net_equity_is_positive() -> 
     assert selected["metrics"]["trades"] == 2
     assert selected["metrics"]["win_rate"] == 0.5
     assert selected["final_statistical_gates_applied"] is False
+    policy.json.dumps(frontier, allow_nan=False)
+
+
+def test_empty_threshold_frontier_is_strict_json() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    scored = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [start],
+            "exit_timestamp": [start + pd.Timedelta(minutes=1)],
+            "calibrated_ev_bps": [-1.0],
+            "p_target": [0.4],
+            "expert_id": [policy.expert_id(1, 60)],
+            "side": [1],
+            "horizon_seconds": [60],
+            "stop_bps": [50.0],
+            "net_bps": [-10.0],
+            "funding_bps": [0.0],
+            "stress_1_5x_bps": [-14.0],
+            "stress_2x_bps": [-18.0],
+            "time_to_target_seconds": [-1],
+            "exit_seconds": [60],
+            "outcome": ["STOP"],
+        }
+    )
+    fee = policy.FeeContract(2.0, 4.0, 0.0, "test")
+    threshold, frontier = policy._choose_frequency_threshold(
+        scored, fee, start, start + pd.Timedelta(days=1)
+    )
+    assert not policy.math.isfinite(threshold)
+    assert all(item["selection_utility"] is None for item in frontier)
+    policy.json.dumps(frontier, allow_nan=False)
 
 
 def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:
