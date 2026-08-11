@@ -4,6 +4,34 @@ Aggiornato: 2026-08-11
 Stato: protocollo di lavoro; nessuno degli otto interventi è ancora completato  
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
+## Stato implementazione dopo il blackout
+
+Protocollo challenger corrente: `24caa8b9311c901320f2fe45fc206bdb8bf4c3aba82df77d59854965949456da`.
+Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
+produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
+
+- punto 1 implementato: critic expanding cross-fitted con purge e test che ogni encoding usa
+  esclusivamente history con uscita precedente alla riga codificata;
+- punto 2 implementato: `sized_portfolio_return`, `log_utility`, ranking e contabilità equity;
+- punto 3 implementato per l'ingresso: fitted value semi-Markov causale con
+  `Q(ENTER)=utility+V(next_free)` e `Q(WAIT)=V(next_decision)`; nessun oracle entra nel test;
+- punto 5 implementato: testa decomposta e direct-net/direct-utility sulle stesse split, Ridge
+  champion e XGBoost CUDA promosso soltanto con miglioramento congiunto;
+- punto 6 implementato: ingresso `Q(action)>Q(WAIT)`; la vecchia curva di soglie è soltanto audit;
+- controlli P0 implementati: ledger persistente, random/shift/permutation/FULL/equal-weight/no-gate,
+  LONG/SHORT/momentum/mean-reversion/always-WAIT e bucket di calibrazione economica;
+- audit punto 8 predisposto: correlazione prediction/error, residuo di FULL, leave-one-view-out e
+  relazione dispersione→errore; LIQUIDITY resta shadow-only;
+- collector Binance aggiornato senza cambiare i consumer: conserva anche timestamp exchange e
+  receive-time di ogni aggTrade, latenza book e ritardo di aggregazione separati.
+
+Verifiche locali correnti: 33 test mirati e 369 test completi verdi, Ruff verde e mypy verde sui
+due moduli modificati.
+`data/reports/musca_btc_execution_contract.json` rileva 16/16 archivi event-level disponibili ma
+soltanto 6 giornate L2 osservate. I label storici restano quindi dichiarati proxy e non possono
+autorizzare capitale reale. Mancano ancora l'uso completo dell'ordine event-level nei label,
+l'audit/correzione locale del plan generator e l'attivazione condizionale della policy intra-trade.
+
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
 Una modifica parziale non conta come completamento.
@@ -348,7 +376,7 @@ Un risultato positivo sui periodi contaminati resta discovery e non autorizza de
 | MoE 125 componenti | protocol hash `73563d…` | `docs/musca-btc-moe-results.md` | 170 trade audit, −15,22 bps, PF 0,671: più modelli non correggono label/policy. |
 | Auto-MoE discovery/gate | protocol hash `cbc1fa…` | `docs/musca-btc-auto-moe-results.md` | 178 trade, quasi pareggio aggregato ma forte instabilità giugno/luglio. |
 | Piani fissi 2×5 | precedente canonical policy | `docs/musca-btc-action-space-audit.md` | Gli expert contestuali valutavano piani ereditati; spazio d'azione sostituito. |
-| Piani parametrizzati multi-expert | run `b3bec9…`, in corso | report da congelare a fine run | Prima baseline con 25 contributi e piani dinamici; contiene ancora E-01…E-08. |
+| Piani parametrizzati multi-expert | run `b3bec9…`, interrotto dal blackout | log pre-outage preservati | Prima baseline con 25 contributi e piani dinamici; non riprendere perché contiene ancora E-01…E-11. |
 
 Il dettaglio append-only FT-000–FT-036 resta in `docs/musca-v5-fine-tuning-log.md`; questo piano non
 lo duplica riga per riga e non lo sostituisce.

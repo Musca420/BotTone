@@ -93,6 +93,8 @@ def test_multi_expert_generator_replaces_ten_templates_with_parameterized_plans(
     assert plans["plan_contributors"].str.count(",").eq(2).all()
     assert plans["target_2_bps"].gt(plans["target_1_bps"]).all()
     assert plans["trailing_bps"].le(plans["stop_bps"]).all()
+    assert all(f"view_{view}_prediction_bps" in plans for view in policy.base.VIEWS)
+    assert "equal_weight_expert_prediction_bps" in plans
     assert policy.PROTOCOL["state_action"]["fixed_action_plans"] is False
 
 
@@ -105,6 +107,63 @@ def test_plan_identity_changes_when_expert_mixture_changes() -> None:
     baseline_long = baseline.loc[baseline["side"].eq(1), "plan_id"].item()
     challenger_long = challenger.loc[challenger["side"].eq(1), "plan_id"].item()
     assert baseline_long != challenger_long
+
+
+def test_local_plan_neighborhood_is_bounded_and_preserves_management_constraints() -> None:
+    plans = policy.compose_parameterized_plans(
+        _inherited_expert_rows(), round_trip_cost_bps=8.0
+    )
+    plans["actual_entry_timestamp"] = plans["entry_timestamp"]
+    variants = policy.local_plan_variants(plans)
+    assert variants.groupby(["actual_entry_timestamp", "side"]).size().le(9).all()
+    assert variants["target_2_bps"].gt(variants["target_1_bps"]).all()
+    assert variants["trailing_bps"].le(variants["stop_bps"]).all()
+    assert variants["horizon_seconds"].between(
+        min(policy.PREDICTION_HORIZONS_SECONDS), policy.MAXIMUM_HORIZON_SECONDS
+    ).all()
+    assert variants["plan_id"].is_unique
+
+
+def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(
+        [
+            (100.0, 100.0, 100.0, 100.0),
+            (100.0, 100.2, 99.9, 100.1),
+            (100.1, 100.3, 100.0, 100.2),
+            (100.2, 100.4, 100.1, 100.3),
+            (100.3, 100.3, 100.2, 100.2),
+        ]
+        + [(100.2, 100.3, 100.1, 100.2)] * 100
+    )
+    source["observed_trade"] = True
+    plans = policy.compose_parameterized_plans(
+        _inherited_expert_rows(), round_trip_cost_bps=8.0
+    )
+    plans["actual_entry_timestamp"] = pd.Timestamp("2026-01-01T00:00:01Z")
+    plans["source_month"] = "2026-01"
+    plans["horizon_seconds"] = 60
+    plans["horizon_fraction"] = 60 / policy.MAXIMUM_HORIZON_SECONDS
+    plans["target_1_bps"] = 10.0
+    plans["target_2_bps"] = 20.0
+    plans["stop_bps"] = 20.0
+    plans["trailing_bps"] = 10.0
+    monkeypatch.setattr(policy, "_load_second_window", lambda month: source)
+    monkeypatch.setattr(
+        policy,
+        "_funding_for_actions",
+        lambda actions: np.zeros(len(actions), dtype=float),
+    )
+    labelled = policy.label_local_plan_variants(
+        plans, policy.FeeContract(2.0, 4.0, 0.0, "test")
+    )
+    assert labelled["actual_entry_timestamp"].nunique() == 1
+    assert labelled["entry_price"].eq(100.0).all()
+    assert np.isfinite(labelled["log_utility"]).all()
+    assert labelled["execution_quality"].eq(
+        "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
+    ).all()
 
 
 def test_same_second_target_and_stop_uses_stop_event_and_stop_management() -> None:
@@ -202,15 +261,25 @@ def test_target_probability_means_target_before_stop() -> None:
     head: dict[str, Any] = {
         "classifier": Classifier(),
         "conditional": {0: Regressor(10), 1: Regressor(-10), 2: Regressor(0)},
+        "conditional_utility": {
+            0: Regressor(0.01),
+            1: Regressor(-0.01),
+            2: Regressor(0),
+        },
+        "direct": {"net_bps": Regressor(1), "log_utility": Regressor(0.001)},
         "aux": {
             "mfe_bps": Regressor(15),
             "mae_bps": Regressor(8),
             "time_to_target_seconds": Regressor(30),
+            "exit_seconds": Regressor(60),
         },
     }
     calibration = {
         "probability": Classifier(),
-        "ev": EV(),
+        "value": {
+            name: {"net_bps": EV(), "log_utility": EV()}
+            for name in policy.VALUE_HEADS
+        },
         "residual_quantiles": {"mfe_bps": [0, 0, 0], "mae_bps": [0, 0, 0]},
     }
     scored = policy.score_actions(rows, head, calibration)
@@ -500,6 +569,62 @@ def test_fold_expert_application_does_not_read_future_outcome(
     assert np.isfinite(transformed.loc[:, policy.FOLD_EXPERT_FEATURES]).all().all()
 
 
+def test_fold_expert_fit_encoding_is_strictly_past_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: policy.Path
+) -> None:
+    start = pd.Timestamp("2025-01-01T00:00:00Z")
+    timestamps = pd.date_range(start, periods=140, freq="1D")
+    rows = pd.DataFrame(
+        [
+            {
+                "actual_entry_timestamp": timestamp,
+                "exit_timestamp": timestamp + pd.Timedelta(hours=1),
+                "side": side,
+                "plan_id": f"{timestamp.isoformat()}:{side}",
+            }
+            for timestamp in timestamps
+            for side in (-1, 1)
+        ]
+    )
+    fitted_histories: list[pd.Timestamp] = []
+
+    def fake_fit(
+        fit: pd.DataFrame,
+        fold_number: int | str,
+        *,
+        resume: bool = False,
+        progress: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        del resume, progress
+        history_end = pd.to_datetime(fit["exit_timestamp"], utc=True).max()
+        if "crossfit-" in str(fold_number):
+            fitted_histories.append(history_end)
+        return {"fold_scope": str(fold_number), "history_end": history_end}
+
+    def fake_apply(rows: pd.DataFrame, library: dict[str, Any]) -> pd.DataFrame:
+        output = rows.copy()
+        encoded = float(pd.Timestamp(library["history_end"]).timestamp())
+        for name in policy.FOLD_EXPERT_FEATURES:
+            output[name] = encoded
+        output["fold_expert_scope"] = str(library["fold_scope"])
+        output["expert_tree_index"] = 0
+        output["expert_leaf_id"] = 0
+        return output
+
+    monkeypatch.setattr(policy, "EXPERT_CATALOG_ROOT", tmp_path)
+    monkeypatch.setattr(policy, "fit_fold_expert_library", fake_fit)
+    monkeypatch.setattr(policy, "apply_fold_expert_library", fake_apply)
+    transformed, _, diagnostics = policy.cross_fit_fold_expert_features(rows, 1)
+    encoded_end = pd.to_datetime(
+        transformed["managed_generator_score_bps"], unit="s", utc=True
+    )
+    entry = pd.to_datetime(transformed["actual_entry_timestamp"], utc=True)
+    assert encoded_end.lt(entry).all()
+    assert fitted_histories
+    assert diagnostics["strictly_past_only"] is True
+    assert diagnostics["warmup_rows_excluded"] > 0
+
+
 def test_policy_selection_allows_losing_trades_when_net_equity_is_positive() -> None:
     start = pd.Timestamp("2026-01-01T00:00:00Z")
     entries = [start, start + pd.Timedelta(minutes=2)]
@@ -532,6 +657,68 @@ def test_policy_selection_allows_losing_trades_when_net_equity_is_positive() -> 
     assert selected["metrics"]["win_rate"] == 0.5
     assert selected["final_statistical_gates_applied"] is False
     policy.json.dumps(frontier, allow_nan=False)
+
+
+def test_equity_utility_ranks_same_bps_by_risk_sized_impact() -> None:
+    entry = pd.Timestamp("2026-01-01T10:00:00Z")
+    scored = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [entry, entry],
+            "exit_timestamp": [entry + pd.Timedelta(minutes=1)] * 2,
+            "calibrated_ev_bps": [5.0, 5.0],
+            "expected_log_utility": [0.001, 0.002],
+            "p_target": [0.6, 0.6],
+            "expert_id": ["wide-stop", "tight-stop"],
+            "side": [1, -1],
+            "stop_bps": [100.0, 40.0],
+            "net_bps": [5.0, 5.0],
+            "funding_bps": [0.0, 0.0],
+            "stress_1_5x_bps": [1.0, 1.0],
+            "stress_2x_bps": [-3.0, -3.0],
+            "time_to_target_seconds": [-1, -1],
+            "exit_seconds": [60, 60],
+            "outcome": ["TIMEOUT", "TIMEOUT"],
+        }
+    )
+    trades, _ = policy.sequential_replay(scored, 0.0, 8.0)
+    assert len(trades) == 1
+    assert trades.iloc[0]["expert_id"] == "tight-stop"
+
+
+def test_outcome_permutation_keeps_event_path_targets_together() -> None:
+    rows = pd.DataFrame(
+        {
+            "event_class": [0, 1, 2],
+            "net_bps": [10.0, -20.0, 3.0],
+            "log_utility": [0.01, -0.02, 0.003],
+            "mfe_bps": [11.0, 1.0, 4.0],
+            "mae_bps": [1.0, 21.0, 2.0],
+            "time_to_target_seconds": [5, -1, -1],
+            "exit_seconds": [5, 8, 10],
+        }
+    )
+    permuted = policy._permute_outcomes(rows, 42)
+    original_tuples = set(map(tuple, rows.to_numpy()))
+    assert set(map(tuple, permuted.to_numpy())) == original_tuples
+
+
+def test_wait_has_continuation_value_instead_of_constant_zero() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [start, start + pd.Timedelta(minutes=10)],
+            "exit_timestamp": [
+                start + pd.Timedelta(hours=3),
+                start + pd.Timedelta(minutes=11),
+            ],
+            "side": [1, 1],
+            "log_utility": [0.0003, 0.0010],
+        }
+    )
+    targets = policy.continuation_targets(rows)
+    first = targets.iloc[0]
+    assert first["target_q_wait_log_utility"] > 0
+    assert first["target_q_wait_log_utility"] > first["target_q_enter_log_utility"]
 
 
 def test_empty_threshold_frontier_is_strict_json() -> None:

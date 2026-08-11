@@ -37,11 +37,22 @@ VENUE = "Binance USD-M futures"
 ROOT = Path("data/ml/musca_btc_policy")
 LABEL_ROOT = ROOT / "state_actions"
 REGISTRY = ROOT / "research_registry.json"
+EXPERIMENT_LEDGER = ROOT / "experiment_ledger.json"
 REPORT = Path("data/reports/musca_btc_policy.json")
 STATUS = Path("data/reports/musca_btc_policy.status.json")
 BUNDLE = Path("data/models/musca_btc_policy/research_bundle.joblib")
 AUDIT_TRADES = ROOT / "audit_trades.parquet"
 AUDIT_DECISIONS = ROOT / "audit_decisions.parquet"
+EXECUTION_REPORT = Path("data/reports/musca_btc_execution_contract.json")
+CRITIC_CROSSFIT_REPORT = Path("data/reports/musca_btc_policy_critic_crossfit.json")
+EQUITY_OBJECTIVE_REPORT = Path("data/reports/musca_btc_policy_equity_objective.json")
+WAIT_VALUE_REPORT = Path("data/reports/musca_btc_policy_wait_value.json")
+PLAN_EFFICIENCY_REPORT = Path("data/reports/musca_btc_policy_plan_efficiency.json")
+VALUE_HEADS_REPORT = Path("data/reports/musca_btc_policy_value_heads.json")
+ENTRY_STABILITY_REPORT = Path("data/reports/musca_btc_policy_entry_stability.json")
+INTRATRADE_REPORT = Path("data/reports/musca_btc_policy_intratrade.json")
+VIEW_AUDIT_REPORT = Path("data/reports/musca_btc_policy_view_audit.json")
+BINANCE_L2_ROOT = Path("data/research/binance_l2")
 CONFIG = Path("configs/binance_btcusdt_paper.yaml")
 AUTO_MOE_REPORT = Path("data/reports/musca_btc_auto_moe.json")
 AUTO_MOE_CANDIDATES = Path("data/ml/musca_btc_auto_moe/candidates.parquet")
@@ -61,6 +72,7 @@ OUTCOME_STOP = 1
 OUTCOME_TIMEOUT = 2
 OUTCOME_NAMES = ("TARGET", "STOP", "TIMEOUT")
 MODEL_SEEDS = (20260831, 20260901, 20260902)
+VALUE_HEADS = ("decomposed", "direct")
 THRESHOLDS_BPS = (0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0)
 MINIMUM_FIT_WEEKS = 16
 WINDOW_WEEKS = 4
@@ -74,7 +86,12 @@ GLOBAL_PROTOCOL_FLOOR = 53
 GLOBAL_EXPERT_FLOOR = 7_691
 INNER_CALIBRATION_WEEKS = 2
 INNER_MODEL_AUDIT_WEEKS = 2
+CROSSFIT_WARMUP_WEEKS = 8
+CROSSFIT_BLOCK_WEEKS = 4
+CONTINUATION_HALF_LIFE_SECONDS = 24 * 60 * 60
 MINIMUM_EXPERT_OPPORTUNITIES = 100
+LOCAL_PLAN_AUDIT_STATES = 2_000
+LOCAL_PLAN_REGRET_MATERIAL_BPS = 2.0
 MINIMUM_OOS_TRADES = 300
 MINIMUM_SIDE_OOS_TRADES = 100
 EXPERT_CATALOG_ROOT = ROOT / "fold_experts"
@@ -130,6 +147,7 @@ LABEL_PROTOCOL = {
     "same_second": "stop wins",
     "entry": "first observed aggregate trade after decision",
     "terminal_return_prefilter": False,
+    "economic_target": "log1p(risk-sized portfolio return after Binance 1x costs and funding)",
     "historical_start": HISTORICAL_START.isoformat(),
     "historical_end": HISTORICAL_END.isoformat(),
 }
@@ -190,6 +208,7 @@ PROTOCOL = {
         "champion": "logistic plus Ridge",
         "challenger": "XGBoost CUDA",
         "challenger_rule": "strictly better Brier, EV calibration, EV MAE and decision regret",
+        "value_benchmarks": ["decomposed event EV", "direct net return", "direct log utility"],
     },
     "fold_local_experts": {
         "generator": "XGBRFRegressor CUDA critic context trained on exact managed net_bps",
@@ -198,12 +217,17 @@ PROTOCOL = {
         "minimum_support_after_managed_evaluation": MINIMUM_EXPERT_OPPORTUNITIES,
         "compression": "active-leaf managed statistics; leaves do not define the plan",
         "training_scope": "outer-fold fit only",
+        "fit_encoding": "strict expanding chronological cross-fit with actual-exit purge",
     },
     "plan_generator": {
         "experts": "OOF heterogeneous horizon/view return and path-quantile predictors",
         "gating": "robust sparse weights across views and horizons",
         "plans_per_state": "data-driven LONG/SHORT parameterized proposals; not ten templates",
         "objective": "expected gross movement, disagreement, path quantiles and Binance 1x cost",
+        "local_perturbations": (
+            "one parameter family at a time around each expert-composed plan; enabled only by "
+            "past-only local-regret audit"
+        ),
     },
     "controller": {
         "actions": [
@@ -222,6 +246,11 @@ PROTOCOL = {
         "maximum_leverage": MAXIMUM_LEVERAGE,
         "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
         "state_features": list(STATE_FEATURES),
+        "entry_value": (
+            "semi-Markov fitted value: Q(enter)=log utility + discounted V(next free); "
+            "Q(wait)=discounted V(next decision)"
+        ),
+        "continuation_half_life_seconds": CONTINUATION_HALF_LIFE_SECONDS,
     },
     "validation": {
         "nested_walk_forward": {
@@ -235,7 +264,7 @@ PROTOCOL = {
         "purge": "actual exit timestamp",
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
-        "frequency": "maximum net log-equity utility on policy-selection data; no quota",
+        "frequency": "Q(action) > Q(wait); threshold frontier is diagnostic only; no quota",
     },
     "gates": {
         "minimum_oos_trades": MINIMUM_OOS_TRADES,
@@ -440,6 +469,53 @@ def build_research_registry() -> dict[str, Any]:
     expert_count = 0
     if AUTO_MOE_CANDIDATES.exists():
         expert_count = len(pd.read_parquet(AUTO_MOE_CANDIDATES, columns=["expert_id"]))
+    experiments: list[dict[str, Any]] = []
+    if EXPERIMENT_LEDGER.exists():
+        try:
+            existing = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
+            if isinstance(existing, list):
+                experiments = [item for item in existing if isinstance(item, dict)]
+            elif isinstance(existing, dict):
+                experiments = [
+                    item
+                    for item in existing.get("experiments", [])
+                    if isinstance(item, dict)
+                ]
+        except (OSError, ValueError, TypeError):
+            raise ValueError("research experiment ledger is not valid JSON") from None
+    experiment_id = f"MUSCA-BTC-{PROTOCOL_HASH[:12]}"
+    if not any(item.get("experiment_id") == experiment_id for item in experiments):
+        experiments.append(
+            {
+                "experiment_id": experiment_id,
+                "protocol_hash": PROTOCOL_HASH,
+                "hypothesis": (
+                    "cross-fitted managed experts plus equity utility and causal continuation "
+                    "improve OOS decisions without changing the frozen discovery control"
+                ),
+                "changes": [
+                    "event/execution contract audit",
+                    "critic temporal cross-fitting",
+                    "risk-sized log-utility objective",
+                    "direct value benchmark",
+                    "continuation value and negative controls",
+                ],
+                "periods_observed": [
+                    HISTORICAL_START.isoformat(),
+                    HISTORICAL_END.isoformat(),
+                ],
+                "selection_status": "PREREGISTERED_NOT_RUN",
+                "accepted": None,
+                "contaminated_after_observation": True,
+                "created_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        _atomic_json(EXPERIMENT_LEDGER, {"experiments": experiments})
+    ledger_payload = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
+    if isinstance(ledger_payload, dict):
+        experiments = list(ledger_payload.get("experiments", []))
+    elif isinstance(ledger_payload, list):
+        experiments = ledger_payload
     payload = {
         "created_at": datetime.now(UTC).isoformat(),
         "all_observed_periods_contaminated": True,
@@ -452,6 +528,9 @@ def build_research_registry() -> dict[str, Any]:
         "challenger_protocol_hash": PROTOCOL_HASH,
         "future_holdout_start": FUTURE_HOLDOUT_START.isoformat(),
         "future_holdout_opened": False,
+        "experiment_ledger": str(EXPERIMENT_LEDGER),
+        "experiment_count": len(experiments),
+        "current_experiment_id": experiment_id,
     }
     _atomic_json(REGISTRY, payload)
     return payload
@@ -585,6 +664,162 @@ def ensure_one_second_sources() -> dict[str, Any]:
         "resolution_seconds": 1,
         "months": files,
     }
+
+
+def _observed_l2_coverage() -> dict[str, Any]:
+    files = sorted(BINANCE_L2_ROOT.glob("btcusdt_????-??-??.jsonl"))
+    identity = {
+        str(path): {"bytes": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns}
+        for path in files
+    }
+    if EXECUTION_REPORT.exists():
+        try:
+            cached = json.loads(EXECUTION_REPORT.read_text(encoding="utf-8")).get(
+                "shadow_execution", {}
+            )
+            if cached.get("file_identity") == identity:
+                return cast(dict[str, Any], cached)
+        except (OSError, ValueError, TypeError):
+            pass
+    samples: list[dict[str, Any]] = []
+    total_rows = 0
+    invalid_rows = 0
+    for path in files:
+        with path.open("r", encoding="utf-8") as source:
+            for row_number, line in enumerate(source):
+                total_rows += 1
+                if row_number % 60:
+                    continue
+                payload = json.loads(line)
+                if "exchange_second" not in payload or "available_at" not in payload:
+                    invalid_rows += 1
+                    continue
+                exchange_time = pd.Timestamp(int(payload["exchange_second"]), unit="s", tz="UTC")
+                available_at = pd.Timestamp(payload["available_at"])
+                bids = payload.get("bids") or []
+                asks = payload.get("asks") or []
+                samples.append(
+                    {
+                        "exchange_time": exchange_time,
+                        "available_at": available_at,
+                        "latency_seconds": (available_at - exchange_time).total_seconds(),
+                        "book_network_latency_ms": payload.get("book_network_latency_ms"),
+                        "book_valid": bool(
+                            bids
+                            and asks
+                            and float(bids[0][0]) > 0
+                            and float(asks[0][0]) > float(bids[0][0])
+                        ),
+                    }
+                )
+    if not samples:
+        return {
+            "available": False,
+            "distinct_days": 0,
+            "rows": 0,
+            "reason": "NO_OBSERVED_BINANCE_L2",
+        }
+    latency = np.asarray([item["latency_seconds"] for item in samples], dtype=float)
+    network_latency = np.asarray(
+        [
+            float(item["book_network_latency_ms"])
+            for item in samples
+            if item["book_network_latency_ms"] is not None
+        ],
+        dtype=float,
+    )
+    timestamps = pd.DatetimeIndex([item["exchange_time"] for item in samples])
+    return {
+        "available": True,
+        "source": "Binance official USD-M websocket depth20@100ms routed to 1s snapshots",
+        "files": [str(path) for path in files],
+        "distinct_days": int(timestamps.floor("D").nunique()),
+        "rows": total_rows,
+        "sample_stride_seconds": 60,
+        "sampled_rows": len(samples),
+        "sampled_invalid_rows": invalid_rows,
+        "start": timestamps.min().isoformat(),
+        "end": timestamps.max().isoformat(),
+        "feature_availability_delay_seconds": {
+            "p50": float(np.quantile(latency, 0.50)),
+            "p90": float(np.quantile(latency, 0.90)),
+            "p99": float(np.quantile(latency, 0.99)),
+            "maximum": float(latency.max()),
+        },
+        "book_network_latency_ms": (
+            {
+                "p50": float(np.quantile(network_latency, 0.50)),
+                "p90": float(np.quantile(network_latency, 0.90)),
+                "p99": float(np.quantile(network_latency, 0.99)),
+                "maximum": float(network_latency.max()),
+            }
+            if len(network_latency)
+            else None
+        ),
+        "valid_non_crossed_book_fraction": float(
+            np.mean([bool(item["book_valid"]) for item in samples])
+        ),
+        "aggregate_trade_order_retained_within_snapshot": True,
+        "aggregate_trade_timestamp_within_second_retained": False,
+        "file_identity": identity,
+    }
+
+
+def build_execution_contract(
+    source_manifest: dict[str, Any], fee: FeeContract
+) -> dict[str, Any]:
+    raw_archives = {
+        month: base.MICRO_ROOT / f"{SYMBOL}-aggTrades-{month}.zip"
+        for month in ONE_SECOND_MONTHS
+    }
+    raw_available = all(path.exists() for path in raw_archives.values())
+    l2 = _observed_l2_coverage()
+    report = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "protocol_hash": PROTOCOL_HASH,
+        "symbol": SYMBOL,
+        "venue": VENUE,
+        "fee_contract": asdict(fee) | {"round_trip_bps": fee.round_trip_bps},
+        "alpha_path": {
+            "source": "official monthly Binance aggregate trades",
+            "raw_event_archives_available": raw_available,
+            "raw_event_archive_paths": {
+                month: str(path) for month, path in raw_archives.items()
+            },
+            "current_label_resolution_seconds": int(source_manifest["resolution_seconds"]),
+            "event_order_inside_second_used_by_current_labels": False,
+            "fill_classification": "TRADE_PATH_PROXY_NO_HISTORICAL_L2",
+            "bid_ask_historical": False,
+            "depth_historical": False,
+            "partial_fill_historical": False,
+            "market_impact_historical": False,
+        },
+        "shadow_execution": l2,
+        "paper_engine": {
+            "observed_bid_ask": True,
+            "book_walking": True,
+            "insufficient_depth_rejection": True,
+            "fees": True,
+            "network_latency_observed": l2.get("book_network_latency_ms") is not None,
+            "feature_availability_delay_observed": True,
+        },
+        "parity": {
+            "label_replay_shadow_differences_zero": False,
+            "differences": [
+                "historical labels use 1s trade-path proxy",
+                "paper uses observed L2 bid/ask and depth",
+                "historical partial fills and queue position are unavailable",
+            ],
+        },
+        "gates": {
+            "alpha_research_allowed": raw_available,
+            "execution_model_allowed": bool(l2.get("distinct_days", 0) >= 30),
+            "operational_promotion_allowed": False,
+            "real_capital_allowed": False,
+        },
+    }
+    _atomic_json(EXECUTION_REPORT, report)
+    return report
 
 
 def _regularize_seconds(rows: pd.DataFrame) -> pd.DataFrame:
@@ -784,6 +1019,19 @@ def compose_parameterized_plans(
     output["gate_entropy"] = gate_entropy
     output["gate_effective_experts"] = np.exp(gate_entropy)
     output["gate_top_weight"] = flat_joint.max(axis=1)
+    weighted_prediction = np.sum(joint_weights * expert_values, axis=(1, 2))
+    output["equal_weight_expert_prediction_bps"] = expert_values.mean(axis=(1, 2))
+    for view_number, view in enumerate(views):
+        view_weight = joint_weights[:, :, view_number].sum(axis=1)
+        view_contribution = np.sum(
+            joint_weights[:, :, view_number] * expert_values[:, :, view_number], axis=1
+        )
+        output[f"view_{view}_prediction_bps"] = np.sum(
+            horizon_weights * expert_values[:, :, view_number], axis=1
+        )
+        output[f"gate_without_{view}_prediction_bps"] = (
+            weighted_prediction - view_contribution
+        ) / np.maximum(1.0 - view_weight, 1e-12)
     output["plan_contributors"] = contributor_rows
     output["plan_id"] = [
         parameterized_plan_id(
@@ -1273,15 +1521,218 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
     output["funding_bps"] = _funding_for_actions(output)
     output["round_trip_cost_bps"] = fee.round_trip_bps
     output["net_bps"] = output["gross_bps"] + output["funding_bps"] - fee.round_trip_bps
+    output["alpha_path_return_bps"] = output["gross_bps"]
+    output["proxy_net_bps"] = output["net_bps"]
+    output["executable_return_available"] = False
+    output["execution_quality"] = "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
     output["stress_1_5x_bps"] = (
         output["gross_bps"] + output["funding_bps"] - 1.5 * fee.round_trip_bps
     )
     output["stress_2x_bps"] = output["gross_bps"] + output["funding_bps"] - 2.0 * fee.round_trip_bps
+    leverage = _leverage(output["stop_bps"].to_numpy(float), fee.round_trip_bps)
+    output["sized_leverage"] = leverage
+    output["sized_portfolio_return"] = leverage * output["net_bps"].to_numpy(float) / 10_000
+    if np.any(output["sized_portfolio_return"].to_numpy(float) <= -1):
+        raise ValueError("risk-sized state-action can lose all equity")
+    output["log_utility"] = np.log1p(output["sized_portfolio_return"].to_numpy(float))
     output["label_protocol_hash"] = LABEL_PROTOCOL_HASH
     output["protocol_hash"] = PROTOCOL_HASH
     if not output["available_at"].le(output["actual_entry_timestamp"]).all():
         raise ValueError("canonical label entered before features were available")
     return output.sort_values(["actual_entry_timestamp", "side"]).reset_index(drop=True)
+
+
+def local_plan_variants(rows: pd.DataFrame) -> pd.DataFrame:
+    """Create a small supported neighborhood around each expert-composed plan."""
+    if "local_variant" in rows:
+        return rows.copy()
+    specifications = (
+        ("BASE", None, 1.0),
+        ("HORIZON_SHORTER", "horizon_seconds", 0.80),
+        ("HORIZON_LONGER", "horizon_seconds", 1.20),
+        ("TARGETS_TIGHTER", "targets", 0.85),
+        ("TARGETS_WIDER", "targets", 1.15),
+        ("STOP_TIGHTER", "stop", 0.85),
+        ("STOP_WIDER", "stop", 1.15),
+        ("TRAIL_TIGHTER", "trailing_bps", 0.80),
+        ("TRAIL_WIDER", "trailing_bps", 1.20),
+    )
+    pieces: list[pd.DataFrame] = []
+    for name, parameter, scale in specifications:
+        variant = rows.copy()
+        if parameter == "horizon_seconds":
+            variant[parameter] = np.clip(
+                np.rint(variant[parameter].to_numpy(float) * scale),
+                min(PREDICTION_HORIZONS_SECONDS),
+                MAXIMUM_HORIZON_SECONDS,
+            ).astype(int)
+            variant["horizon_fraction"] = (
+                variant["horizon_seconds"] / float(MAXIMUM_HORIZON_SECONDS)
+            )
+        elif parameter == "targets":
+            variant["target_1_bps"] = np.clip(
+                variant["target_1_bps"].to_numpy(float) * scale,
+                1.0,
+                base.MAX_TARGET_BPS - 1.0,
+            )
+            variant["target_2_bps"] = np.clip(
+                np.maximum(
+                    variant["target_2_bps"].to_numpy(float) * scale,
+                    variant["target_1_bps"].to_numpy(float) + 1.0,
+                ),
+                2.0,
+                base.MAX_TARGET_BPS,
+            )
+        elif parameter == "stop":
+            variant["stop_bps"] = np.clip(
+                variant["stop_bps"].to_numpy(float) * scale, 3.0, base.MAX_STOP_BPS
+            )
+            variant["trailing_bps"] = np.minimum(
+                variant["trailing_bps"].to_numpy(float),
+                variant["stop_bps"].to_numpy(float),
+            )
+        elif parameter == "trailing_bps":
+            variant[parameter] = np.clip(
+                variant[parameter].to_numpy(float) * scale,
+                3.0,
+                variant["stop_bps"].to_numpy(float),
+            )
+        variant["local_variant"] = name
+        variant["local_parameter_distance"] = abs(math.log(scale)) if parameter else 0.0
+        variant["plan_id"] = [
+            parameterized_plan_id(
+                int(side),
+                int(horizon),
+                float(target_1),
+                float(target_2),
+                float(stop),
+                float(trailing),
+                float(fraction),
+                f"{contributors}|{name}",
+            )
+            for side, horizon, target_1, target_2, stop, trailing, fraction, contributors in zip(
+                variant["side"],
+                variant["horizon_seconds"],
+                variant["target_1_bps"],
+                variant["target_2_bps"],
+                variant["stop_bps"],
+                variant["trailing_bps"],
+                variant["first_exit_fraction"],
+                variant["plan_contributors"],
+                strict=True,
+            )
+        ]
+        variant["expert_id"] = variant["plan_id"]
+        pieces.append(variant)
+    output = pd.concat(pieces, ignore_index=True)
+    return output.drop_duplicates(
+        [
+            "actual_entry_timestamp",
+            "side",
+            "horizon_seconds",
+            "target_1_bps",
+            "target_2_bps",
+            "stop_bps",
+            "trailing_bps",
+            "first_exit_fraction",
+        ],
+        keep="first",
+    ).reset_index(drop=True)
+
+
+def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
+    variants = local_plan_variants(rows)
+    pieces: list[pd.DataFrame] = []
+    for month, month_rows in variants.groupby("source_month", sort=True):
+        source = _load_second_window(str(month))
+        positions, delay = _first_observed_positions(
+            source, month_rows["actual_entry_timestamp"]
+        )
+        month_rows = month_rows.copy()
+        month_rows["actual_entry_timestamp"] = source.loc[positions, "timestamp"].to_numpy()
+        month_rows["entry_price"] = source.loc[positions, "open"].to_numpy(float)
+        month_rows["entry_delay_seconds"] = delay
+        month_rows["_source_position"] = positions
+        side_pieces: list[pd.DataFrame] = []
+        for side, side_rows in month_rows.groupby("side", sort=True):
+            local_positions = side_rows["_source_position"].to_numpy(np.int64)
+            result = simulate_management(
+                source,
+                local_positions,
+                int(cast(Any, side)),
+                side_rows["horizon_seconds"].to_numpy(int),
+                side_rows["target_1_bps"].to_numpy(float),
+                side_rows["target_2_bps"].to_numpy(float),
+                side_rows["stop_bps"].to_numpy(float),
+                side_rows["trailing_bps"].to_numpy(float),
+                side_rows["first_exit_fraction"].to_numpy(float),
+            )
+            labelled = side_rows.copy()
+            for column, values in result.items():
+                labelled[column] = values
+            labelled = labelled.drop(columns="_source_position")
+            side_pieces.append(labelled)
+        pieces.append(pd.concat(side_pieces, ignore_index=True))
+    output = pd.concat(pieces, ignore_index=True)
+    output["outcome"] = [
+        _management_name(int(value)) for value in output["management_code"]
+    ]
+    output["event"] = [OUTCOME_NAMES[int(value)] for value in output["event_class"]]
+    output["exit_timestamp"] = output["actual_entry_timestamp"] + pd.to_timedelta(
+        output["exit_seconds"], unit="s"
+    )
+    output["funding_bps"] = _funding_for_actions(output)
+    output["round_trip_cost_bps"] = fee.round_trip_bps
+    output["net_bps"] = output["gross_bps"] + output["funding_bps"] - fee.round_trip_bps
+    output["stress_1_5x_bps"] = (
+        output["gross_bps"] + output["funding_bps"] - 1.5 * fee.round_trip_bps
+    )
+    output["stress_2x_bps"] = (
+        output["gross_bps"] + output["funding_bps"] - 2.0 * fee.round_trip_bps
+    )
+    leverage = _leverage(output["stop_bps"].to_numpy(float), fee.round_trip_bps)
+    output["sized_leverage"] = leverage
+    output["sized_portfolio_return"] = leverage * output["net_bps"].to_numpy(float) / 10_000
+    output["log_utility"] = np.log1p(output["sized_portfolio_return"].to_numpy(float))
+    output["alpha_path_return_bps"] = output["gross_bps"]
+    output["proxy_net_bps"] = output["net_bps"]
+    output["executable_return_available"] = False
+    output["execution_quality"] = "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
+    return output.sort_values(
+        ["actual_entry_timestamp", "side", "local_variant"], kind="stable"
+    ).reset_index(drop=True)
+
+
+def plan_efficiency_audit(rows: pd.DataFrame, fee: FeeContract) -> dict[str, Any]:
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(rows["actual_entry_timestamp"], utc=True).drop_duplicates()
+    )
+    if len(timestamps) > LOCAL_PLAN_AUDIT_STATES:
+        positions = np.linspace(0, len(timestamps) - 1, LOCAL_PLAN_AUDIT_STATES).astype(int)
+        timestamps = timestamps[positions]
+    sampled = rows.loc[rows["actual_entry_timestamp"].isin(timestamps)].copy()
+    variants = label_local_plan_variants(sampled, fee)
+    grouped = variants.groupby(["actual_entry_timestamp", "side"], sort=False)
+    best = grouped["net_bps"].max()
+    baseline = variants.loc[variants["local_variant"].eq("BASE")].set_index(
+        ["actual_entry_timestamp", "side"]
+    )["net_bps"]
+    regret = best.sub(baseline, fill_value=0.0).clip(lower=0.0)
+    winner = variants.loc[
+        variants.groupby(["actual_entry_timestamp", "side"])["net_bps"].idxmax()
+    ]
+    mean_regret = float(regret.mean())
+    return {
+        "states": len(grouped),
+        "variants": len(variants),
+        "mean_local_oracle_regret_bps": mean_regret,
+        "median_local_oracle_regret_bps": float(regret.median()),
+        "fraction_with_better_local_plan": float(regret.gt(0).mean()),
+        "fraction_material_regret": float(regret.gt(LOCAL_PLAN_REGRET_MATERIAL_BPS).mean()),
+        "winner_by_variant": winner["local_variant"].value_counts().to_dict(),
+        "material": mean_regret > LOCAL_PLAN_REGRET_MATERIAL_BPS,
+        "oracle_is_diagnostic_only": True,
+    }
 
 
 def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -1319,12 +1770,22 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
             if migrate:
                 rows["round_trip_cost_bps"] = fee.round_trip_bps
                 rows["net_bps"] = rows["gross_bps"] + rows["funding_bps"] - fee.round_trip_bps
+                rows["alpha_path_return_bps"] = rows["gross_bps"]
+                rows["proxy_net_bps"] = rows["net_bps"]
+                rows["executable_return_available"] = False
+                rows["execution_quality"] = "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
                 rows["stress_1_5x_bps"] = (
                     rows["gross_bps"] + rows["funding_bps"] - 1.5 * fee.round_trip_bps
                 )
                 rows["stress_2x_bps"] = (
                     rows["gross_bps"] + rows["funding_bps"] - 2.0 * fee.round_trip_bps
                 )
+                leverage = _leverage(rows["stop_bps"].to_numpy(float), fee.round_trip_bps)
+                rows["sized_leverage"] = leverage
+                rows["sized_portfolio_return"] = leverage * rows["net_bps"].to_numpy(float) / 10_000
+                if np.any(rows["sized_portfolio_return"].to_numpy(float) <= -1):
+                    raise ValueError("risk-sized cached state-action can lose all equity")
+                rows["log_utility"] = np.log1p(rows["sized_portfolio_return"].to_numpy(float))
                 rows["label_protocol_hash"] = LABEL_PROTOCOL_HASH
                 rows["protocol_hash"] = PROTOCOL_HASH
                 temporary = path.with_suffix(f".parquet.{os.getpid()}.tmp")
@@ -1648,9 +2109,112 @@ def apply_fold_expert_library(rows: pd.DataFrame, library: dict[str, Any]) -> pd
     return output
 
 
+def cross_fit_fold_expert_features(
+    fit: pd.DataFrame,
+    fold_number: int | str,
+    *,
+    resume: bool = False,
+) -> tuple[pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    """Encode fit rows with critics that have only seen strictly earlier outcomes."""
+    if fit.empty:
+        raise ValueError("cannot cross-fit an empty outer-fold fit")
+    ordered = fit.sort_values("actual_entry_timestamp", kind="stable").reset_index(drop=True)
+    timestamp = pd.to_datetime(ordered["actual_entry_timestamp"], utc=True)
+    start = timestamp.min().floor("D")
+    end = timestamp.max().ceil("D") + pd.Timedelta(days=1)
+    first_block = start + pd.Timedelta(weeks=CROSSFIT_WARMUP_WEEKS)
+    scope = _fold_scope(f"{fold_number}-crossfit", ordered)
+    cache = EXPERT_CATALOG_ROOT / f"{scope}.crossfit.parquet"
+    keys = ["actual_entry_timestamp", "side", "plan_id"]
+    encoded_columns = [
+        *keys,
+        *FOLD_EXPERT_FEATURES,
+        "fold_expert_scope",
+        "expert_tree_index",
+        "expert_leaf_id",
+    ]
+    final_library = fit_fold_expert_library(ordered, fold_number, resume=resume)
+    if resume and cache.exists():
+        encoded = pd.read_parquet(cache)
+        transformed = ordered.merge(encoded, on=keys, how="inner", validate="one_to_one")
+        if transformed.empty or not np.isfinite(
+            transformed.loc[:, FOLD_EXPERT_FEATURES].to_numpy(float)
+        ).all():
+            raise ValueError("invalid cached cross-fitted critic features")
+        return transformed, final_library, {
+            "scope": scope,
+            "cache": str(cache),
+            "rows": len(transformed),
+            "blocks": int(encoded["fold_expert_scope"].nunique()),
+            "strictly_past_only": True,
+        }
+
+    pieces: list[pd.DataFrame] = []
+    block_start = first_block
+    block_number = 0
+    while block_start < end:
+        block_end = min(block_start + pd.Timedelta(weeks=CROSSFIT_BLOCK_WEEKS), end)
+        history = _period(ordered, None, block_start, purge_exit=True)
+        active = timestamp.ge(block_start) & timestamp.lt(block_end)
+        held_out = ordered.loc[active].copy()
+        if not history.empty and not held_out.empty:
+            block_number += 1
+            library = fit_fold_expert_library(
+                history,
+                f"{fold_number}-crossfit-{block_number}",
+                resume=resume,
+            )
+            transformed = apply_fold_expert_library(held_out, library)
+            pieces.append(transformed)
+            _status(
+                "critic_crossfit",
+                f"fold {fold_number} block {block_number}: past-only critic encoding",
+                42,
+                fold=str(fold_number),
+                crossfit_block=block_number,
+                history_rows=len(history),
+                held_out_rows=len(held_out),
+                strictly_past_only=True,
+            )
+        block_start = block_end
+    if not pieces:
+        raise ValueError("insufficient chronology for critic cross-fitting")
+    transformed = pd.concat(pieces, ignore_index=True).sort_values(
+        "actual_entry_timestamp", kind="stable"
+    )
+    EXPERT_CATALOG_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = cache.with_suffix(f".parquet.{os.getpid()}.tmp")
+    transformed.loc[:, encoded_columns].to_parquet(temporary, index=False)
+    _atomic_replace(temporary, cache)
+    return transformed, final_library, {
+        "scope": scope,
+        "cache": str(cache),
+        "rows": len(transformed),
+        "blocks": block_number,
+        "strictly_past_only": True,
+        "warmup_rows_excluded": len(ordered) - len(transformed),
+    }
+
+
 def _timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
     count = rows.groupby("actual_entry_timestamp")["actual_entry_timestamp"].transform("size")
     return np.asarray(1.0 / count.to_numpy(float), dtype=float)
+
+
+def _permute_outcomes(rows: pd.DataFrame, seed: int) -> pd.DataFrame:
+    output = rows.copy()
+    columns = [
+        "event_class",
+        "net_bps",
+        "log_utility",
+        "mfe_bps",
+        "mae_bps",
+        "time_to_target_seconds",
+        "exit_seconds",
+    ]
+    permutation = np.random.default_rng(seed).permutation(len(output))
+    output.loc[:, columns] = output.loc[:, columns].to_numpy()[permutation]
+    return output
 
 
 def _probabilities(model: Any, values: np.ndarray) -> np.ndarray:
@@ -1735,6 +2299,7 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
     outcome = fit["event_class"].to_numpy(int)
     classifier = _fit_classifier(kind, _classifier(kind, MODEL_SEEDS[0]), values, outcome, weights)
     conditional: dict[int, Predictor] = {}
+    conditional_utility: dict[int, Predictor] = {}
     for event_class in range(3):
         active = outcome == event_class
         if active.sum() < 100:
@@ -1747,6 +2312,13 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
             weights[active],
         )
         conditional[event_class] = model
+        conditional_utility[event_class] = _fit_regressor(
+            kind,
+            _regressor(kind, MODEL_SEEDS[event_class] + 30),
+            values[active],
+            fit.loc[active, "log_utility"].to_numpy(float),
+            weights[active],
+        )
     auxiliaries: dict[str, Any] = {}
     for number, target in enumerate(("mfe_bps", "mae_bps"), start=10):
         auxiliaries[target] = _fit_regressor(
@@ -1764,7 +2336,37 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
         fit.loc[target_rows, "time_to_target_seconds"].to_numpy(float),
         weights[target_rows],
     )
-    return {"kind": kind, "classifier": classifier, "conditional": conditional, "aux": auxiliaries}
+    auxiliaries["exit_seconds"] = _fit_regressor(
+        kind,
+        _regressor(kind, MODEL_SEEDS[0] + 21),
+        values,
+        fit["exit_seconds"].to_numpy(float),
+        weights,
+    )
+    direct = {
+        "net_bps": _fit_regressor(
+            kind,
+            _regressor(kind, MODEL_SEEDS[0] + 40),
+            values,
+            fit["net_bps"].to_numpy(float),
+            weights,
+        ),
+        "log_utility": _fit_regressor(
+            kind,
+            _regressor(kind, MODEL_SEEDS[0] + 41),
+            values,
+            fit["log_utility"].to_numpy(float),
+            weights,
+        ),
+    }
+    return {
+        "kind": kind,
+        "classifier": classifier,
+        "conditional": conditional,
+        "conditional_utility": conditional_utility,
+        "direct": direct,
+        "aux": auxiliaries,
+    }
 
 
 def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str, Any]:
@@ -1775,42 +2377,107 @@ def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str
         np.log(raw_probability), outcome
     )
     calibrated_probability = _probabilities(probability, np.log(raw_probability))
-    conditional = np.column_stack(
+    conditional_bps = np.column_stack(
         [np.asarray(head["conditional"][event].predict(values), dtype=float) for event in range(3)]
     )
-    raw_ev = np.sum(calibrated_probability * conditional, axis=1)
-    ev = IsotonicRegression(out_of_bounds="clip").fit(
-        raw_ev, calibration["net_bps"].to_numpy(float)
+    conditional_utility = np.column_stack(
+        [
+            np.asarray(head["conditional_utility"][event].predict(values), dtype=float)
+            for event in range(3)
+        ]
     )
+    raw_values = {
+        "decomposed": {
+            "net_bps": np.sum(calibrated_probability * conditional_bps, axis=1),
+            "log_utility": np.sum(calibrated_probability * conditional_utility, axis=1),
+        },
+        "direct": {
+            "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
+            "log_utility": np.asarray(
+                head["direct"]["log_utility"].predict(values), dtype=float
+            ),
+        },
+    }
+    value = {
+        name: {
+            "net_bps": IsotonicRegression(out_of_bounds="clip").fit(
+                raw["net_bps"], calibration["net_bps"].to_numpy(float)
+            ),
+            "log_utility": IsotonicRegression(out_of_bounds="clip").fit(
+                raw["log_utility"], calibration["log_utility"].to_numpy(float)
+            ),
+        }
+        for name, raw in raw_values.items()
+    }
     residuals: dict[str, list[float]] = {}
     for name in ("mfe_bps", "mae_bps"):
         predicted = np.asarray(head["aux"][name].predict(values), dtype=float)
         residual = calibration[name].to_numpy(float) - predicted
         residuals[name] = [float(np.quantile(residual, value)) for value in (0.10, 0.50, 0.90)]
-    return {"probability": probability, "ev": ev, "residual_quantiles": residuals}
+    return {"probability": probability, "value": value, "residual_quantiles": residuals}
 
 
 def score_actions(
-    rows: pd.DataFrame, head: dict[str, Any], calibration: dict[str, Any]
+    rows: pd.DataFrame,
+    head: dict[str, Any],
+    calibration: dict[str, Any],
+    value_head: str = "decomposed",
 ) -> pd.DataFrame:
+    if value_head not in VALUE_HEADS:
+        raise ValueError(f"unknown value head: {value_head}")
     values = _x(rows)
     raw_probability = np.clip(_probabilities(head["classifier"], values), 1e-6, 1.0)
     probability = _probabilities(calibration["probability"], np.log(raw_probability))
-    conditional = np.column_stack(
+    conditional_bps = np.column_stack(
         [np.asarray(head["conditional"][event].predict(values), dtype=float) for event in range(3)]
     )
-    raw_ev = np.sum(probability * conditional, axis=1)
+    conditional_utility = np.column_stack(
+        [
+            np.asarray(head["conditional_utility"][event].predict(values), dtype=float)
+            for event in range(3)
+        ]
+    )
+    raw_values = {
+        "decomposed": {
+            "net_bps": np.sum(probability * conditional_bps, axis=1),
+            "log_utility": np.sum(probability * conditional_utility, axis=1),
+        },
+        "direct": {
+            "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
+            "log_utility": np.asarray(
+                head["direct"]["log_utility"].predict(values), dtype=float
+            ),
+        },
+    }
     output = rows.copy()
     output["p_target"] = probability[:, OUTCOME_TARGET]
     output["p_stop"] = probability[:, OUTCOME_STOP]
     output["p_timeout"] = probability[:, OUTCOME_TIMEOUT]
     output["target_probability"] = output["p_target"]
     for event, name in enumerate(OUTCOME_NAMES):
-        output[f"expected_{name.lower()}_net_bps"] = conditional[:, event]
-    output["raw_ev_bps"] = raw_ev
-    output["calibrated_ev_bps"] = calibration["ev"].predict(raw_ev)
+        output[f"expected_{name.lower()}_net_bps"] = conditional_bps[:, event]
+        output[f"expected_{name.lower()}_log_utility"] = conditional_utility[:, event]
+    for name, raw in raw_values.items():
+        output[f"raw_{name}_ev_bps"] = raw["net_bps"]
+        output[f"{name}_ev_bps"] = calibration["value"][name]["net_bps"].predict(
+            raw["net_bps"]
+        )
+        output[f"raw_{name}_log_utility"] = raw["log_utility"]
+        output[f"{name}_log_utility"] = calibration["value"][name]["log_utility"].predict(
+            raw["log_utility"]
+        )
+    output["selected_value_head"] = value_head
+    output["raw_ev_bps"] = output[f"raw_{value_head}_ev_bps"]
+    output["calibrated_ev_bps"] = output[f"{value_head}_ev_bps"]
+    output["expected_log_utility"] = output[f"{value_head}_log_utility"]
     output["expected_time_to_target_seconds"] = np.maximum(
         np.asarray(head["aux"]["time_to_target_seconds"].predict(values), dtype=float), 1.0
+    )
+    output["expected_holding_seconds"] = np.maximum(
+        np.asarray(head["aux"]["exit_seconds"].predict(values), dtype=float), 1.0
+    )
+    output["expected_log_utility_per_hour"] = (
+        output["expected_log_utility"] * 3_600 / output["expected_holding_seconds"]
     )
     for name in ("mfe_bps", "mae_bps"):
         center = np.asarray(head["aux"][name].predict(values), dtype=float)
@@ -1841,27 +2508,50 @@ def _calibration_error(actual: np.ndarray, predicted: np.ndarray) -> float:
     )
 
 
-def _decision_regret(rows: pd.DataFrame) -> float:
+def _decision_regret(
+    rows: pd.DataFrame, prediction_column: str, actual_column: str
+) -> float:
     values: list[float] = []
     for _, group in rows.groupby("actual_entry_timestamp", sort=False):
-        prediction = group["calibrated_ev_bps"].to_numpy(float)
-        actual = group["net_bps"].to_numpy(float)
+        prediction = group[prediction_column].to_numpy(float)
+        actual = group[actual_column].to_numpy(float)
         choice = int(np.argmax(prediction))
         selected = actual[choice] if prediction[choice] > 0 else 0.0
         values.append(max(0.0, float(actual.max())) - selected)
     return float(np.mean(values)) if values else float("inf")
 
 
-def head_metrics(rows: pd.DataFrame) -> dict[str, float]:
+def head_metrics(rows: pd.DataFrame, value_head: str) -> dict[str, float]:
     probability = rows.loc[:, ["p_target", "p_stop", "p_timeout"]].to_numpy(float)
     actual = rows["net_bps"].to_numpy(float)
-    predicted = rows["calibrated_ev_bps"].to_numpy(float)
+    predicted = rows[f"{value_head}_ev_bps"].to_numpy(float)
+    utility = rows["log_utility"].to_numpy(float)
+    predicted_utility = rows[f"{value_head}_log_utility"].to_numpy(float)
     return {
         "brier": _multiclass_brier(rows["event_class"].to_numpy(int), probability),
         "ev_calibration_error_bps": _calibration_error(actual, predicted),
         "ev_mae_bps": float(mean_absolute_error(actual, predicted)),
-        "decision_regret_bps": _decision_regret(rows),
+        "decision_regret_bps": _decision_regret(rows, f"{value_head}_ev_bps", "net_bps"),
+        "utility_calibration_error": _calibration_error(utility, predicted_utility),
+        "utility_mae": float(mean_absolute_error(utility, predicted_utility)),
+        "decision_regret_log_utility": _decision_regret(
+            rows, f"{value_head}_log_utility", "log_utility"
+        ),
     }
+
+
+def choose_value_head(metrics: dict[str, dict[str, float]]) -> str:
+    baseline = metrics["decomposed"]
+    challenger = metrics["direct"]
+    keys = (
+        "ev_calibration_error_bps",
+        "ev_mae_bps",
+        "decision_regret_bps",
+        "utility_calibration_error",
+        "utility_mae",
+        "decision_regret_log_utility",
+    )
+    return "direct" if all(challenger[key] < baseline[key] for key in keys) else "decomposed"
 
 
 def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
@@ -1869,8 +2559,150 @@ def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
         return "ridge"
     ridge = metrics["ridge"]
     challenger = metrics["xgboost_cuda"]
-    keys = ("brier", "ev_calibration_error_bps", "ev_mae_bps", "decision_regret_bps")
+    keys = (
+        "brier",
+        "ev_calibration_error_bps",
+        "ev_mae_bps",
+        "decision_regret_bps",
+        "utility_calibration_error",
+        "utility_mae",
+        "decision_regret_log_utility",
+    )
     return "xgboost_cuda" if all(challenger[key] < ridge[key] for key in keys) else "ridge"
+
+
+def continuation_targets(rows: pd.DataFrame) -> pd.DataFrame:
+    """Build semi-Markov training targets; future outcomes remain labels, never live inputs."""
+    ordered = rows.sort_values(["actual_entry_timestamp", "side"], kind="stable").copy()
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(ordered["actual_entry_timestamp"], utc=True).drop_duplicates()
+    )
+    if len(timestamps) < 2:
+        raise ValueError("insufficient states for continuation targets")
+    timestamp_ns = timestamps.astype("int64").to_numpy()
+    exits_ns = pd.to_datetime(ordered["exit_timestamp"], utc=True).astype("int64").to_numpy()
+    entries_ns = (
+        pd.to_datetime(ordered["actual_entry_timestamp"], utc=True).astype("int64").to_numpy()
+    )
+    state_index = np.searchsorted(timestamp_ns, entries_ns, side="left")
+    next_free = np.searchsorted(timestamp_ns, exits_ns, side="left")
+    value = np.zeros(len(timestamps) + 1, dtype=float)
+    q_wait = np.zeros(len(timestamps), dtype=float)
+    q_enter = np.zeros(len(ordered), dtype=float)
+    utility = ordered["log_utility"].to_numpy(float)
+    row_groups = ordered.groupby("actual_entry_timestamp", sort=True).indices
+    for index in range(len(timestamps) - 1, -1, -1):
+        if index + 1 < len(timestamps):
+            wait_seconds = max(0.0, (timestamp_ns[index + 1] - timestamp_ns[index]) / 1e9)
+            q_wait[index] = math.exp(
+                -wait_seconds / CONTINUATION_HALF_LIFE_SECONDS
+            ) * value[index + 1]
+        positions = np.asarray(row_groups[timestamps[index]], dtype=int)
+        duration = np.maximum(0.0, (exits_ns[positions] - entries_ns[positions]) / 1e9)
+        continuation = value[np.minimum(next_free[positions], len(timestamps))]
+        q_enter[positions] = utility[positions] + np.exp(
+            -duration / CONTINUATION_HALF_LIFE_SECONDS
+        ) * continuation
+        value[index] = max(q_wait[index], float(q_enter[positions].max(initial=-math.inf)))
+    ordered["target_q_enter_log_utility"] = q_enter
+    ordered["target_q_wait_log_utility"] = q_wait[state_index]
+    ordered["target_state_value_log_utility"] = value[state_index]
+    complete_before = timestamps[-1] - pd.Timedelta(seconds=MAXIMUM_HORIZON_SECONDS)
+    ordered["continuation_target_complete"] = pd.to_datetime(
+        ordered["actual_entry_timestamp"], utc=True
+    ).le(complete_before)
+    return ordered
+
+
+def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Predictor]:
+    targets = continuation_targets(rows)
+    complete = targets.loc[targets["continuation_target_complete"]].copy()
+    if len(complete) < 100:
+        raise ValueError("insufficient complete continuation targets")
+    values = _x(complete)
+    weights = _timestamp_weights(complete)
+    return {
+        "enter": _fit_regressor(
+            "ridge",
+            _regressor("ridge", 20261401),
+            values,
+            complete["target_q_enter_log_utility"].to_numpy(float),
+            weights,
+        ),
+        "wait": _fit_regressor(
+            "ridge",
+            _regressor("ridge", 20261402),
+            values,
+            complete["target_q_wait_log_utility"].to_numpy(float),
+            weights,
+        ),
+    }
+
+
+def fit_continuation_calibration(
+    models: dict[str, Predictor], rows: pd.DataFrame
+) -> dict[str, IsotonicRegression]:
+    targets = continuation_targets(rows)
+    complete = targets.loc[targets["continuation_target_complete"]].copy()
+    values = _x(complete)
+    return {
+        action: IsotonicRegression(out_of_bounds="clip").fit(
+            np.asarray(model.predict(values), dtype=float),
+            complete[f"target_q_{action}_log_utility"].to_numpy(float),
+        )
+        for action, model in models.items()
+    }
+
+
+def score_continuation(
+    rows: pd.DataFrame,
+    models: dict[str, Predictor],
+    calibration: dict[str, IsotonicRegression],
+) -> pd.DataFrame:
+    output = rows.copy()
+    values = _x(output)
+    for action, model in models.items():
+        raw = np.asarray(model.predict(values), dtype=float)
+        output[f"q_{action}_log_utility"] = calibration[action].predict(raw)
+    output["q_wait_log_utility"] = output.groupby("actual_entry_timestamp", sort=False)[
+        "q_wait_log_utility"
+    ].transform("mean")
+    output["immediate_expected_log_utility"] = output["expected_log_utility"]
+    output["action_advantage_log_utility"] = (
+        output["q_enter_log_utility"] - output["q_wait_log_utility"]
+    )
+    output["expected_log_utility"] = output["action_advantage_log_utility"]
+    return output
+
+
+def continuation_metrics(scored: pd.DataFrame) -> dict[str, float]:
+    targets = continuation_targets(scored)
+    complete = targets["continuation_target_complete"].to_numpy(bool)
+    return {
+        "enter_mae": float(
+            mean_absolute_error(
+                targets.loc[complete, "target_q_enter_log_utility"],
+                targets.loc[complete, "q_enter_log_utility"],
+            )
+        ),
+        "wait_mae": float(
+            mean_absolute_error(
+                targets.loc[complete, "target_q_wait_log_utility"],
+                targets.loc[complete, "q_wait_log_utility"],
+            )
+        ),
+        "advantage_sign_accuracy": float(
+            np.mean(
+                np.sign(
+                    targets.loc[complete, "target_q_enter_log_utility"].to_numpy(float)
+                    - targets.loc[complete, "target_q_wait_log_utility"].to_numpy(float)
+                )
+                == np.sign(
+                    targets.loc[complete, "action_advantage_log_utility"].to_numpy(float)
+                )
+            )
+        ),
+    }
 
 
 def _leverage(stop_bps: np.ndarray, round_trip_cost_bps: float) -> np.ndarray:
@@ -1888,17 +2720,28 @@ def sequential_replay(
     if scored.empty:
         return scored.copy(), pd.DataFrame(columns=["timestamp", "action", "reason"])
     ranked = scored.copy()
+    predicted_leverage = _leverage(
+        ranked["stop_bps"].to_numpy(float), round_trip_cost_bps
+    )
+    if "expected_log_utility" not in ranked:
+        implied_return = predicted_leverage * ranked["calibrated_ev_bps"].to_numpy(float) / 10_000
+        ranked["expected_log_utility"] = np.log1p(np.maximum(implied_return, -0.999999))
     if isinstance(threshold_bps, dict):
         ranked["required_ev_bps"] = ranked["side"].map(threshold_bps).fillna(float("inf"))
     else:
         ranked["required_ev_bps"] = float(threshold_bps)
-    ranked["passes_ev_threshold"] = ranked["calibrated_ev_bps"].gt(ranked["required_ev_bps"])
+    required_return = predicted_leverage * ranked["required_ev_bps"].to_numpy(float) / 10_000
+    ranked["required_log_utility"] = np.log1p(required_return)
+    ranked["passes_value_threshold"] = ranked["expected_log_utility"].gt(
+        ranked["required_log_utility"]
+    )
+    ranked["passes_ev_threshold"] = ranked["passes_value_threshold"]
     candidates = (
         ranked.sort_values(
             [
                 "actual_entry_timestamp",
-                "passes_ev_threshold",
-                "calibrated_ev_bps",
+                "passes_value_threshold",
+                "expected_log_utility",
                 "p_target",
                 "expert_id",
             ],
@@ -2012,7 +2855,7 @@ def sequential_replay(
                     {
                         "timestamp": entry,
                         "action": "WAIT",
-                        "reason": "EV_BELOW_THRESHOLD",
+                        "reason": "EXPECTED_EQUITY_UTILITY_BELOW_THRESHOLD",
                         **asdict(state),
                     }
                 )
@@ -2046,7 +2889,7 @@ def sequential_replay(
                 {
                     "timestamp": entry,
                     "action": entry_action,
-                    "reason": "CALIBRATED_EV_AND_RISK_APPROVED",
+                    "reason": "EXPECTED_EQUITY_UTILITY_AND_RISK_APPROVED",
                     **asdict(state),
                 }
             )
@@ -2166,6 +3009,8 @@ def policy_metrics(
             "trades": 0,
             "trades_per_day": 0.0,
             "expectancy_bps": None,
+            "equity_expectancy": None,
+            "mean_log_growth": None,
             "profit_factor": None,
             "maximum_drawdown": None,
             "positive_active_days": 0.0,
@@ -2177,6 +3022,9 @@ def policy_metrics(
     returns = trades["portfolio_return"].to_numpy(float)
     gains = float(returns[returns > 0].sum())
     losses = float(-returns[returns < 0].sum())
+    notional_gains = float(net[net > 0].sum())
+    notional_losses = float(-net[net < 0].sum())
+    log_growth = np.log1p(returns)
     equity = np.cumprod(1 + returns)
     peak = np.maximum.accumulate(np.r_[1.0, equity])[1:]
     active = daily.loc[daily.ne(0)]
@@ -2185,7 +3033,11 @@ def policy_metrics(
         "trades": len(trades),
         "trades_per_day": float(len(trades) / max(1, len(daily))),
         "expectancy_bps": float(net.mean()),
+        "equity_expectancy": float(returns.mean()),
+        "mean_log_growth": float(log_growth.mean()),
+        "total_log_growth": float(log_growth.sum()),
         "profit_factor": gains / losses if losses else None,
+        "notional_profit_factor": notional_gains / notional_losses if notional_losses else None,
         "win_rate": float((net > 0).mean()),
         "maximum_drawdown": float((1 - equity / peak).max(initial=0.0)),
         "positive_active_days": float(active.gt(0).mean()) if len(active) else 0.0,
@@ -2204,12 +3056,188 @@ def policy_metrics(
     }
 
 
+def negative_control_metrics(
+    scored: pd.DataFrame,
+    fee: FeeContract,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[str, Any]:
+    """Evaluate causal policy controls without using them for model selection."""
+    controls: dict[str, pd.DataFrame] = {}
+    controls["always_wait"] = scored.iloc[:0].copy()
+
+    random = scored.copy()
+    generator = np.random.default_rng(20261101)
+    random["expected_log_utility"] = generator.permutation(
+        random["expected_log_utility"].to_numpy(float)
+    )
+    controls["random_prediction"] = random
+
+    shifted = scored.sort_values(["side", "actual_entry_timestamp"], kind="stable").copy()
+    shifted["expected_log_utility"] = shifted.groupby("side", sort=False)[
+        "expected_log_utility"
+    ].shift(1)
+    shifted["expected_log_utility"] = shifted["expected_log_utility"].fillna(-1.0)
+    controls["temporally_shifted_prediction"] = shifted
+
+    no_gating = scored.copy()
+    no_gating_return = _leverage(
+        no_gating["stop_bps"].to_numpy(float), fee.round_trip_bps
+    ) * no_gating["managed_expert_mean_bps"].to_numpy(float) / 10_000
+    no_gating["expected_log_utility"] = np.log1p(np.maximum(no_gating_return, -0.999999))
+    controls["managed_expert_mean_no_gate"] = no_gating
+
+    def expert_control(column: str) -> pd.DataFrame:
+        control = scored.copy()
+        net_prediction = control[column].to_numpy(float) - fee.round_trip_bps
+        predicted_return = _leverage(
+            control["stop_bps"].to_numpy(float), fee.round_trip_bps
+        ) * net_prediction / 10_000
+        control["expected_log_utility"] = np.log1p(
+            np.maximum(predicted_return, -0.999999)
+        )
+        return control
+
+    if "view_full_prediction_bps" in scored:
+        controls["full_only"] = expert_control("view_full_prediction_bps")
+    if "equal_weight_expert_prediction_bps" in scored:
+        controls["equal_weight_experts"] = expert_control(
+            "equal_weight_expert_prediction_bps"
+        )
+    if "gate_expected_gross_bps" in scored:
+        controls["deterministic_gate_only"] = expert_control("gate_expected_gross_bps")
+
+    momentum = scored.copy()
+    momentum_direction = np.sign(momentum["price_velocity_1m"].to_numpy(float))
+    momentum["expected_log_utility"] = np.where(
+        momentum["side"].to_numpy(int) == momentum_direction, 1e-6, -1.0
+    )
+    controls["simple_momentum"] = momentum
+
+    mean_reversion = scored.copy()
+    mean_reversion_direction = -np.sign(mean_reversion["vwap_distance_bps"].to_numpy(float))
+    mean_reversion["expected_log_utility"] = np.where(
+        mean_reversion["side"].to_numpy(int) == mean_reversion_direction, 1e-6, -1.0
+    )
+    controls["simple_mean_reversion"] = mean_reversion
+
+    controls["long_only"] = scored.loc[scored["side"].gt(0)].copy()
+    controls["short_only"] = scored.loc[scored["side"].lt(0)].copy()
+    result: dict[str, Any] = {}
+    for name, rows in controls.items():
+        if name == "always_wait":
+            trades = rows
+        else:
+            trades, _ = sequential_replay(
+                rows, 0.0, fee.round_trip_bps, record_decisions=False
+            )
+        result[name] = policy_metrics(
+            trades,
+            start,
+            end,
+            daily_bootstrap=False,
+            weekly_bootstrap=False,
+        )
+    return result
+
+
+def economic_calibration_buckets(scored: pd.DataFrame) -> dict[str, Any]:
+    edges = [-math.inf, 0.0, 2.0, 4.0, 8.0, 12.0, 20.0, math.inf]
+    labels = ["<0", "0-2", "2-4", "4-8", "8-12", "12-20", ">20"]
+    values = scored.copy()
+    values["ev_bucket"] = pd.cut(
+        values["calibrated_ev_bps"], bins=edges, labels=labels, right=False
+    )
+    grouped = (
+        values.groupby("ev_bucket", observed=True)
+        .agg(
+            candidates=("net_bps", "size"),
+            predicted_ev_bps=("calibrated_ev_bps", "mean"),
+            realized_ev_bps=("net_bps", "mean"),
+            predicted_log_utility=("immediate_expected_log_utility", "mean"),
+            realized_log_utility=("log_utility", "mean"),
+            expected_holding_seconds=("expected_holding_seconds", "mean"),
+            first_timestamp=("actual_entry_timestamp", "min"),
+            last_timestamp=("actual_entry_timestamp", "max"),
+        )
+        .reset_index()
+    )
+    realized = grouped["realized_log_utility"].to_numpy(float)
+    return {
+        "buckets": grouped.to_dict("records"),
+        "realized_utility_monotone_non_decreasing": bool(
+            len(realized) < 2 or np.all(np.diff(realized) >= 0)
+        ),
+    }
+
+
+def view_gating_audit(scored: pd.DataFrame) -> dict[str, Any]:
+    def correlation(left: np.ndarray, right: np.ndarray) -> float | None:
+        return (
+            float(np.corrcoef(left, right)[0, 1])
+            if len(left) > 1 and float(left.std()) > 0 and float(right.std()) > 0
+            else None
+        )
+
+    prediction_columns = [f"view_{view}_prediction_bps" for view in base.VIEWS]
+    prediction_columns = [name for name in prediction_columns if name in scored]
+    if not prediction_columns:
+        return {"available": False, "reason": "VIEW_PREDICTIONS_NOT_RETAINED"}
+    predictions = scored.loc[:, prediction_columns].astype(float)
+    errors = predictions.sub(scored["net_bps"].to_numpy(float), axis=0)
+    full_residual = scored["net_bps"].to_numpy(float) - predictions[
+        "view_full_prediction_bps"
+    ].to_numpy(float)
+    leave_one_out: dict[str, Any] = {}
+    for view in base.VIEWS:
+        column = f"gate_without_{view}_prediction_bps"
+        if column not in scored:
+            continue
+        prediction = scored[column].to_numpy(float)
+        leave_one_out[view] = {
+            "mae_bps": float(mean_absolute_error(scored["net_bps"], prediction)),
+            "calibration_error_bps": _calibration_error(
+                scored["net_bps"].to_numpy(float), prediction
+            ),
+        }
+    residual_information = {
+        column.removeprefix("view_").removesuffix("_prediction_bps"): correlation(
+            predictions[column].to_numpy(float), full_residual
+        )
+        for column in prediction_columns
+    }
+    gate_error = np.abs(
+        scored["gate_expected_gross_bps"].to_numpy(float)
+        - scored["net_bps"].to_numpy(float)
+    )
+    dispersion = scored["gate_disagreement_bps"].to_numpy(float)
+    dispersion_error_correlation = correlation(dispersion, gate_error)
+    prediction_correlation = predictions.corr().astype(object)
+    prediction_correlation = prediction_correlation.where(prediction_correlation.notna(), None)
+    error_correlation = errors.corr().astype(object)
+    error_correlation = error_correlation.where(error_correlation.notna(), None)
+    return {
+        "available": True,
+        "prediction_correlation": prediction_correlation.to_dict(),
+        "error_correlation": error_correlation.to_dict(),
+        "residual_information_correlation": residual_information,
+        "leave_one_view_out": leave_one_out,
+        "dispersion_vs_absolute_error_correlation": dispersion_error_correlation,
+        "liquidity_view_historical": False,
+        "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+        "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION",
+    }
+
+
 def policy_gates(
     metrics: dict[str, Any], *, minimum_trades: int = MINIMUM_OOS_TRADES
 ) -> dict[str, bool]:
+    economic_expectancy = metrics.get("mean_log_growth")
+    if economic_expectancy is None:
+        economic_expectancy = metrics.get("expectancy_bps")
     return {
         "minimum_oos_trades": int(metrics.get("trades", 0)) >= minimum_trades,
-        "expectancy_positive": float(metrics.get("expectancy_bps") or 0) > 0,
+        "expectancy_positive": float(economic_expectancy or 0) > 0,
         "lower_confidence_bound_positive": min(
             float(metrics.get("daily_lcb_95") or -1),
             float(metrics.get("weekly_lcb_95") or -1),
@@ -2224,8 +3252,11 @@ def policy_gates(
 
 def selection_gates(metrics: dict[str, Any]) -> dict[str, bool]:
     """Legacy diagnostic only; final statistical gates are never used for fold selection."""
+    economic_expectancy = metrics.get("mean_log_growth")
+    if economic_expectancy is None:
+        economic_expectancy = metrics.get("expectancy_bps")
     return {
-        "expectancy_positive": float(metrics.get("expectancy_bps") or 0) > 0,
+        "expectancy_positive": float(economic_expectancy or 0) > 0,
         "daily_lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -1) > 0,
         "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
         "drawdown_8pct": float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN,
@@ -2340,23 +3371,51 @@ def walk_forward(
             == 0
         ):
             continue
-        library = fit_fold_expert_library(
+        fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
             fit,
             number,
             resume=resume,
-            progress=(number - 1, len(folds)),
         )
-        fit = apply_fold_expert_library(fit, library)
         inner_calibration = apply_fold_expert_library(inner_calibration, library)
         model_audit = apply_fold_expert_library(model_audit, library)
         calibration = apply_fold_expert_library(calibration, library)
         selection = apply_fold_expert_library(selection, library)
         test = apply_fold_expert_library(test, library)
+        plan_audit = plan_efficiency_audit(model_audit, fee)
+        local_plan_variants_enabled = bool(plan_audit["material"])
+        if local_plan_variants_enabled:
+            model_audit = label_local_plan_variants(model_audit, fee)
+            calibration = label_local_plan_variants(calibration, fee)
+            selection = label_local_plan_variants(selection, fee)
+            test = label_local_plan_variants(test, fee)
+        _status(
+            "plan_efficiency",
+            f"fold {number}/{len(folds)} local variants "
+            f"{'enabled' if local_plan_variants_enabled else 'not required'}",
+            44 + 12 * number / len(folds),
+            fold=f"{number}/{len(folds)}",
+            plan_efficiency=plan_audit,
+            gpu=_gpu_info(),
+        )
+        continuation_model = fit_continuation_models(fit)
+        continuation_calibration = fit_continuation_calibration(
+            continuation_model, inner_calibration
+        )
+        continuation_audit_rows = model_audit.copy()
+        continuation_audit_rows["expected_log_utility"] = 0.0
+        continuation_audit = score_continuation(
+            continuation_audit_rows,
+            continuation_model,
+            continuation_calibration,
+        )
+        continuation_audit_metrics = continuation_metrics(continuation_audit)
         kinds = ["ridge"] + (["xgboost_cuda"] if _xgb_available() else [])
-        model_metrics: dict[str, dict[str, dict[str, float]]] = {}
+        model_metrics: dict[str, Any] = {}
         champions: dict[int, str] = {}
+        value_champions: dict[int, str] = {}
         scored_selection_pieces: list[pd.DataFrame] = []
         scored_test_pieces: list[pd.DataFrame] = []
+        permuted_test_pieces: list[pd.DataFrame] = []
         model_counter = 0
         total_models = 2 * len(kinds)
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
@@ -2366,7 +3425,7 @@ def walk_forward(
             side_calibration = calibration.loc[calibration["side"].eq(side)]
             side_selection = selection.loc[selection["side"].eq(side)]
             side_test = test.loc[test["side"].eq(side)]
-            side_metrics: dict[str, dict[str, float]] = {}
+            side_metrics: dict[str, Any] = {}
             for kind in kinds:
                 model_counter += 1
                 internal = "xgboost" if kind == "xgboost_cuda" else kind
@@ -2383,28 +3442,66 @@ def walk_forward(
                 candidate_head = fit_probability_head(internal, side_fit)
                 candidate_calibration = fit_calibration(candidate_head, side_inner)
                 scored_inner = score_actions(side_audit, candidate_head, candidate_calibration)
-                side_metrics[kind] = head_metrics(scored_inner)
-            champion = choose_champion(side_metrics)
+                value_metrics = {
+                    value_head: head_metrics(scored_inner, value_head)
+                    for value_head in VALUE_HEADS
+                }
+                selected_value_head = choose_value_head(value_metrics)
+                side_metrics[kind] = {
+                    "value_heads": value_metrics,
+                    "selected_value_head": selected_value_head,
+                    "selected_metrics": value_metrics[selected_value_head],
+                }
+            champion = choose_champion(
+                {kind: result["selected_metrics"] for kind, result in side_metrics.items()}
+            )
+            value_champion = str(side_metrics[champion]["selected_value_head"])
             champions[side] = champion
+            value_champions[side] = value_champion
             model_metrics[side_name] = side_metrics
             internal = "xgboost" if champion == "xgboost_cuda" else champion
             side_refit = pd.concat([side_fit, side_inner, side_audit], ignore_index=True)
             head = fit_probability_head(internal, side_refit)
             calibrated = fit_calibration(head, side_calibration)
-            scored_selection_pieces.append(score_actions(side_selection, head, calibrated))
-            scored_test_pieces.append(score_actions(side_test, head, calibrated))
+            scored_selection_pieces.append(
+                score_actions(side_selection, head, calibrated, value_champion)
+            )
+            scored_test_pieces.append(score_actions(side_test, head, calibrated, value_champion))
+            permuted_head = fit_probability_head(
+                "ridge", _permute_outcomes(side_fit, 20261200 + number * 10 + side)
+            )
+            permuted_calibration = fit_calibration(
+                permuted_head,
+                _permute_outcomes(side_inner, 20261300 + number * 10 + side),
+            )
+            permuted_test_pieces.append(
+                score_actions(side_test, permuted_head, permuted_calibration, "decomposed")
+            )
         scored_selection = pd.concat(scored_selection_pieces, ignore_index=True)
         scored_test = pd.concat(scored_test_pieces, ignore_index=True)
-        thresholds: dict[int, float] = {}
+        permuted_test = pd.concat(permuted_test_pieces, ignore_index=True)
+        continuation_refit = pd.concat(
+            [fit, inner_calibration, model_audit], ignore_index=True
+        )
+        continuation_model = fit_continuation_models(continuation_refit)
+        continuation_calibration = fit_continuation_calibration(
+            continuation_model, calibration
+        )
+        scored_selection = score_continuation(
+            scored_selection, continuation_model, continuation_calibration
+        )
+        scored_test = score_continuation(
+            scored_test, continuation_model, continuation_calibration
+        )
+        thresholds: dict[int, float] = {1: 0.0, -1: 0.0}
         frontiers: dict[str, list[dict[str, Any]]] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-            threshold, side_frontier = _choose_frequency_threshold(
+            _, side_frontier = _choose_frequency_threshold(
                 scored_selection.loc[scored_selection["side"].eq(side)],
                 fee,
                 fold["selection_start"],
                 fold["test_start"],
             )
-            thresholds[side] = threshold
             frontiers[side_name] = side_frontier
         _status(
             "policy_replay",
@@ -2442,6 +3539,25 @@ def walk_forward(
                 candidate_trades, fold["test_start"], fold["test_end"]
             ).tolist()
         trades, decisions = sequential_replay(scored_test, thresholds, fee.round_trip_bps)
+        negative_controls = negative_control_metrics(
+            scored_test,
+            fee,
+            fold["test_start"],
+            fold["test_end"],
+        )
+        permuted_trades, _ = sequential_replay(
+            permuted_test,
+            0.0,
+            fee.round_trip_bps,
+            record_decisions=False,
+        )
+        negative_controls["label_permutation"] = policy_metrics(
+            permuted_trades,
+            fold["test_start"],
+            fold["test_end"],
+            daily_bootstrap=False,
+            weekly_bootstrap=False,
+        )
         if not trades.empty:
             trade_pieces.append(trades)
         if not decisions.empty:
@@ -2464,6 +3580,10 @@ def walk_forward(
                     "LONG": champions[1],
                     "SHORT": champions[-1],
                 },
+                "value_champions": {
+                    "LONG": value_champions[1],
+                    "SHORT": value_champions[-1],
+                },
                 "selected_thresholds_bps": {
                     "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
                     "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
@@ -2472,12 +3592,20 @@ def walk_forward(
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
                 "test_metrics": metrics,
+                "negative_controls": negative_controls,
+                "continuation_value_audit": continuation_audit_metrics,
+                "economic_calibration": economic_calibration_buckets(scored_test),
+                "entry_rule": "Q_ENTER_LOG_UTILITY_GREATER_THAN_Q_WAIT_LOG_UTILITY",
+                "view_gating_audit": view_gating_audit(scored_test),
+                "plan_efficiency_audit": plan_audit,
+                "local_plan_variants_enabled": local_plan_variants_enabled,
                 "fold_experts": {
                     "fold_scope": library["fold_scope"],
                     "catalog_path": library["catalog_path"],
                     "candidates_evaluated": library["candidates_evaluated"],
                     "candidates_eligible": library["candidates_eligible"],
                     "terminal_prefilter_rejections": 0,
+                    "fit_crossfit": crossfit_diagnostics,
                 },
             }
         )
@@ -2586,38 +3714,65 @@ def fit_forward_bundle(
     fit = _period(matrix, None, calibration_start, purge_exit=True)
     calibration = _period(matrix, calibration_start, selection_start, purge_exit=True)
     selection = _period(matrix, selection_start, end, purge_exit=True)
-    library = fit_fold_expert_library(fit, "forward", resume=resume)
-    fit = apply_fold_expert_library(fit, library)
+    fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
+        fit,
+        "forward",
+        resume=resume,
+    )
     calibration = apply_fold_expert_library(calibration, library)
     selection = apply_fold_expert_library(selection, library)
+    local_plan_variants_enabled = sum(
+        bool(item.get("local_plan_variants_enabled")) for item in folds
+    ) > len(folds) / 2
+    if local_plan_variants_enabled:
+        calibration = label_local_plan_variants(calibration, fee)
+        selection = label_local_plan_variants(selection, fee)
     champions: dict[str, str] = {}
+    value_champions: dict[str, str] = {}
     heads: dict[int, dict[str, Any]] = {}
     calibrations: dict[int, dict[str, Any]] = {}
     thresholds: dict[int, float] = {}
     frontiers: dict[str, list[dict[str, Any]]] = {}
+    continuation_model = fit_continuation_models(fit)
+    continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
     for side, side_name in ((1, "LONG"), (-1, "SHORT")):
         observed = [str(item["champions"][side_name]) for item in folds]
         champion = (
             "xgboost_cuda" if observed.count("xgboost_cuda") > observed.count("ridge") else "ridge"
         )
         champions[side_name] = champion
+        observed_value_heads = [
+            str(item.get("value_champions", {}).get(side_name, "decomposed")) for item in folds
+        ]
+        value_champion = (
+            "direct"
+            if observed_value_heads.count("direct") > observed_value_heads.count("decomposed")
+            else "decomposed"
+        )
+        value_champions[side_name] = value_champion
         internal = "xgboost" if champion == "xgboost_cuda" else champion
         head = fit_probability_head(internal, fit.loc[fit["side"].eq(side)])
         calibrated = fit_calibration(head, calibration.loc[calibration["side"].eq(side)])
         scored_selection = score_actions(
-            selection.loc[selection["side"].eq(side)], head, calibrated
+            selection.loc[selection["side"].eq(side)], head, calibrated, value_champion
         )
-        threshold, frontier = _choose_frequency_threshold(
+        scored_selection = score_continuation(
+            scored_selection, continuation_model, continuation_calibration
+        )
+        _, frontier = _choose_frequency_threshold(
             scored_selection, fee, selection_start, end
         )
         heads[side] = head
         calibrations[side] = calibrated
-        thresholds[side] = threshold
+        thresholds[side] = 0.0
         frontiers[side_name] = frontier
     return {
         "champions": champions,
+        "value_champions": value_champions,
         "heads": heads,
         "calibrations": calibrations,
+        "continuation_models": continuation_model,
+        "continuation_calibration": continuation_calibration,
         "expert_library": library,
         "thresholds_bps": {
             "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
@@ -2627,19 +3782,27 @@ def fit_forward_bundle(
         "calibration_period": [calibration_start.isoformat(), selection_start.isoformat()],
         "policy_selection_period": [selection_start.isoformat(), end.isoformat()],
         "frequency_pnl_frontiers": frontiers,
+        "local_plan_variants_enabled": local_plan_variants_enabled,
         "fold_experts": {
             "fold_scope": library["fold_scope"],
             "catalog_path": library["catalog_path"],
             "candidates_evaluated": library["candidates_evaluated"],
             "candidates_eligible": library["candidates_eligible"],
             "terminal_prefilter_rejections": 0,
+            "fit_crossfit": crossfit_diagnostics,
         },
     }
 
 
 def _economic_action_set(matrix: pd.DataFrame) -> dict[str, Any]:
-    grouped = matrix.groupby("side")["net_bps"].agg(["count", "mean", "median"])
+    grouped = matrix.groupby("side").agg(
+        count=("net_bps", "count"),
+        mean_net_bps=("net_bps", "mean"),
+        median_net_bps=("net_bps", "median"),
+        mean_log_utility=("log_utility", "mean"),
+    )
     oracle = matrix.groupby("actual_entry_timestamp")["net_bps"].max()
+    utility_oracle = matrix.groupby("actual_entry_timestamp")["log_utility"].max()
     return {
         "parameterized_sides": grouped.reset_index().to_dict("records"),
         "unique_plan_ids": int(matrix["plan_id"].nunique()),
@@ -2652,8 +3815,9 @@ def _economic_action_set(matrix: pd.DataFrame) -> dict[str, Any]:
         "fixed_action_plans": False,
         "oracle_positive_fraction": float(oracle.gt(0).mean()),
         "oracle_mean_net_bps": float(oracle.mean()),
+        "oracle_mean_log_utility": float(utility_oracle.mean()),
         "oracle_is_not_tradable": True,
-        "has_positive_unconditional_action": bool(grouped["mean"].gt(0).any()),
+        "has_positive_unconditional_action": bool(grouped["mean_log_utility"].gt(0).any()),
     }
 
 
@@ -2676,25 +3840,128 @@ def _verdict(
     metrics: dict[str, Any],
     sides: dict[str, Any],
 ) -> str:
-    if not economics["has_positive_unconditional_action"] and economics["oracle_mean_net_bps"] <= 0:
+    if (
+        not economics["has_positive_unconditional_action"]
+        and float(
+            economics.get("oracle_mean_log_utility", economics.get("oracle_mean_net_bps", 0))
+        )
+        <= 0
+    ):
         return "NO_ECONOMIC_ACTION_SET"
     if not folds or sum(int(item["test_metrics"]["trades"]) for item in folds) == 0:
         return "NO_PREDICTABLE_EDGE"
     audited: list[float] = []
+
+    def collect_numbers(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                collect_numbers(nested)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            audited.append(float(value))
+
     for item in folds:
-        candidate_metrics = item.get("candidate_metrics", {})
-        for candidate in candidate_metrics.values():
-            if candidate and all(isinstance(value, (int, float)) for value in candidate.values()):
-                audited.extend(float(value) for value in candidate.values())
-            else:
-                for model in candidate.values():
-                    audited.extend(float(value) for value in model.values())
+        collect_numbers(item.get("candidate_metrics", {}))
     if not audited or not all(math.isfinite(float(value)) for value in audited):
         return "NO_CALIBRATED_POLICY"
     side_enabled = any(all(result["gates"].values()) for result in sides.values())
     if not all(policy_gates(metrics).values()) or not side_enabled:
         return "NO_STABLE_OOS_POLICY"
     return "RESEARCH_PAPER_READY"
+
+
+def write_stage_reports(
+    folds: list[dict[str, Any]], metrics: dict[str, Any], gates: dict[str, bool]
+) -> dict[str, str]:
+    common = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "protocol_hash": PROTOCOL_HASH,
+        "outer_folds": len(folds),
+    }
+    payloads = {
+        CRITIC_CROSSFIT_REPORT: common
+        | {
+            "folds": [
+                item.get("fold_experts", {}).get("fit_crossfit", {}) for item in folds
+            ],
+            "strictly_past_only": bool(folds)
+            and all(
+                item.get("fold_experts", {})
+                .get("fit_crossfit", {})
+                .get("strictly_past_only", False)
+                for item in folds
+            ),
+        },
+        EQUITY_OBJECTIVE_REPORT: common
+        | {
+            "target": "log1p(risk-sized portfolio return)",
+            "oos_metrics": metrics,
+            "accounting_units_separated": ["notional_bps", "portfolio_return", "log_growth"],
+        },
+        WAIT_VALUE_REPORT: common
+        | {
+            "entry_rule": "Q_ENTER_LOG_UTILITY_GREATER_THAN_Q_WAIT_LOG_UTILITY",
+            "folds": [item.get("continuation_value_audit", {}) for item in folds],
+            "wait_is_constant_zero": False,
+        },
+        PLAN_EFFICIENCY_REPORT: common
+        | {
+            "folds": [item.get("plan_efficiency_audit", {}) for item in folds],
+            "enabled_by_fold": [
+                bool(item.get("local_plan_variants_enabled")) for item in folds
+            ],
+        },
+        VALUE_HEADS_REPORT: common
+        | {
+            "candidate_metrics": [item.get("candidate_metrics", {}) for item in folds],
+            "economic_calibration": [item.get("economic_calibration", {}) for item in folds],
+        },
+        ENTRY_STABILITY_REPORT: common
+        | {
+            "entry_rule": "Q_ENTER_GT_Q_WAIT",
+            "threshold_tuning_enabled": False,
+            "diagnostic_frontiers": [
+                item.get("frequency_pnl_frontiers", {}) for item in folds
+            ],
+        },
+        INTRATRADE_REPORT: common
+        | {
+            "entry_policy_gate_passed": all(gates.values()),
+            "activated": False,
+            "reason": (
+                "ENTRY_POLICY_PREREQUISITE_NOT_PASSED"
+                if not all(gates.values())
+                else "COUNTERFACTUAL_INTRATRADE_STAGE_REQUIRES_SEPARATE_FUTURE_CONFIRMATION"
+            ),
+            "deterministic_management_retained": True,
+            "fake_learned_actions_forbidden": True,
+        },
+        VIEW_AUDIT_REPORT: common
+        | {"folds": [item.get("view_gating_audit", {}) for item in folds]},
+    }
+    for path, payload in payloads.items():
+        _atomic_json(path, payload)
+    return {path.stem: str(path) for path in payloads}
+
+
+def append_experiment_result(verdict: str, metrics: dict[str, Any]) -> None:
+    payload = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
+    experiments = payload.get("experiments", []) if isinstance(payload, dict) else payload
+    result_id = f"MUSCA-BTC-{PROTOCOL_HASH[:12]}:RESULT"
+    if any(item.get("event_id") == result_id for item in experiments):
+        return
+    experiments.append(
+        {
+            "event_id": result_id,
+            "experiment_id": f"MUSCA-BTC-{PROTOCOL_HASH[:12]}",
+            "event": "RESULT",
+            "protocol_hash": PROTOCOL_HASH,
+            "verdict": verdict,
+            "accepted": verdict == "RESEARCH_PAPER_READY",
+            "performance": metrics,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    _atomic_json(EXPERIMENT_LEDGER, {"experiments": experiments})
 
 
 def train(*, resume: bool = False) -> dict[str, Any]:
@@ -2713,6 +3980,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         gpu=_gpu_info(),
     )
     source_manifest = ensure_one_second_sources()
+    execution_contract = build_execution_contract(source_manifest, fee)
     matrix, partitions = build_state_actions(fee, resume=resume)
     if pd.to_datetime(matrix["actual_entry_timestamp"], utc=True).ge(FUTURE_HOLDOUT_START).any():
         raise ValueError("sealed future holdout was read")
@@ -2723,7 +3991,10 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         41,
         economic_action_set=economics,
     )
-    if not economics["has_positive_unconditional_action"] and economics["oracle_mean_net_bps"] <= 0:
+    if (
+        not economics["has_positive_unconditional_action"]
+        and economics["oracle_mean_log_utility"] <= 0
+    ):
         trades = matrix.iloc[:0].copy()
         decisions = pd.DataFrame()
         folds: list[dict[str, Any]] = []
@@ -2736,6 +4007,9 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     metrics = policy_metrics(trades, audit_start, audit_end)
     sides = _side_metrics(trades, audit_start, audit_end)
     verdict = _verdict(economics, folds, metrics, sides)
+    gates = policy_gates(metrics)
+    stage_reports = write_stage_reports(folds, metrics, gates)
+    append_experiment_result(verdict, metrics)
     forward_bundle: dict[str, Any] | None = None
     if folds:
         _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
@@ -2760,6 +4034,8 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     registry["total_registered_expert_attempts"] = (
         int(registry["registered_auto_moe_experts"]) + generated_expert_candidates
     )
+    ledger = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
+    registry["experiment_count"] = len(ledger.get("experiments", []))
     _atomic_json(REGISTRY, registry)
     multiple_comparison = {
         "global_protocols": int(registry["protocol_count_observed"]),
@@ -2799,14 +4075,17 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "state_action_rows": len(matrix),
             "future_holdout_rows_read": 0,
             "fold_expert_catalog_root": str(EXPERT_CATALOG_ROOT),
+            "execution_contract": str(EXECUTION_REPORT),
         },
+        "execution": execution_contract,
         "registry": registry,
         "frozen_auto_moe_report_sha256": frozen_hash_after,
         "economic_action_set": economics,
         "walk_forward": folds,
         "oos_metrics": metrics,
         "side_controls": sides,
-        "gates": policy_gates(metrics),
+        "gates": gates,
+        "stage_reports": stage_reports,
         "multiple_comparison": multiple_comparison,
         "forward_bundle": (
             None
@@ -2814,7 +4093,14 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             else {
                 name: value
                 for name, value in forward_bundle.items()
-                if name not in {"heads", "calibrations", "expert_library"}
+                if name
+                not in {
+                    "heads",
+                    "calibrations",
+                    "continuation_models",
+                    "continuation_calibration",
+                    "expert_library",
+                }
             }
         ),
         "verdict": verdict,
@@ -2840,6 +4126,12 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "models_by_side": None if forward_bundle is None else forward_bundle["heads"],
             "calibrations_by_side": (
                 None if forward_bundle is None else forward_bundle["calibrations"]
+            ),
+            "continuation_models": (
+                None if forward_bundle is None else forward_bundle["continuation_models"]
+            ),
+            "continuation_calibration": (
+                None if forward_bundle is None else forward_bundle["continuation_calibration"]
             ),
             "expert_library": (
                 None if forward_bundle is None else forward_bundle["expert_library"]

@@ -89,6 +89,7 @@ async def collect(*, duration_seconds: float | None = None) -> int:
     books: dict[int, dict[str, Any]] = {}
     flows: dict[int, tuple[Decimal, Decimal, int]] = {}
     aggregate_trades: dict[int, list[list[str]]] = {}
+    aggregate_trade_events: dict[int, list[dict[str, str | int]]] = {}
     latest_second = -1
     try:
         while (
@@ -99,6 +100,7 @@ async def collect(*, duration_seconds: float | None = None) -> int:
             received = datetime.now(UTC)
             kind, payload = normalize(json.loads(raw))
             current_second = int(payload["exchange_timestamp_ms"]) // 1000
+            payload["received_at"] = received.isoformat()
             latest_second = max(latest_second, current_second)
             if kind == "book":
                 books[current_second] = payload
@@ -117,6 +119,15 @@ async def collect(*, duration_seconds: float | None = None) -> int:
                 aggregate_trades.setdefault(current_second, []).append(
                     [str(payload["price"]), str(payload["quantity"]), side]
                 )
+                aggregate_trade_events.setdefault(current_second, []).append(
+                    {
+                        "exchange_timestamp_ms": int(payload["exchange_timestamp_ms"]),
+                        "received_at": str(payload["received_at"]),
+                        "price": str(payload["price"]),
+                        "quantity": str(payload["quantity"]),
+                        "aggressor": side,
+                    }
+                )
 
             for second in sorted(value for value in books if value <= latest_second - 2):
                 book = books.pop(second)
@@ -130,6 +141,18 @@ async def collect(*, duration_seconds: float | None = None) -> int:
                     "schema_version": 3,
                     "exchange_second": second,
                     "available_at": received.isoformat(),
+                    "book_received_at": str(book["received_at"]),
+                    "book_network_latency_ms": max(
+                        0,
+                        int(
+                            datetime.fromisoformat(str(book["received_at"])).timestamp() * 1000
+                            - int(book["exchange_timestamp_ms"])
+                        ),
+                    ),
+                    "feature_aggregation_delay_ms": max(
+                        0,
+                        int(received.timestamp() * 1000 - (second + 1) * 1000),
+                    ),
                     "last_update_id": book["last_update_id"],
                     "bids": bids,
                     "asks": asks,
@@ -141,6 +164,7 @@ async def collect(*, duration_seconds: float | None = None) -> int:
                     "sell_quote": str(sell_quote),
                     "trade_count": trades,
                     "aggregate_trades": aggregate_trades.pop(second, []),
+                    "aggregate_trade_events": aggregate_trade_events.pop(second, []),
                     "source": "binance-official-usdm-websocket-routed",
                 }
                 day = datetime.fromtimestamp(second, UTC)
@@ -154,6 +178,7 @@ async def collect(*, duration_seconds: float | None = None) -> int:
             for stale in [value for value in flows if value <= latest_second - 3]:
                 flows.pop(stale, None)
                 aggregate_trades.pop(stale, None)
+                aggregate_trade_events.pop(stale, None)
 
             if duration_seconds is not None:
                 elapsed = asyncio.get_running_loop().time() - started
