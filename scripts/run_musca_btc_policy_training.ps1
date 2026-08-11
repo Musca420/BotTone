@@ -1,5 +1,6 @@
 param(
-    [switch]$Fresh
+    [switch]$Fresh,
+    [switch]$PreflightOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,13 +13,15 @@ New-Item -ItemType Directory -Force -Path "data/logs", "data/reports" | Out-Null
 
 $arguments = @("-m", "adaptive_bot.cli", "musca-btc-policy-train")
 if (-not $Fresh) { $arguments += "--resume" }
+if ($PreflightOnly) { $arguments += "--preflight-only" }
 $worker = Start-Process -FilePath ".\.venv\Scripts\python.exe" `
     -ArgumentList $arguments -RedirectStandardOutput $stdout `
     -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
 
 while (-not $worker.HasExited) {
     Clear-Host
-    Write-Host "MUSCA BTC BINANCE - PARAMETERIZED MULTI-EXPERT POLICY"
+    $mode = if ($PreflightOnly) { "CAUSAL PREFLIGHT 2 FOLD" } else { "FULL POLICY TRAINING" }
+    Write-Host ("MUSCA BTC BINANCE - {0}" -f $mode)
     Write-Host (Get-Date -Format "dd/MM/yyyy HH:mm:ss")
     if (Test-Path $status) {
         try {
