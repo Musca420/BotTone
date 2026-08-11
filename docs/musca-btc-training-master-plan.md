@@ -6,7 +6,7 @@ Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `a92e32434df575b4b88048858c77fe0b585c976b4083d4bf95632933f4040722`.
+Protocollo challenger corrente: `72a6e5669c77783ff6fe0f8358589f6b171b4eed156cd79b07c945431455f394`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -322,6 +322,11 @@ L'audit ha localizzato cinque incongruenze nuove:
   avrebbe invalidato il primo controller abilitato.
 - **E-38 - controlli dopo DISABLED.** Random, shifted e side-only venivano calcolati dopo aver
   sostituito ogni utility del lato disabilitato con -1; risultavano quindi FLAT per costruzione.
+- **E-39 - dipendenza prematura da `p_target`.** L'argmax condiviso usava `p_target` come tie-break,
+  ma l'audit del ranker globale avviene correttamente sulla matrice full-feedback prima delle teste
+  TARGET/STOP/TIMEOUT. Il preflight `a92e3243...` e quindi terminato con `KeyError`, senza produrre
+  alcun risultato economico. Il tie-break usa ora soltanto score globale ed `expert_id`
+  deterministico, identici in audit, calibrazione e replay.
 
 Il protocollo successivo tratta correttamente il dataset come full-feedback policy learning. Un
 Ridge globale sull'utility è il champion; un `XGBRanker` CUDA `rank:pairwise`, raggruppato per
@@ -335,7 +340,8 @@ negativi vengono eseguiti prima di disabilitare i controller.
 
 Questa scelta segue la formulazione full-feedback come cost-sensitive learning e il ranking per
 gruppi documentato da XGBoost; non introduce PPO/SAC, nuove librerie o feedback inventato. Il nuovo
-protocollo è `a92e32434df575b4b88048858c77fe0b585c976b4083d4bf95632933f4040722`;
+protocollo, dopo la correzione E-39, è
+`72a6e5669c77783ff6fe0f8358589f6b171b4eed156cd79b07c945431455f394`;
 l'hash dei label resta `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli

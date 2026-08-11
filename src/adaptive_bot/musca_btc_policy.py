@@ -267,6 +267,7 @@ PROTOCOL = {
             "the same score used for argmax is mapped to realized EV and log utility on a "
             "strictly later winner-only window"
         ),
+        "tie_break": "expert_id ascending; no probability-head input",
     },
     "fold_local_experts": {
         "generator": ("plan-aware XGBRFRegressor CUDA critic trained on exact managed net_bps"),
@@ -3235,14 +3236,13 @@ def _selected_action_positions(
             "position": np.arange(len(rows), dtype=np.int64),
             "timestamp": pd.to_datetime(rows["actual_entry_timestamp"], utc=True).to_numpy(),
             "value": rows[value_column].to_numpy(float),
-            "p_target": rows["p_target"].to_numpy(float),
             "expert_id": rows["expert_id"].astype(str).to_numpy(),
         }
     )
     return (
         ranking.sort_values(
-            ["timestamp", "value", "p_target", "expert_id"],
-            ascending=[True, False, False, True],
+            ["timestamp", "value", "expert_id"],
+            ascending=[True, False, True],
             kind="stable",
         )
         .drop_duplicates("timestamp", keep="first")["position"]
