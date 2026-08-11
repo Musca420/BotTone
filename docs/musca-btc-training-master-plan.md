@@ -277,6 +277,19 @@ l'hash dei label e `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be0
 I test mirati verificano il bucket senza trade, il timeout successivo, il versionamento e la parita
 CPU/GPU. Il fallimento precedente e un errore di execution, non un risultato economico.
 
+## E-33 - cross-fit locale conservato come copie wide
+
+Il primo preflight E-32 ha completato 16/16 partizioni e superato marzo, ma nel fold 1-local
+conservava in `pieces` ogni blocco trasformato con tutte le colonne, insieme a `ordered`, history e
+modelli. Il working set e salito a 23,68 GB con meno di 2 GB fisici liberi. Il worker e stato fermato
+prima dell'OOM; nessun risultato economico e stato prodotto e tutte le partizioni atomiche restano
+riutilizzabili.
+
+Il cross-fit conserva ora durante i blocchi soltanto chiavi e feature del critic, libera history e
+library a ogni blocco, scrive il cache encoded e fa una sola merge finale. Il fit del catalogo finale
+avviene prima della merge. Split, righe, target, modelli e protocol hash sono invariati; cambia
+soltanto il picco di memoria. Un nuovo preflight riparte dalle 16 partizioni gia verificate.
+
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
 Una modifica parziale non conta come completamento.
@@ -678,6 +691,7 @@ lo duplica riga per riga e non lo sostituisce.
 - continuare ad aprire nuovo rischio quando il budget di drawdown residuo è inferiore al worst risk;
 - chiamare `HOLD/REDUCE/CLOSE` azioni apprese quando sono soltanto esecuzioni del piano;
 - aggiungere expert, viste, seed, Optuna trial o librerie prima dell'ablation che ne dimostra il bisogno;
+- conservare copie wide di ogni blocco cross-fitted invece delle sole feature encoded;
 - usare consenso tra expert come sinonimo di accuratezza senza il test disaccordo→errore OOS;
 - creare dati L2, depth, spread, maker fill, OI o funding mancanti tramite simulazione o zero-fill;
 - riaprire FT-000–FT-036 cambiando soltanto soglie, target o mesi;

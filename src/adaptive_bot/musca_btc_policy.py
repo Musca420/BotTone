@@ -2660,9 +2660,9 @@ def cross_fit_fold_expert_features(
         "expert_tree_index",
         "expert_leaf_id",
     ]
-    final_library = fit_fold_expert_library(ordered, fold_number, resume=resume)
     if resume and cache.exists():
         encoded = pd.read_parquet(cache)
+        final_library = fit_fold_expert_library(ordered, fold_number, resume=resume)
         transformed = ordered.merge(encoded, on=keys, how="inner", validate="one_to_one")
         if (
             transformed.empty
@@ -2697,7 +2697,7 @@ def cross_fit_fold_expert_features(
                 resume=resume,
             )
             transformed = apply_fold_expert_library(held_out, library)
-            pieces.append(transformed)
+            pieces.append(transformed.loc[:, encoded_columns].copy())
             _status(
                 "critic_crossfit",
                 f"fold {fold_number} block {block_number}: past-only critic encoding",
@@ -2708,16 +2708,23 @@ def cross_fit_fold_expert_features(
                 held_out_rows=len(held_out),
                 strictly_past_only=True,
             )
+            del history, held_out, transformed, library
+            gc.collect()
         block_start = block_end
     if not pieces:
         raise ValueError("insufficient chronology for critic cross-fitting")
-    transformed = pd.concat(pieces, ignore_index=True).sort_values(
+    encoded = pd.concat(pieces, ignore_index=True).sort_values(
         "actual_entry_timestamp", kind="stable"
     )
+    del pieces
     EXPERT_CATALOG_ROOT.mkdir(parents=True, exist_ok=True)
     temporary = cache.with_suffix(f".parquet.{os.getpid()}.tmp")
-    transformed.loc[:, encoded_columns].to_parquet(temporary, index=False)
+    encoded.to_parquet(temporary, index=False)
     _atomic_replace(temporary, cache)
+    final_library = fit_fold_expert_library(ordered, fold_number, resume=resume)
+    transformed = ordered.merge(encoded, on=keys, how="inner", validate="one_to_one")
+    del encoded
+    gc.collect()
     return (
         transformed,
         final_library,
