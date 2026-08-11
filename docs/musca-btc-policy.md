@@ -1,9 +1,28 @@
 # Musca BTC Binance — canonical policy challenger
 
-## Eight-point correction (canonical, no new version)
+## Correzione dello spazio d'azione — 2026-08-11
 
-This challenger now implements the complete structural correction requested for the final Binance
-BTC run:
+I dieci piani ereditati (`LONG/SHORT x 1m/5m/15m/1h/6h`) non sono piu' l'universo
+operativo. I cinque orizzonti rimangono soltanto ancore di previsione per gli esperti OOF.
+
+Per ogni stato e lato, un gate robusto combina le previsioni di tutti gli esperti per vista e
+orizzonte. Da quella combinazione genera un piano parametrizzato con:
+
+- durata dinamica tra 60 e 21.600 secondi;
+- target 1 e target 2 dinamici;
+- quota dinamica da chiudere al primo target;
+- stop iniziale e trailing non allargabile;
+- ID deterministico del piano e contributori osservabili.
+
+Il critic contestuale viene addestrato dopo che il piano e' stato simulato con il percorso a un
+secondo. Le foglie del critic non definiscono il piano e hanno un ID separato. La matrice precedente
+resta soltanto un controllo storico congelato. La motivazione, le fonti primarie e i criteri di
+falsificazione sono in `docs/musca-btc-action-space-audit.md`.
+
+## Correzione precedente (contesto storico, spazio d'azione sostituito)
+
+I punti seguenti descrivono il run precedente e restano nel registro anti-ripetizione. Non
+descrivono piu' il generatore di piani attivo:
 
 1. every outer-fold fit generates thousands of context experts from all XGBRF tree leaves for
    each LONG/SHORT and managed horizon; no terminal-return economics filter is used;

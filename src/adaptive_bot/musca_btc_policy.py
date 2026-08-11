@@ -55,6 +55,7 @@ HISTORICAL_END = pd.Timestamp("2026-08-01T00:00:00Z")
 FUTURE_HOLDOUT_START = pd.Timestamp("2026-08-10T00:00:00Z")
 ONE_SECOND_MONTHS = tuple(str(value) for value in pd.period_range("2025-04", "2026-07", freq="M"))
 MAXIMUM_HORIZON_SECONDS = max(base.HORIZONS)
+PREDICTION_HORIZONS_SECONDS = tuple(int(value) for value in base.HORIZONS)
 OUTCOME_TARGET = 0
 OUTCOME_STOP = 1
 OUTCOME_TIMEOUT = 2
@@ -77,8 +78,6 @@ MINIMUM_EXPERT_OPPORTUNITIES = 100
 MINIMUM_OOS_TRADES = 300
 MINIMUM_SIDE_OOS_TRADES = 100
 EXPERT_CATALOG_ROOT = ROOT / "fold_experts"
-LEGACY_LABEL_PROTOCOL_HASHES = {"a20eb033eb076bfd9d0019e0bbb3e3956037b9ffdd28f618400f991494fac258"}
-
 ALPHA_FEATURES = (
     *base.GATING_CONTEXT,
     "side",
@@ -90,6 +89,12 @@ ALPHA_FEATURES = (
     "predicted_favorable_q50_bps",
     "predicted_favorable_q75_bps",
     "predicted_adverse_q75_bps",
+    "gate_expected_gross_bps",
+    "gate_disagreement_bps",
+    "gate_entropy",
+    "gate_effective_experts",
+    "gate_top_weight",
+    "first_exit_fraction",
 )
 FOLD_EXPERT_FEATURES = (
     "managed_expert_mean_bps",
@@ -117,9 +122,11 @@ LABEL_PROTOCOL = {
     "venue": VENUE,
     "parent_protocol_hash": base.PROTOCOL_HASH,
     "path_resolution_seconds": 1,
+    "action_space": "parameterized plans composed from sparse weighted expert predictions",
     "sides": ["LONG", "SHORT"],
-    "horizons_seconds": list(base.HORIZONS),
-    "management": "TP1/TP2/initial stop/non-widening trailing/timeout",
+    "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
+    "fixed_action_plans": False,
+    "management": "dynamic horizon/TP1/TP2/partial exit/initial stop/non-widening trailing",
     "same_second": "stop wins",
     "entry": "first observed aggregate trade after decision",
     "terminal_return_prefilter": False,
@@ -158,9 +165,19 @@ PROTOCOL = {
     },
     "state_action": {
         "label_protocol_hash": LABEL_PROTOCOL_HASH,
-        "sides": ["LONG", "SHORT"],
-        "horizons_seconds": list(base.HORIZONS),
-        "management": "same TP1/TP2/stop/non-widening trailing path for labels and replay",
+        "entry_types": ["WAIT", "ENTER_LONG", "ENTER_SHORT"],
+        "position_types": ["HOLD", "REDUCE", "CLOSE", "TIGHTEN_STOP", "UPDATE_TRAIL"],
+        "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
+        "fixed_action_plans": False,
+        "plan_parameters": [
+            "horizon_seconds",
+            "target_1_bps",
+            "target_2_bps",
+            "first_exit_fraction",
+            "stop_bps",
+            "trailing_bps",
+        ],
+        "management": "same parameterized management path for labels and replay",
         "same_second": "stop wins",
         "gpu_cpu_tolerance_bps": GPU_CPU_TOLERANCE_BPS,
         "terminal_return_prefilter": False,
@@ -175,15 +192,30 @@ PROTOCOL = {
         "challenger_rule": "strictly better Brier, EV calibration, EV MAE and decision regret",
     },
     "fold_local_experts": {
-        "generator": "XGBRFRegressor CUDA trained on exact managed net_bps",
-        "candidate": "every tree leaf for LONG/SHORT and every horizon",
+        "generator": "XGBRFRegressor CUDA critic context trained on exact managed net_bps",
+        "candidate": "every context leaf by side after multi-expert plan composition",
         "terminal_prefilter": False,
         "minimum_support_after_managed_evaluation": MINIMUM_EXPERT_OPPORTUNITIES,
-        "compression": "active-leaf managed statistics plus deterministic winning expert",
+        "compression": "active-leaf managed statistics; leaves do not define the plan",
         "training_scope": "outer-fold fit only",
     },
+    "plan_generator": {
+        "experts": "OOF heterogeneous horizon/view return and path-quantile predictors",
+        "gating": "robust sparse weights across views and horizons",
+        "plans_per_state": "data-driven LONG/SHORT parameterized proposals; not ten templates",
+        "objective": "expected gross movement, disagreement, path quantiles and Binance 1x cost",
+    },
     "controller": {
-        "actions": ["WAIT", "ENTER_LONG", "ENTER_SHORT", "HOLD", "CLOSE", "TIGHTEN_STOP"],
+        "actions": [
+            "WAIT",
+            "ENTER_LONG",
+            "ENTER_SHORT",
+            "HOLD",
+            "REDUCE",
+            "CLOSE",
+            "TIGHTEN_STOP",
+            "UPDATE_TRAIL",
+        ],
         "maximum_positions": 1,
         "forced_utc_close": False,
         "risk_per_trade": RISK_PER_TRADE,
@@ -438,9 +470,35 @@ def expert_id(side: int, horizon_seconds: int) -> str:
     return f"btc-{'long' if side > 0 else 'short'}-{horizon_seconds}s-{digest}"
 
 
-def fold_expert_id(
-    fold_scope: str, side: int, horizon_seconds: int, tree: int, leaf: int
+def parameterized_plan_id(
+    side: int,
+    horizon_seconds: int,
+    target_1_bps: float,
+    target_2_bps: float,
+    stop_bps: float,
+    trailing_bps: float,
+    first_exit_fraction: float,
+    contributors: str,
 ) -> str:
+    """Identify a generated plan by its executable parameters and expert mixture."""
+    identity = {
+        "label_protocol_hash": LABEL_PROTOCOL_HASH,
+        "side": int(side),
+        "horizon_seconds": int(horizon_seconds),
+        "target_1_bps": round(float(target_1_bps), 4),
+        "target_2_bps": round(float(target_2_bps), 4),
+        "stop_bps": round(float(stop_bps), 4),
+        "trailing_bps": round(float(trailing_bps), 4),
+        "first_exit_fraction": round(float(first_exit_fraction), 4),
+        "contributors": contributors,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:20]
+    return f"plan-{'long' if side > 0 else 'short'}-{digest}"
+
+
+def fold_expert_id(fold_scope: str, side: int, horizon_seconds: int, tree: int, leaf: int) -> str:
     """Identify a fold-local expert without using any OOS outcome."""
     identity = {
         "protocol_hash": PROTOCOL_HASH,
@@ -587,11 +645,11 @@ def _parent_columns() -> list[str]:
                 "decision_position",
                 "side",
                 "horizon_seconds",
-                "target_1_bps",
-                "target_2_bps",
-                "stop_bps",
-                "trailing_bps",
-                *ALPHA_FEATURES,
+                *base.EXPERT_COLUMNS,
+                *base.GATING_CONTEXT,
+                "predicted_favorable_q50_bps",
+                "predicted_favorable_q75_bps",
+                "predicted_adverse_q75_bps",
             )
         )
     )
@@ -621,6 +679,150 @@ def _load_parent_actions(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame
     return output.sort_values(["entry_timestamp", "side", "horizon_seconds"]).reset_index(drop=True)
 
 
+def _softmax_rows(values: np.ndarray) -> np.ndarray:
+    shifted = values - np.max(values, axis=1, keepdims=True)
+    exponential = np.exp(np.clip(shifted, -60.0, 0.0))
+    return np.asarray(
+        exponential / np.maximum(exponential.sum(axis=1, keepdims=True), 1e-12),
+        dtype=float,
+    )
+
+
+def compose_parameterized_plans(
+    inherited: pd.DataFrame, round_trip_cost_bps: float
+) -> pd.DataFrame:
+    """Compose executable plans from multiple OOF experts instead of inherited templates."""
+    if inherited.empty:
+        return inherited.copy()
+    keys = ["available_at", "entry_timestamp", "decision_position", "side"]
+    ordered = inherited.sort_values([*keys, "horizon_seconds"], kind="stable").reset_index(
+        drop=True
+    )
+    horizons = np.asarray(PREDICTION_HORIZONS_SECONDS, dtype=int)
+    counts = ordered.groupby(keys, sort=False, dropna=False).size().to_numpy()
+    if not np.all(counts == len(horizons)):
+        raise ValueError("inherited expert predictions do not cover every horizon anchor")
+    observed_horizons = ordered["horizon_seconds"].to_numpy(int).reshape(-1, len(horizons))
+    if not np.all(observed_horizons == horizons[None, :]):
+        raise ValueError("inherited expert horizon anchors are not deterministic")
+
+    representatives = ordered.iloc[:: len(horizons)].reset_index(drop=True).copy()
+    views = tuple(base.VIEWS)
+    expert_values = np.stack(
+        [
+            representatives.loc[:, [f"expert_{horizon}s_{view}" for view in views]].to_numpy(float)
+            for horizon in horizons
+        ],
+        axis=1,
+    )
+    center = np.median(expert_values, axis=2, keepdims=True)
+    absolute_deviation = np.abs(expert_values - center)
+    view_scale = np.maximum(np.median(absolute_deviation, axis=2, keepdims=True), 2.0)
+    view_weights = _softmax_rows(
+        (-absolute_deviation / view_scale).reshape(-1, len(views))
+    ).reshape(expert_values.shape)
+    horizon_consensus = np.sum(view_weights * expert_values, axis=2)
+    horizon_disagreement = np.sqrt(
+        np.sum(view_weights * (expert_values - horizon_consensus[:, :, None]) ** 2, axis=2)
+    )
+
+    robust_gross = horizon_consensus - 0.5 * horizon_disagreement
+    temperature = np.maximum(
+        np.median(np.abs(robust_gross), axis=1, keepdims=True),
+        max(2.0, float(round_trip_cost_bps)),
+    )
+    horizon_weights = _softmax_rows(robust_gross / temperature)
+    joint_weights = horizon_weights[:, :, None] * view_weights
+    flat_joint = joint_weights.reshape(len(representatives), -1)
+    gate_entropy = -np.sum(flat_joint * np.log(np.maximum(flat_joint, 1e-12)), axis=1)
+    maximum_entropy = math.log(flat_joint.shape[1])
+
+    q50 = ordered["predicted_favorable_q50_bps"].to_numpy(float).reshape(-1, len(horizons))
+    q75 = ordered["predicted_favorable_q75_bps"].to_numpy(float).reshape(-1, len(horizons))
+    adverse = ordered["predicted_adverse_q75_bps"].to_numpy(float).reshape(-1, len(horizons))
+    dynamic_horizon = np.rint(
+        np.exp(np.sum(horizon_weights * np.log(horizons.astype(float))[None, :], axis=1))
+    ).astype(int)
+    dynamic_horizon = np.clip(dynamic_horizon, horizons.min(), horizons.max())
+    target_1 = np.maximum(np.sum(horizon_weights * q50, axis=1), float(round_trip_cost_bps) + 1.0)
+    target_2 = np.maximum(np.sum(horizon_weights * q75, axis=1), target_1 + 1.0)
+    stop = np.clip(np.sum(horizon_weights * adverse, axis=1), 3.0, base.MAX_STOP_BPS)
+    volatility = np.clip(representatives["volatility_percentile"].to_numpy(float), 0.0, 1.0)
+    trailing = np.clip(stop * (0.65 + 0.35 * volatility), 3.0, base.MAX_STOP_BPS)
+    first_exit_fraction = np.clip(
+        0.35 + 0.30 * gate_entropy / maximum_entropy,
+        0.35,
+        0.65,
+    )
+
+    flat_names = [f"{horizon}s:{view}" for horizon in horizons for view in views]
+    contributor_rows: list[str] = []
+    for weights in flat_joint:
+        top = np.argsort(weights, kind="stable")[-3:][::-1]
+        contributor_rows.append(
+            ",".join(f"{flat_names[index]}={weights[index]:.6f}" for index in top)
+        )
+
+    output = representatives.loc[:, [*keys, *base.GATING_CONTEXT]].copy()
+    output["side"] = output["side"].astype(int)
+    output["horizon_seconds"] = dynamic_horizon
+    output["horizon_fraction"] = dynamic_horizon / float(MAXIMUM_HORIZON_SECONDS)
+    output["target_1_bps"] = np.clip(target_1, 1.0, base.MAX_TARGET_BPS - 1.0)
+    output["target_2_bps"] = np.clip(
+        np.maximum(target_2, output["target_1_bps"].to_numpy(float) + 1.0),
+        2.0,
+        base.MAX_TARGET_BPS,
+    )
+    output["stop_bps"] = stop
+    output["trailing_bps"] = np.minimum(trailing, stop)
+    output["first_exit_fraction"] = first_exit_fraction
+    output["predicted_favorable_q50_bps"] = np.sum(horizon_weights * q50, axis=1)
+    output["predicted_favorable_q75_bps"] = np.sum(horizon_weights * q75, axis=1)
+    output["predicted_adverse_q75_bps"] = np.sum(horizon_weights * adverse, axis=1)
+    output["gate_expected_gross_bps"] = np.sum(horizon_weights * horizon_consensus, axis=1)
+    output["gate_disagreement_bps"] = np.sum(horizon_weights * horizon_disagreement, axis=1)
+    output["gate_entropy"] = gate_entropy
+    output["gate_effective_experts"] = np.exp(gate_entropy)
+    output["gate_top_weight"] = flat_joint.max(axis=1)
+    output["plan_contributors"] = contributor_rows
+    output["plan_id"] = [
+        parameterized_plan_id(
+            int(side),
+            int(horizon),
+            float(first_target),
+            float(second_target),
+            float(initial_stop),
+            float(trail),
+            float(exit_fraction),
+            contributors,
+        )
+        for (
+            side,
+            horizon,
+            first_target,
+            second_target,
+            initial_stop,
+            trail,
+            exit_fraction,
+            contributors,
+        ) in zip(
+            output["side"],
+            output["horizon_seconds"],
+            output["target_1_bps"],
+            output["target_2_bps"],
+            output["stop_bps"],
+            output["trailing_bps"],
+            output["first_exit_fraction"],
+            output["plan_contributors"],
+            strict=True,
+        )
+    ]
+    output["expert_id"] = output["plan_id"]
+    if not np.isfinite(output.loc[:, ALPHA_FEATURES].to_numpy(float)).all():
+        raise ValueError("parameterized plan features must be finite")
+    return output.sort_values(["entry_timestamp", "side"], kind="stable").reset_index(drop=True)
+
+
 def _first_observed_positions(
     source: pd.DataFrame, requested_entry: pd.Series
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -648,17 +850,23 @@ def _simulate_cpu(
     source: pd.DataFrame,
     positions: np.ndarray,
     side: int,
-    horizon: int,
+    horizon: int | np.ndarray,
     target_1: np.ndarray,
     target_2: np.ndarray,
     stop: np.ndarray,
     trailing: np.ndarray,
+    first_exit_fraction: np.ndarray,
 ) -> dict[str, np.ndarray]:
     opens = source["open"].to_numpy(float)
     highs = source["high"].to_numpy(float)
     lows = source["low"].to_numpy(float)
     closes = source["close"].to_numpy(float)
     count = len(positions)
+    horizons = (
+        np.full(count, int(horizon), dtype=np.int32)
+        if np.ndim(horizon) == 0
+        else np.asarray(horizon, dtype=np.int32)
+    )
     gross = np.empty(count, dtype=float)
     exit_seconds = np.empty(count, dtype=np.int32)
     management = np.empty(count, dtype=np.int8)
@@ -668,6 +876,9 @@ def _simulate_cpu(
     mae = np.empty(count, dtype=float)
     for row in range(count):
         position = int(positions[row])
+        row_horizon = int(horizons[row])
+        filled_fraction = float(first_exit_fraction[row])
+        remaining_fraction = 1.0 - filled_fraction
         entry = opens[position]
         stop_level = -float(stop[row])
         peak = 0.0
@@ -677,9 +888,9 @@ def _simulate_cpu(
         maximum = -math.inf
         adverse_maximum = -math.inf
         result = 0.0
-        result_seconds = horizon
+        result_seconds = row_horizon
         result_code = OUTCOME_TIMEOUT
-        for offset in range(horizon):
+        for offset in range(row_horizon):
             index = position + offset
             if index >= len(source):
                 raise ValueError("incomplete one-second future path")
@@ -704,7 +915,7 @@ def _simulate_cpu(
             if done:
                 continue
             if open_return <= stop_level + 1e-9:
-                result = half + 0.5 * open_return if first_filled else open_return
+                result = half + remaining_fraction * open_return if first_filled else open_return
                 result_seconds = elapsed
                 result_code = 4
                 done = True
@@ -717,23 +928,23 @@ def _simulate_cpu(
                 continue
             if not first_filled and favorable >= target_1[row] - 1e-9:
                 if favorable >= target_2[row] - 1e-9:
-                    result = 0.5 * target_1[row] + 0.5 * target_2[row]
+                    result = filled_fraction * target_1[row] + remaining_fraction * target_2[row]
                     result_seconds = elapsed
                     result_code = 3
                     done = True
                     continue
                 first_filled = True
-                half = 0.5 * target_1[row]
+                half = filled_fraction * target_1[row]
                 stop_level = max(stop_level, 0.0)
             elif first_filled:
                 if -adverse <= stop_level + 1e-9:
-                    result = half + 0.5 * stop_level
+                    result = half + remaining_fraction * stop_level
                     result_seconds = elapsed
                     result_code = 5
                     done = True
                     continue
                 if favorable >= target_2[row] - 1e-9:
-                    result = half + 0.5 * target_2[row]
+                    result = half + remaining_fraction * target_2[row]
                     result_seconds = elapsed
                     result_code = 3
                     done = True
@@ -741,8 +952,8 @@ def _simulate_cpu(
                 peak = max(peak, favorable)
                 stop_level = max(stop_level, peak - trailing[row])
         if not done:
-            terminal = side * (closes[position + horizon - 1] / entry - 1) * 10_000
-            result = half + 0.5 * terminal if first_filled else terminal
+            terminal = side * (closes[position + row_horizon - 1] / entry - 1) * 10_000
+            result = half + remaining_fraction * terminal if first_filled else terminal
         gross[row] = result
         exit_seconds[row] = result_seconds
         management[row] = result_code
@@ -778,13 +989,17 @@ def _gpu_kernel() -> Any:
         r"""
         extern "C" __global__ void managed_path(
             const double* opens, const double* highs, const double* lows, const double* closes,
-            const long long* positions, const double* target1, const double* target2,
-            const double* stops, const double* trails, const int side, const int horizon,
+            const long long* positions, const int* horizons, const double* target1,
+            const double* target2, const double* stops, const double* trails,
+            const double* first_exit_fraction, const int side,
             const long long source_size, const long long count, double* gross, int* exit_seconds,
             signed char* management, int* first_target, int* first_stop, double* mfe, double* mae) {
           long long row = (long long)blockDim.x * blockIdx.x + threadIdx.x;
           if (row >= count) return;
           long long position = positions[row];
+          int horizon = horizons[row];
+          double filled_fraction = first_exit_fraction[row];
+          double remaining_fraction = 1.0 - filled_fraction;
           double entry = opens[position];
           double stop_level = -stops[row], peak = 0.0, half = 0.0;
           double maximum = -1.0e300, adverse_maximum = -1.0e300, result = 0.0;
@@ -805,7 +1020,7 @@ def _gpu_kernel() -> Any:
             if (stop_time < 0 && -adverse <= -stops[row] + 1.0e-9) stop_time = elapsed;
             if (done) continue;
             if (open_return <= stop_level + 1.0e-9) {
-              result = first_filled ? half + 0.5 * open_return : open_return;
+              result = first_filled ? half + remaining_fraction * open_return : open_return;
               result_seconds = elapsed; result_code = 4; done = 1; continue;
             }
             if (!first_filled && -adverse <= stop_level + 1.0e-9) {
@@ -813,17 +1028,18 @@ def _gpu_kernel() -> Any:
             }
             if (!first_filled && favorable >= target1[row] - 1.0e-9) {
               if (favorable >= target2[row] - 1.0e-9) {
-                result = 0.5 * target1[row] + 0.5 * target2[row];
+                result = filled_fraction * target1[row] + remaining_fraction * target2[row];
                 result_seconds = elapsed; result_code = 3; done = 1; continue;
               }
-              first_filled = 1; half = 0.5 * target1[row]; stop_level = fmax(stop_level, 0.0);
+              first_filled = 1; half = filled_fraction * target1[row];
+              stop_level = fmax(stop_level, 0.0);
             } else if (first_filled) {
               if (-adverse <= stop_level + 1.0e-9) {
-                result = half + 0.5 * stop_level;
+                result = half + remaining_fraction * stop_level;
                 result_seconds = elapsed; result_code = 5; done = 1; continue;
               }
               if (favorable >= target2[row] - 1.0e-9) {
-                result = half + 0.5 * target2[row];
+                result = half + remaining_fraction * target2[row];
                 result_seconds = elapsed; result_code = 3; done = 1; continue;
               }
               peak = fmax(peak, favorable);
@@ -832,7 +1048,7 @@ def _gpu_kernel() -> Any:
           }
           if (!done) {
             double terminal = side * (closes[position + horizon - 1] / entry - 1.0) * 10000.0;
-            result = first_filled ? half + 0.5 * terminal : terminal;
+            result = first_filled ? half + remaining_fraction * terminal : terminal;
           }
           gross[row] = result; exit_seconds[row] = result_seconds;
           management[row] = (signed char)result_code; first_target[row] = target_time;
@@ -848,11 +1064,12 @@ def _simulate_gpu(
     source: pd.DataFrame,
     positions: np.ndarray,
     side: int,
-    horizon: int,
+    horizon: int | np.ndarray,
     target_1: np.ndarray,
     target_2: np.ndarray,
     stop: np.ndarray,
     trailing: np.ndarray,
+    first_exit_fraction: np.ndarray,
 ) -> dict[str, np.ndarray]:
     import cupy as cp
 
@@ -861,8 +1078,15 @@ def _simulate_gpu(
         cp.asarray(source[name].to_numpy(np.float64)) for name in ("open", "high", "low", "close")
     ]
     gpu_positions = cp.asarray(positions, dtype=cp.int64)
+    horizons = (
+        np.full(count, int(horizon), dtype=np.int32)
+        if np.ndim(horizon) == 0
+        else np.asarray(horizon, dtype=np.int32)
+    )
+    gpu_horizons = cp.asarray(horizons, dtype=cp.int32)
     gpu_parameters = [
-        cp.asarray(values, dtype=cp.float64) for values in (target_1, target_2, stop, trailing)
+        cp.asarray(values, dtype=cp.float64)
+        for values in (target_1, target_2, stop, trailing, first_exit_fraction)
     ]
     gross = cp.empty(count, dtype=cp.float64)
     exit_seconds = cp.empty(count, dtype=cp.int32)
@@ -878,9 +1102,9 @@ def _simulate_gpu(
         (
             *device_values,
             gpu_positions,
+            gpu_horizons,
             *gpu_parameters,
             np.int32(side),
-            np.int32(horizon),
             np.int64(len(source)),
             np.int64(count),
             gross,
@@ -916,27 +1140,63 @@ def simulate_management(
     source: pd.DataFrame,
     positions: np.ndarray,
     side: int,
-    horizon: int,
+    horizon: int | np.ndarray,
     target_1: np.ndarray,
     target_2: np.ndarray,
     stop: np.ndarray,
     trailing: np.ndarray,
+    first_exit_fraction: np.ndarray | None = None,
     *,
     backend: str = "auto",
 ) -> dict[str, np.ndarray]:
     if backend not in {"auto", "cpu", "cuda"}:
         raise ValueError(f"unknown path backend: {backend}")
-    if np.any(np.asarray(positions) + horizon > len(source)):
+    count = len(positions)
+    horizons = (
+        np.full(count, int(horizon), dtype=np.int32)
+        if np.ndim(horizon) == 0
+        else np.asarray(horizon, dtype=np.int32)
+    )
+    fractions = (
+        np.full(count, 0.5, dtype=float)
+        if first_exit_fraction is None
+        else np.asarray(first_exit_fraction, dtype=float)
+    )
+    if len(horizons) != count or len(fractions) != count:
+        raise ValueError("management parameters must match position count")
+    if np.any(horizons <= 0):
+        raise ValueError("management horizon must be positive")
+    if np.any((fractions <= 0) | (fractions >= 1)):
+        raise ValueError("first exit fraction must be strictly between zero and one")
+    if np.any(np.asarray(positions) + horizons > len(source)):
         raise ValueError("incomplete path for requested horizon")
     if backend != "cpu":
         try:
             return _simulate_gpu(
-                source, positions, side, horizon, target_1, target_2, stop, trailing
+                source,
+                positions,
+                side,
+                horizons,
+                target_1,
+                target_2,
+                stop,
+                trailing,
+                fractions,
             )
         except (ImportError, RuntimeError):
             if backend == "cuda":
                 raise
-    return _simulate_cpu(source, positions, side, horizon, target_1, target_2, stop, trailing)
+    return _simulate_cpu(
+        source,
+        positions,
+        side,
+        horizons,
+        target_1,
+        target_2,
+        stop,
+        trailing,
+        fractions,
+    )
 
 
 def _funding_for_actions(actions: pd.DataFrame) -> np.ndarray:
@@ -962,35 +1222,35 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
     period = pd.Period(month, freq="M")
     start = period.start_time.tz_localize("UTC")
     end = (period + 1).start_time.tz_localize("UTC")
-    actions = _load_parent_actions(start, end)
-    if actions.empty:
-        return actions
+    inherited = _load_parent_actions(start, end)
+    if inherited.empty:
+        return inherited
+    actions = compose_parameterized_plans(inherited, fee.round_trip_bps)
     source = _load_second_window(month)
     positions, entry_delay = _first_observed_positions(source, actions["entry_timestamp"])
     actions["actual_entry_timestamp"] = source.loc[positions, "timestamp"].to_numpy()
     actions["entry_price"] = source.loc[positions, "open"].to_numpy(float)
     actions["entry_delay_seconds"] = entry_delay
     pieces: list[pd.DataFrame] = []
-    groups = list(actions.groupby(["side", "horizon_seconds"], sort=True))
-    for number, ((side_value, horizon_value), group) in enumerate(groups, start=1):
+    groups = list(actions.groupby("side", sort=True))
+    for number, (side_value, group) in enumerate(groups, start=1):
         side = int(cast(Any, side_value))
-        horizon = int(cast(Any, horizon_value))
         direction = "LONG" if side > 0 else "SHORT"
         indexes = group.index.to_numpy(int)
         result = simulate_management(
             source,
             positions[indexes],
             side,
-            horizon,
+            group["horizon_seconds"].to_numpy(int),
             group["target_1_bps"].to_numpy(float),
             group["target_2_bps"].to_numpy(float),
             group["stop_bps"].to_numpy(float),
             group["trailing_bps"].to_numpy(float),
+            group["first_exit_fraction"].to_numpy(float),
         )
         labelled = group.copy()
         for name, values in result.items():
             labelled[name] = values
-        labelled["expert_id"] = expert_id(side, horizon)
         labelled["outcome"] = [
             _management_name(int(value)) for value in labelled["management_code"]
         ]
@@ -1002,11 +1262,11 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
         pieces.append(labelled)
         _status(
             "state_action_labels",
-            f"{month} action {number}/{len(groups)}: {direction} {horizon}s",
+            f"{month} side {number}/{len(groups)}: {direction} parameterized plans",
             12
             + 28 * (ONE_SECOND_MONTHS.index(month) + number / len(groups)) / len(ONE_SECOND_MONTHS),
             month=month,
-            action=f"{side}:{horizon}",
+            action=f"{side}:PARAMETERIZED",
             gpu=_gpu_info(),
         )
     output = pd.concat(pieces, ignore_index=True)
@@ -1021,9 +1281,7 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
     output["protocol_hash"] = PROTOCOL_HASH
     if not output["available_at"].le(output["actual_entry_timestamp"]).all():
         raise ValueError("canonical label entered before features were available")
-    return output.sort_values(["actual_entry_timestamp", "side", "horizon_seconds"]).reset_index(
-        drop=True
-    )
+    return output.sort_values(["actual_entry_timestamp", "side"]).reset_index(drop=True)
 
 
 def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -1049,15 +1307,9 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
                 and not identity.empty
                 and identity["label_protocol_hash"].eq(LABEL_PROTOCOL_HASH).all()
             )
-            legacy_labels = bool(
-                "label_protocol_hash" not in identity
-                and not identity.empty
-                and identity["protocol_hash"].isin(LEGACY_LABEL_PROTOCOL_HASHES).all()
-            )
-            cached = current_labels or legacy_labels
+            cached = current_labels
             migrate = cached and (
-                legacy_labels
-                or not identity["protocol_hash"].eq(PROTOCOL_HASH).all()
+                not identity["protocol_hash"].eq(PROTOCOL_HASH).all()
                 or not np.allclose(
                     identity["round_trip_cost_bps"].to_numpy(float), fee.round_trip_bps
                 )
@@ -1073,10 +1325,6 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
                 rows["stress_2x_bps"] = (
                     rows["gross_bps"] + rows["funding_bps"] - 2.0 * fee.round_trip_bps
                 )
-                rows["expert_id"] = [
-                    expert_id(int(side), int(horizon))
-                    for side, horizon in zip(rows["side"], rows["horizon_seconds"], strict=True)
-                ]
                 rows["label_protocol_hash"] = LABEL_PROTOCOL_HASH
                 rows["protocol_hash"] = PROTOCOL_HASH
                 temporary = path.with_suffix(f".parquet.{os.getpid()}.tmp")
@@ -1208,15 +1456,11 @@ def _leaf_statistics(
             arrays["target_rate"][leaf_index] = float(
                 np.mean(event_class[active] == OUTCOME_TARGET)
             )
-            arrays["stop_rate"][leaf_index] = float(
-                np.mean(event_class[active] == OUTCOME_STOP)
-            )
+            arrays["stop_rate"][leaf_index] = float(np.mean(event_class[active] == OUTCOME_STOP))
             arrays["eligible"][leaf_index] = float(eligible)
             catalog.append(
                 {
-                    "expert_id": fold_expert_id(
-                        fold_scope, side, horizon, tree, leaf_index
-                    ),
+                    "expert_id": fold_expert_id(fold_scope, side, horizon, tree, leaf_index),
                     "fold_scope": fold_scope,
                     "side": side,
                     "horizon_seconds": horizon,
@@ -1256,16 +1500,9 @@ def fit_fold_expert_library(
             return library
     groups: dict[tuple[int, int], dict[str, Any]] = {}
     catalog_rows: list[dict[str, Any]] = []
-    actions = sorted(
-        (int(side), int(horizon))
-        for side, horizon in fit.loc[:, ["side", "horizon_seconds"]]
-        .drop_duplicates()
-        .itertuples(index=False, name=None)
-    )
+    actions = [(int(side), 0) for side in sorted(fit["side"].unique())]
     for action_number, (side, horizon) in enumerate(actions, start=1):
-        active = fit.loc[
-            fit["side"].eq(side) & fit["horizon_seconds"].eq(horizon)
-        ].copy()
+        active = fit.loc[fit["side"].eq(side)].copy()
         model = _new_expert_generator(20261001 + action_number)
         values = _generator_x(active)
         model.fit(values, active["net_bps"].to_numpy(float))
@@ -1296,11 +1533,11 @@ def fit_fold_expert_library(
             completed, total = progress
             _status(
                 "fold_expert_generation",
-                f"fold {fold_number} action {action_number}/{len(actions)}: "
-                f"{'LONG' if side > 0 else 'SHORT'} {horizon}s",
+                f"fold {fold_number} side {action_number}/{len(actions)}: "
+                f"{'LONG' if side > 0 else 'SHORT'} parameterized critic contexts",
                 42 + 20 * (completed + action_number / len(actions)) / max(total, 1),
                 fold=str(fold_number),
-                action=f"{side}:{horizon}",
+                action=f"{side}:PARAMETERIZED",
                 candidates_generated=len(catalog_rows),
                 gpu=_gpu_info(),
             )
@@ -1315,9 +1552,7 @@ def fit_fold_expert_library(
         "groups": groups,
         "catalog_path": str(catalog_path),
         "candidates_evaluated": len(catalog_frame),
-        "candidates_eligible": int(
-            catalog_frame["eligible_after_managed_evaluation"].sum()
-        ),
+        "candidates_eligible": int(catalog_frame["eligible_after_managed_evaluation"].sum()),
         "terminal_prefilter_rejections": 0,
     }
     _atomic_joblib(cache, library)
@@ -1331,11 +1566,8 @@ def apply_fold_expert_library(rows: pd.DataFrame, library: dict[str, Any]) -> pd
     columns = {name: np.full(size, np.nan, dtype=float) for name in FOLD_EXPERT_FEATURES}
     best_tree = np.full(size, -1, dtype=np.int16)
     best_leaf = np.full(size, -1, dtype=np.int16)
-    for (side, horizon), group in library["groups"].items():
-        positions = np.flatnonzero(
-            output["side"].eq(side).to_numpy()
-            & output["horizon_seconds"].eq(horizon).to_numpy()
-        )
+    for (side, _horizon), group in library["groups"].items():
+        positions = np.flatnonzero(output["side"].eq(side).to_numpy())
         if not len(positions):
             continue
         active = output.iloc[positions]
@@ -1660,9 +1892,7 @@ def sequential_replay(
         ranked["required_ev_bps"] = ranked["side"].map(threshold_bps).fillna(float("inf"))
     else:
         ranked["required_ev_bps"] = float(threshold_bps)
-    ranked["passes_ev_threshold"] = ranked["calibrated_ev_bps"].gt(
-        ranked["required_ev_bps"]
-    )
+    ranked["passes_ev_threshold"] = ranked["calibrated_ev_bps"].gt(ranked["required_ev_bps"])
     candidates = (
         ranked.sort_values(
             [
@@ -1684,23 +1914,22 @@ def sequential_replay(
         "expert_tree_index",
         "expert_leaf_id",
     }.issubset(candidates.columns):
-        candidates["expert_id"] = [
+        candidates["context_expert_id"] = [
             (
-                fold_expert_id(
-                    str(scope), int(side), int(horizon), int(tree), int(leaf)
-                )
+                fold_expert_id(str(scope), int(side), 0, int(tree), int(leaf))
                 if int(tree) >= 0 and int(leaf) >= 0
-                else expert_id(int(side), int(horizon))
+                else f"{scope}:{'LONG' if int(side) > 0 else 'SHORT'}:FALLBACK"
             )
-            for scope, side, horizon, tree, leaf in zip(
+            for scope, side, tree, leaf in zip(
                 candidates["fold_expert_scope"],
                 candidates["side"],
-                candidates["horizon_seconds"],
                 candidates["expert_tree_index"],
                 candidates["expert_leaf_id"],
                 strict=True,
             )
         ]
+    if "plan_id" in candidates.columns:
+        candidates["expert_id"] = candidates["plan_id"].astype(str)
     selected_rows: list[int] = []
     leverages: list[float] = []
     portfolio_returns: list[float] = []
@@ -1833,8 +2062,26 @@ def sequential_replay(
             decisions.append(
                 {
                     "timestamp": entry + pd.Timedelta(seconds=target_seconds),
+                    "action": "REDUCE",
+                    "reason": "FIRST_TARGET_FILLED",
+                    "reduce_fraction": float(getattr(row, "first_exit_fraction", 0.5)),
+                    **tightened_state,
+                }
+            )
+            decisions.append(
+                {
+                    "timestamp": entry + pd.Timedelta(seconds=target_seconds),
                     "action": "TIGHTEN_STOP",
                     "reason": "FIRST_TARGET_FILLED_NON_WIDENING_STOP",
+                    **tightened_state,
+                }
+            )
+            decisions.append(
+                {
+                    "timestamp": entry + pd.Timedelta(seconds=target_seconds),
+                    "action": "UPDATE_TRAIL",
+                    "reason": "FIRST_TARGET_ACTIVATED_DYNAMIC_TRAIL",
+                    "trailing_bps": float(getattr(row, "trailing_bps", 0.0)),
                     **tightened_state,
                 }
             )
@@ -1871,7 +2118,7 @@ def sequential_replay(
         result["close_action"] = "CLOSE"
     result.attrs["risk_violations"] = risk_violations
     decision_rows = (
-        pd.DataFrame(decisions).sort_values("timestamp").reset_index(drop=True)
+        pd.DataFrame(decisions).sort_values("timestamp", kind="stable").reset_index(drop=True)
         if decisions
         else pd.DataFrame(columns=["timestamp", "action", "reason"])
     )
@@ -1996,9 +2243,7 @@ def _choose_frequency_threshold(
         metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
         returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
         net_log_equity: float | None = (
-            float(np.log1p(returns).sum())
-            if len(returns) and np.all(returns > -1)
-            else None
+            float(np.log1p(returns).sum()) if len(returns) and np.all(returns > -1) else None
         )
         risk_approved = (
             int(metrics.get("risk_violations", 1)) == 0
@@ -2127,12 +2372,8 @@ def walk_forward(
                 internal = "xgboost" if kind == "xgboost_cuda" else kind
                 _status(
                     "model_fit",
-                    f"fold {number}/{len(folds)} {side_name} "
-                    f"{model_counter}/{total_models} {kind}",
-                    62
-                    + 16
-                    * ((number - 1) + model_counter / total_models)
-                    / len(folds),
+                    f"fold {number}/{len(folds)} {side_name} {model_counter}/{total_models} {kind}",
+                    62 + 16 * ((number - 1) + model_counter / total_models) / len(folds),
                     fold=f"{number}/{len(folds)}",
                     side=side_name,
                     model=kind,
@@ -2357,16 +2598,12 @@ def fit_forward_bundle(
     for side, side_name in ((1, "LONG"), (-1, "SHORT")):
         observed = [str(item["champions"][side_name]) for item in folds]
         champion = (
-            "xgboost_cuda"
-            if observed.count("xgboost_cuda") > observed.count("ridge")
-            else "ridge"
+            "xgboost_cuda" if observed.count("xgboost_cuda") > observed.count("ridge") else "ridge"
         )
         champions[side_name] = champion
         internal = "xgboost" if champion == "xgboost_cuda" else champion
         head = fit_probability_head(internal, fit.loc[fit["side"].eq(side)])
-        calibrated = fit_calibration(
-            head, calibration.loc[calibration["side"].eq(side)]
-        )
+        calibrated = fit_calibration(head, calibration.loc[calibration["side"].eq(side)])
         scored_selection = score_actions(
             selection.loc[selection["side"].eq(side)], head, calibrated
         )
@@ -2401,12 +2638,18 @@ def fit_forward_bundle(
 
 
 def _economic_action_set(matrix: pd.DataFrame) -> dict[str, Any]:
-    grouped = matrix.groupby(["side", "horizon_seconds"])["net_bps"].agg(
-        ["count", "mean", "median"]
-    )
+    grouped = matrix.groupby("side")["net_bps"].agg(["count", "mean", "median"])
     oracle = matrix.groupby("actual_entry_timestamp")["net_bps"].max()
     return {
-        "actions": grouped.reset_index().to_dict("records"),
+        "parameterized_sides": grouped.reset_index().to_dict("records"),
+        "unique_plan_ids": int(matrix["plan_id"].nunique()),
+        "unique_horizons": int(matrix["horizon_seconds"].nunique()),
+        "horizon_seconds": {
+            "minimum": int(matrix["horizon_seconds"].min()),
+            "median": float(matrix["horizon_seconds"].median()),
+            "maximum": int(matrix["horizon_seconds"].max()),
+        },
+        "fixed_action_plans": False,
         "oracle_positive_fraction": float(oracle.gt(0).mean()),
         "oracle_mean_net_bps": float(oracle.mean()),
         "oracle_is_not_tradable": True,
@@ -2506,20 +2749,14 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         int(item.get("fold_experts", {}).get("candidates_evaluated", 0)) for item in folds
     )
     if forward_bundle is not None:
-        generated_expert_candidates += int(
-            forward_bundle["fold_experts"]["candidates_evaluated"]
-        )
+        generated_expert_candidates += int(forward_bundle["fold_experts"]["candidates_evaluated"])
     generated_experts_eligible = sum(
         int(item.get("fold_experts", {}).get("candidates_eligible", 0)) for item in folds
     )
     if forward_bundle is not None:
-        generated_experts_eligible += int(
-            forward_bundle["fold_experts"]["candidates_eligible"]
-        )
+        generated_experts_eligible += int(forward_bundle["fold_experts"]["candidates_eligible"])
     registry["registered_fold_local_expert_candidates"] = generated_expert_candidates
-    registry["registered_fold_local_experts_eligible_after_management"] = (
-        generated_experts_eligible
-    )
+    registry["registered_fold_local_experts_eligible_after_management"] = generated_experts_eligible
     registry["total_registered_expert_attempts"] = (
         int(registry["registered_auto_moe_experts"]) + generated_expert_candidates
     )

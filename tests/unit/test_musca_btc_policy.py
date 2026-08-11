@@ -55,6 +55,58 @@ def test_expert_id_is_deterministic() -> None:
     assert policy.expert_id(1, 300) != policy.expert_id(-1, 300)
 
 
+def _inherited_expert_rows() -> pd.DataFrame:
+    timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows: list[dict[str, object]] = []
+    for side in (-1, 1):
+        for horizon_number, horizon in enumerate(policy.PREDICTION_HORIZONS_SECONDS, start=1):
+            row: dict[str, object] = {
+                "available_at": timestamp,
+                "entry_timestamp": timestamp + pd.Timedelta(seconds=1),
+                "decision_position": 10,
+                "side": side,
+                "horizon_seconds": horizon,
+                "predicted_favorable_q50_bps": 8.0 + 5.0 * horizon_number,
+                "predicted_favorable_q75_bps": 12.0 + 8.0 * horizon_number,
+                "predicted_adverse_q75_bps": 6.0 + 4.0 * horizon_number,
+            }
+            row.update({name: 0.0 for name in policy.base.GATING_CONTEXT})
+            row["volatility_percentile"] = 0.5
+            for expert_horizon in policy.PREDICTION_HORIZONS_SECONDS:
+                for view_number, view in enumerate(policy.base.VIEWS, start=1):
+                    row[f"expert_{expert_horizon}s_{view}"] = side * (
+                        expert_horizon / 900 + view_number
+                    )
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def test_multi_expert_generator_replaces_ten_templates_with_parameterized_plans() -> None:
+    inherited = _inherited_expert_rows()
+    plans = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
+    repeated = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
+    assert len(inherited) == 10
+    assert len(plans) == 2
+    assert plans["plan_id"].tolist() == repeated["plan_id"].tolist()
+    assert (~plans["horizon_seconds"].isin(policy.PREDICTION_HORIZONS_SECONDS)).any()
+    assert plans["gate_effective_experts"].gt(1).all()
+    assert plans["plan_contributors"].str.count(",").eq(2).all()
+    assert plans["target_2_bps"].gt(plans["target_1_bps"]).all()
+    assert plans["trailing_bps"].le(plans["stop_bps"]).all()
+    assert policy.PROTOCOL["state_action"]["fixed_action_plans"] is False
+
+
+def test_plan_identity_changes_when_expert_mixture_changes() -> None:
+    inherited = _inherited_expert_rows()
+    baseline = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
+    changed = inherited.copy()
+    changed.loc[changed["side"].eq(1), "expert_21600s_flow"] += 500.0
+    challenger = policy.compose_parameterized_plans(changed, round_trip_cost_bps=8.0)
+    baseline_long = baseline.loc[baseline["side"].eq(1), "plan_id"].item()
+    challenger_long = challenger.loc[challenger["side"].eq(1), "plan_id"].item()
+    assert baseline_long != challenger_long
+
+
 def test_same_second_target_and_stop_uses_stop_event_and_stop_management() -> None:
     source = _source([(100.0, 100.2, 99.8, 100.0)])
     result = policy.simulate_management(
@@ -95,6 +147,28 @@ def test_trailing_stop_tightens_after_first_target() -> None:
     assert result["event_class"][0] == policy.OUTCOME_TARGET
     assert result["management_code"][0] == 4
     assert result["gross_bps"][0] == pytest.approx(15.0)
+
+
+def test_partial_exit_fraction_is_an_executable_plan_parameter() -> None:
+    source = _source(
+        [
+            (100.0, 100.2, 100.0, 100.15),
+            (100.15, 100.4, 100.15, 100.35),
+        ]
+    )
+    result = policy.simulate_management(
+        source,
+        np.asarray([0]),
+        1,
+        np.asarray([2]),
+        np.asarray([10.0]),
+        np.asarray([30.0]),
+        np.asarray([100.0]),
+        np.asarray([20.0]),
+        np.asarray([0.25]),
+        backend="cpu",
+    )
+    assert result["gross_bps"][0] == pytest.approx(25.0)
 
 
 def test_first_observed_trade_is_used_instead_of_invented_no_trade_fill() -> None:
@@ -172,6 +246,42 @@ def test_position_can_cross_midnight_without_forced_close() -> None:
     close = decisions.loc[decisions["action"].eq("CLOSE")].iloc[0]
     assert close["position_side"] == 1
     assert close["time_in_position_seconds"] == 300
+
+
+def test_parameterized_plan_exposes_partial_exit_and_trailing_actions() -> None:
+    entry = pd.Timestamp("2026-01-01T12:00:00Z")
+    scored = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [entry],
+            "exit_timestamp": [entry + pd.Timedelta(minutes=5)],
+            "calibrated_ev_bps": [5.0],
+            "p_target": [0.6],
+            "expert_id": ["plan-long-example"],
+            "side": [1],
+            "stop_bps": [50.0],
+            "trailing_bps": [18.0],
+            "target_1_bps": [20.0],
+            "first_exit_fraction": [0.4],
+            "net_bps": [30.0],
+            "funding_bps": [0.0],
+            "stress_1_5x_bps": [26.0],
+            "stress_2x_bps": [22.0],
+            "time_to_target_seconds": [60],
+            "exit_seconds": [300],
+            "outcome": ["TARGET_2"],
+        }
+    )
+    _, decisions = policy.sequential_replay(scored, 0.0, 8.0)
+    actions = decisions["action"].tolist()
+    assert actions == [
+        "ENTER_LONG",
+        "REDUCE",
+        "TIGHTEN_STOP",
+        "UPDATE_TRAIL",
+        "CLOSE",
+    ]
+    reduction = decisions.loc[decisions["action"].eq("REDUCE")].iloc[0]
+    assert reduction["reduce_fraction"] == pytest.approx(0.4)
 
 
 def test_open_position_does_not_reveal_its_future_pnl_to_risk_state() -> None:
@@ -332,9 +442,7 @@ def test_side_specific_threshold_does_not_let_blocked_long_hide_short() -> None:
         "exit_seconds": [60, 60],
         "outcome": ["TARGET", "TARGET"],
     }
-    scored = pd.DataFrame(
-        common | {"calibrated_ev_bps": [5.0, 3.0], "side": [1, -1]}
-    )
+    scored = pd.DataFrame(common | {"calibrated_ev_bps": [5.0, 3.0], "side": [1, -1]})
     trades, _ = policy.sequential_replay(scored, {1: 10.0, -1: 0.0}, 8.0)
     assert len(trades) == 1
     assert trades.iloc[0]["side"] == -1
@@ -468,13 +576,14 @@ def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:
     )
     arguments = (
         source,
-        np.asarray([0]),
+        np.asarray([0, 0]),
         1,
-        3,
-        np.asarray([10.0]),
-        np.asarray([30.0]),
-        np.asarray([20.0]),
-        np.asarray([15.0]),
+        np.asarray([2, 3]),
+        np.asarray([10.0, 10.0]),
+        np.asarray([30.0, 30.0]),
+        np.asarray([20.0, 20.0]),
+        np.asarray([15.0, 15.0]),
+        np.asarray([0.25, 0.65]),
     )
     cpu = policy.simulate_management(*arguments, backend="cpu")
     gpu = policy.simulate_management(*arguments, backend="cuda")
