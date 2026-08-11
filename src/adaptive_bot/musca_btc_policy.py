@@ -166,6 +166,8 @@ LABEL_PROTOCOL = {
         "1s state path plus ordered millisecond aggregate-trade entry, target, stop and trailing "
         "fills"
     ),
+    "no_trade_seconds": "non-executable; skipped by stop, target, trailing and timeout logic",
+    "timeout_execution": "first observed trade bucket at or after the plan horizon",
     "action_space": "variable expert-supported plans preserving distinct horizon proposals",
     "sides": ["LONG", "SHORT"],
     "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
@@ -1471,6 +1473,26 @@ def _first_observed_positions(
     return positions.astype(np.int64), delay.astype(float)
 
 
+def _observed_mask(source: pd.DataFrame) -> np.ndarray:
+    return (
+        source["observed_trade"].to_numpy(bool)
+        if "observed_trade" in source
+        else source["trade_count"].to_numpy(float) > 0
+    )
+
+
+def _timeout_positions(
+    observed: np.ndarray, positions: np.ndarray, horizons: np.ndarray
+) -> np.ndarray:
+    observed_positions = np.flatnonzero(observed)
+    starts = np.asarray(positions, dtype=np.int64) + np.asarray(horizons, dtype=np.int64)
+    locations = np.searchsorted(observed_positions, starts, side="left")
+    valid = locations < len(observed_positions)
+    output = np.full(len(starts), -1, dtype=np.int64)
+    output[valid] = observed_positions[locations[valid]]
+    return output
+
+
 def _simulate_cpu(
     source: pd.DataFrame,
     positions: np.ndarray,
@@ -1485,13 +1507,14 @@ def _simulate_cpu(
     opens = source["open"].to_numpy(float)
     highs = source["high"].to_numpy(float)
     lows = source["low"].to_numpy(float)
-    closes = source["close"].to_numpy(float)
+    observed = _observed_mask(source)
     count = len(positions)
     horizons = (
         np.full(count, int(horizon), dtype=np.int32)
         if np.ndim(horizon) == 0
         else np.asarray(horizon, dtype=np.int32)
     )
+    timeout_positions = _timeout_positions(observed, positions, horizons)
     gross = np.empty(count, dtype=float)
     exit_seconds = np.empty(count, dtype=np.int32)
     management = np.empty(count, dtype=np.int8)
@@ -1519,6 +1542,8 @@ def _simulate_cpu(
             index = position + offset
             if index >= len(source):
                 raise ValueError("incomplete one-second future path")
+            if not observed[index]:
+                continue
             elapsed = offset + 1
             open_return = side * (opens[index] / entry - 1) * 10_000
             favorable = (
@@ -1577,7 +1602,12 @@ def _simulate_cpu(
                 peak = max(peak, favorable)
                 stop_level = max(stop_level, peak - trailing[row])
         if not done:
-            terminal = side * (closes[position + row_horizon - 1] / entry - 1) * 10_000
+            timeout_position = int(timeout_positions[row])
+            if timeout_position < 0:
+                raise ValueError("no observable Binance trade at or after plan timeout")
+            terminal_price = opens[timeout_position]
+            result_seconds = timeout_position - position + 1
+            terminal = side * (terminal_price / entry - 1) * 10_000
             result = half + remaining_fraction * terminal if first_filled else terminal
         gross[row] = result
         exit_seconds[row] = result_seconds
@@ -1699,16 +1729,51 @@ def _simulate_gpu(
     import cupy as cp
 
     count = len(positions)
-    device_values = [
-        cp.asarray(source[name].to_numpy(np.float64)) for name in ("open", "high", "low", "close")
-    ]
-    gpu_positions = cp.asarray(positions, dtype=cp.int64)
+    observed = _observed_mask(source)
     horizons = (
         np.full(count, int(horizon), dtype=np.int32)
         if np.ndim(horizon) == 0
         else np.asarray(horizon, dtype=np.int32)
     )
+    missing_prefix = np.concatenate(([0], np.cumsum(~observed, dtype=np.int64)))
+    path_ends = np.asarray(positions, dtype=np.int64) + horizons
+    dirty = (missing_prefix[path_ends] - missing_prefix[positions]) > 0
+    if np.any(dirty):
+        clean_rows = np.flatnonzero(~dirty)
+        dirty_rows = np.flatnonzero(dirty)
+        parameters = [
+            np.asarray(values, dtype=float)
+            for values in (target_1, target_2, stop, trailing, first_exit_fraction)
+        ]
+        dirty_result = _simulate_cpu(
+            source,
+            np.asarray(positions, dtype=np.int64)[dirty_rows],
+            side,
+            horizons[dirty_rows],
+            *(values[dirty_rows] for values in parameters),
+        )
+        if not len(clean_rows):
+            return dirty_result
+        clean_result = _simulate_gpu(
+            source,
+            np.asarray(positions, dtype=np.int64)[clean_rows],
+            side,
+            horizons[clean_rows],
+            *(values[clean_rows] for values in parameters),
+        )
+        combined: dict[str, np.ndarray] = {}
+        for name, clean_values in clean_result.items():
+            values = np.empty(count, dtype=clean_values.dtype)
+            values[clean_rows] = clean_values
+            values[dirty_rows] = dirty_result[name]
+            combined[name] = values
+        return combined
+    device_values = [
+        cp.asarray(source[name].to_numpy(np.float64)) for name in ("open", "high", "low", "close")
+    ]
+    gpu_positions = cp.asarray(positions, dtype=cp.int64)
     gpu_horizons = cp.asarray(horizons, dtype=cp.int32)
+    timeout_positions = _timeout_positions(observed, positions, horizons)
     gpu_parameters = [
         cp.asarray(values, dtype=cp.float64)
         for values in (target_1, target_2, stop, trailing, first_exit_fraction)
@@ -1742,17 +1807,35 @@ def _simulate_gpu(
         ),
     )
     cp.cuda.get_current_stream().synchronize()
+    gross_values = cp.asnumpy(gross)
+    management_values = cp.asnumpy(management)
+    exit_values = cp.asnumpy(exit_seconds)
     target_time = cp.asnumpy(first_target)
     stop_time = cp.asnumpy(first_stop)
+    timeout_rows = np.flatnonzero(management_values == OUTCOME_TIMEOUT)
+    if len(timeout_rows):
+        if np.any(timeout_positions[timeout_rows] < 0):
+            raise ValueError("no observable Binance trade at or after plan timeout")
+        entries = source["open"].to_numpy(float)[positions[timeout_rows]]
+        terminal_prices = source["open"].to_numpy(float)[timeout_positions[timeout_rows]]
+        terminal = side * (terminal_prices / entries - 1.0) * 10_000.0
+        filled = target_time[timeout_rows] >= 0
+        fractions = np.asarray(first_exit_fraction, dtype=float)[timeout_rows]
+        terminal[filled] = (
+            fractions[filled] * np.asarray(target_1, dtype=float)[timeout_rows][filled]
+            + (1.0 - fractions[filled]) * terminal[filled]
+        )
+        gross_values[timeout_rows] = terminal
+        exit_values[timeout_rows] = timeout_positions[timeout_rows] - positions[timeout_rows] + 1
     event = np.where(
         (stop_time >= 0) & ((target_time < 0) | (stop_time <= target_time)),
         OUTCOME_STOP,
         np.where(target_time >= 0, OUTCOME_TARGET, OUTCOME_TIMEOUT),
     ).astype(np.int8)
     return {
-        "gross_bps": cp.asnumpy(gross),
-        "exit_seconds": cp.asnumpy(exit_seconds),
-        "management_code": cp.asnumpy(management),
+        "gross_bps": gross_values,
+        "exit_seconds": exit_values,
+        "management_code": management_values,
         "event_class": event,
         "time_to_target_seconds": target_time,
         "time_to_stop_seconds": stop_time,

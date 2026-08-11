@@ -436,6 +436,44 @@ def test_first_observed_trade_is_used_instead_of_invented_no_trade_fill() -> Non
     assert delay.tolist() == [1.0]
 
 
+def test_no_trade_second_cannot_trigger_a_fill_or_timeout_exit() -> None:
+    source = _source(
+        [
+            (100.0, 100.0, 100.0, 100.0),
+            (99.0, 99.0, 99.0, 99.0),
+            (101.0, 101.0, 101.0, 101.0),
+        ]
+    )
+    source["observed_trade"] = [True, False, True]
+    arguments = (
+        source,
+        np.asarray([0]),
+        1,
+        np.asarray([2]),
+        np.asarray([500.0]),
+        np.asarray([600.0]),
+        np.asarray([50.0]),
+        np.asarray([50.0]),
+        np.asarray([0.5]),
+    )
+    cpu = policy.simulate_management(*arguments, backend="cpu")
+    assert cpu["management_code"][0] == policy.OUTCOME_TIMEOUT
+    assert cpu["exit_seconds"][0] == 3
+    assert cpu["gross_bps"][0] == pytest.approx(100.0)
+    if policy._gpu_info().get("available"):
+        gpu = policy.simulate_management(*arguments, backend="cuda")
+        for name in cpu:
+            if np.issubdtype(cpu[name].dtype, np.floating):
+                assert np.allclose(cpu[name], gpu[name], atol=policy.GPU_CPU_TOLERANCE_BPS)
+            else:
+                assert np.array_equal(cpu[name], gpu[name])
+
+
+def test_state_action_labels_are_versioned_by_execution_protocol() -> None:
+    assert policy.LABEL_PROTOCOL_HASH[:16] in policy.LABEL_ROOT.parts
+    assert "non-executable" in policy.LABEL_PROTOCOL["no_trade_seconds"]
+
+
 def test_target_probability_means_target_before_stop() -> None:
     class Classifier:
         classes_ = np.asarray([0, 1, 2])
@@ -1267,6 +1305,7 @@ def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:
             (100.0, 100.1, 99.95, 100.05),
             (100.05, 100.3, 100.0, 100.25),
             (100.25, 100.4, 100.1, 100.2),
+            (100.2, 100.25, 100.15, 100.2),
         ]
     )
     arguments = (

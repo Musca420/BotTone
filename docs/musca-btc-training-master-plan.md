@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; action-space in correzione dopo il quinto preflight falsificato
+Stato: punti 1, 2 e 5 verificati; action-space corretta, nuovo preflight in preparazione
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -37,9 +37,10 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - diagnostica P1 implementata: `expected_ev_bps_per_minute` e
   `expected_log_utility_per_hour`; non partecipano alla promozione o alla scelta dei parametri.
 
-Verifiche locali correnti: 48 test mirati e 385 test completi verdi, Ruff verde e mypy verde sul
-modulo policy modificato. Il mypy globale conserva 33 errori preesistenti in sei moduli legacy fuori
-ambito; non sono stati nascosti né modificati.
+Verifiche locali correnti: 52 test Musca verdi; la suite globale ha superato 388 test e l'unico
+health-check Hypothesis `too_slow` estraneo al training è passato al rerun isolato. Ruff e mypy sono
+verdi sul modulo policy modificato. Il mypy globale conserva errori preesistenti nei moduli legacy
+fuori ambito; non sono stati nascosti né modificati.
 `data/reports/musca_btc_execution_contract.json` rileva 16/16 archivi event-level disponibili ma
 soltanto 6 giornate L2 osservate. I label storici restano quindi dichiarati proxy e non possono
 autorizzare capitale reale: bid/ask, profondità e partial fill storici non esistono. La gestione usa
@@ -251,6 +252,29 @@ Gli artefatti e556 sono preservati in:
 - `data/reports/archive/e5560023f084bde0/musca_btc_policy.preflight.json`;
 - `data/ml/musca_btc_policy/audits/e5560023f084bde0/preflight_decisions.parquet`;
 - `data/ml/musca_btc_policy/audits/e5560023f084bde0/preflight_trades.parquet`.
+
+## E-32 - secondi senza trade usati come prezzi eseguibili
+
+Il primo tentativo con le proposte expert distinte non ha raggiunto i fold: la costruzione di marzo
+2026 si e fermata su `2026-03-09T21:38:25+00:00`. L'archivio ufficiale Binance contiene eventi nel
+secondo 24 e nel secondo 26, ma nessun aggregate trade nel secondo 25. Il frame regolarizzato 1s
+riportava comunque OHLC forward-filled e il simulatore permetteva a quel bucket non osservato di
+attivare trailing, stop o timeout. Il raffinatore event-level ha correttamente respinto il fill.
+
+La correzione vincolante e:
+
+- bucket con `observed_trade=False` non sono eseguibili e non attivano stop, target o trailing;
+- il timeout viene eseguito sul primo bucket con trade osservato a partire dall'orizzonte;
+- se quel trade futuro non e presente, la riga fallisce closed;
+- i rari piani che attraversano un secondo vuoto vengono simulati sulla CPU; il restante universo
+  conserva il kernel GPU congelato;
+- il protocollo dei label e versionato nell'albero `state_actions/<label-hash>`: gli undici mesi
+  parziali costruiti con la semantica precedente restano preservati ma non possono essere riusati.
+
+Il protocollo corrente e `11a4748b8fce81417f20e1eeb09fddaa953b18f3797285f585275711f5103ac7`;
+l'hash dei label e `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
+I test mirati verificano il bucket senza trade, il timeout successivo, il versionamento e la parita
+CPU/GPU. Il fallimento precedente e un errore di execution, non un risultato economico.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
@@ -632,6 +656,7 @@ lo duplica riga per riga e non lo sostituisce.
 - interpretare oracle, MFE o miglior futuro realizzato come segnale disponibile live;
 - calcolare target encoding con la stessa riga che lo riceve;
 - dedurre l'ordine stop/target da OHLC 1s quando sono disponibili eventi ordinati;
+- usare OHLC forward-filled di un secondo senza aggregate trade come prezzo eseguibile;
 - convertire il numero di bucket in timestamp con `entry + exit_seconds` invece di
   `entry_bucket + exit_seconds - 1`;
 - dichiarare fill eseguibili usando last/mid senza bid/ask e profondità osservati;
