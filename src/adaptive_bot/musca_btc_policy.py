@@ -93,6 +93,7 @@ INNER_MODEL_AUDIT_WEEKS = 2
 CROSSFIT_WARMUP_WEEKS = 8
 CROSSFIT_BLOCK_WEEKS = 4
 CONTINUATION_HALF_LIFE_SECONDS = 24 * 60 * 60
+STOP_LOSS_OVERRUN_QUANTILE = 0.999
 MINIMUM_EXPERT_OPPORTUNITIES = 100
 LOCAL_PLAN_AUDIT_STATES = 2_000
 LOCAL_PLAN_REGRET_MATERIAL_BPS = 2.0
@@ -254,10 +255,13 @@ PROTOCOL = {
         "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
         "state_features": list(STATE_FEATURES),
         "entry_value": (
-            "semi-Markov fitted value: Q(enter)=log utility + discounted V(next free); "
-            "Q(wait)=discounted V(next decision)"
+            "paired semi-Markov advantage capped by immediate expected log utility: "
+            "continuation may veto an entry but cannot make a negative immediate action enter"
         ),
         "continuation_half_life_seconds": CONTINUATION_HALF_LIFE_SECONDS,
+        "risk_stop_overrun_reserve": (
+            "past-only 99.9% quantile of loss beyond initial stop plus actual 1x costs"
+        ),
     },
     "validation": {
         "nested_walk_forward": {
@@ -271,7 +275,10 @@ PROTOCOL = {
         "purge": "actual exit timestamp",
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
-        "frequency": "Q(action) > Q(wait); threshold frontier is diagnostic only; no quota",
+        "frequency": (
+            "paired Q advantage and immediate utility both positive; threshold frontier is "
+            "diagnostic only; no quota"
+        ),
         "negative_controls": [
             "random prediction",
             "temporal shift",
@@ -331,6 +338,14 @@ class SequentialState:
     avwap_distance_bps: float
     funding_bps: float
     volatility_bps: float
+
+
+@dataclass
+class ReplayRiskState:
+    equity: float = 1.0
+    peak_equity: float = 1.0
+    current_day: pd.Timestamp | None = None
+    day_start_equity: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -2985,7 +3000,7 @@ def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Predictor]:
         raise ValueError("insufficient complete continuation targets")
     values = _x(complete)
     weights = _timestamp_weights(complete)
-    return {
+    models = {
         "enter": _fit_regressor(
             "ridge",
             _regressor("ridge", 20261401),
@@ -3001,6 +3016,17 @@ def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Predictor]:
             weights,
         ),
     }
+    models["advantage"] = _fit_regressor(
+        "ridge",
+        _regressor("ridge", 20261403),
+        values,
+        (
+            complete["target_q_enter_log_utility"].to_numpy(float)
+            - complete["target_q_wait_log_utility"].to_numpy(float)
+        ),
+        weights,
+    )
+    return models
 
 
 def fit_continuation_calibration(
@@ -3009,10 +3035,17 @@ def fit_continuation_calibration(
     targets = continuation_targets(rows)
     complete = targets.loc[targets["continuation_target_complete"]].copy()
     values = _x(complete)
+    target = {
+        "enter": complete["target_q_enter_log_utility"].to_numpy(float),
+        "wait": complete["target_q_wait_log_utility"].to_numpy(float),
+        "advantage": (
+            complete["target_q_enter_log_utility"].to_numpy(float)
+            - complete["target_q_wait_log_utility"].to_numpy(float)
+        ),
+    }
     return {
         action: IsotonicRegression(out_of_bounds="clip").fit(
-            np.asarray(model.predict(values), dtype=float),
-            complete[f"target_q_{action}_log_utility"].to_numpy(float),
+            np.asarray(model.predict(values), dtype=float), target[action]
         )
         for action, model in models.items()
     }
@@ -3032,8 +3065,16 @@ def score_continuation(
         "q_wait_log_utility"
     ].transform("mean")
     output["immediate_expected_log_utility"] = output["expected_log_utility"]
-    output["action_advantage_log_utility"] = (
+    output["independent_q_difference_log_utility"] = (
         output["q_enter_log_utility"] - output["q_wait_log_utility"]
+    )
+    output["raw_action_advantage_log_utility"] = output["q_advantage_log_utility"]
+    output["continuation_dominance_violation"] = output[
+        "raw_action_advantage_log_utility"
+    ].gt(output["immediate_expected_log_utility"])
+    output["action_advantage_log_utility"] = np.minimum(
+        output["raw_action_advantage_log_utility"].to_numpy(float),
+        output["immediate_expected_log_utility"].to_numpy(float),
     )
     output["expected_log_utility"] = output["action_advantage_log_utility"]
     return output
@@ -3062,16 +3103,56 @@ def continuation_metrics(scored: pd.DataFrame) -> dict[str, float]:
                     - targets.loc[complete, "target_q_wait_log_utility"].to_numpy(float)
                 )
                 == np.sign(
-                    targets.loc[complete, "action_advantage_log_utility"].to_numpy(float)
+                    targets.loc[complete, "raw_action_advantage_log_utility"].to_numpy(float)
                 )
             )
+        ),
+        "dominance_violation_fraction": float(
+            targets.loc[complete, "continuation_dominance_violation"].mean()
         ),
     }
 
 
-def _leverage(stop_bps: np.ndarray, round_trip_cost_bps: float) -> np.ndarray:
+def _leverage(
+    stop_bps: np.ndarray, round_trip_cost_bps: float | np.ndarray
+) -> np.ndarray:
     risk_fraction = (np.asarray(stop_bps, dtype=float) + round_trip_cost_bps) / 10_000
     return np.minimum(MAXIMUM_LEVERAGE, RISK_PER_TRADE / np.maximum(risk_fraction, 1e-9))
+
+
+def fit_stop_loss_overrun_reserve(rows: pd.DataFrame, round_trip_cost_bps: float) -> float:
+    """Estimate a causal sizing reserve from losses beyond the stated stop and fees."""
+    if rows.empty:
+        return 0.0
+    overrun = np.maximum(
+        0.0,
+        -rows["net_bps"].to_numpy(float)
+        - rows["stop_bps"].to_numpy(float)
+        - round_trip_cost_bps,
+    )
+    positive = overrun[overrun > 0]
+    if not len(positive):
+        return 0.0
+    return float(np.quantile(positive, STOP_LOSS_OVERRUN_QUANTILE, method="higher"))
+
+
+def apply_risk_sizing_contract(
+    rows: pd.DataFrame,
+    round_trip_cost_bps: float,
+    stop_loss_overrun_reserve_bps: float,
+) -> pd.DataFrame:
+    output = rows.copy()
+    reserve = max(0.0, float(stop_loss_overrun_reserve_bps))
+    output["risk_stop_overrun_reserve_bps"] = reserve
+    leverage = _leverage(
+        output["stop_bps"].to_numpy(float), round_trip_cost_bps + reserve
+    )
+    output["sized_leverage"] = leverage
+    output["sized_portfolio_return"] = leverage * output["net_bps"].to_numpy(float) / 10_000
+    if np.any(output["sized_portfolio_return"].to_numpy(float) <= -1):
+        raise ValueError("risk-sized state-action can lose all equity")
+    output["log_utility"] = np.log1p(output["sized_portfolio_return"].to_numpy(float))
+    return output
 
 
 def sequential_replay(
@@ -3080,12 +3161,18 @@ def sequential_replay(
     round_trip_cost_bps: float,
     *,
     record_decisions: bool = True,
+    risk_state: ReplayRiskState | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if scored.empty:
         return scored.copy(), pd.DataFrame(columns=["timestamp", "action", "reason"])
     ranked = scored.copy()
+    stop_reserve = (
+        ranked["risk_stop_overrun_reserve_bps"].to_numpy(float)
+        if "risk_stop_overrun_reserve_bps" in ranked
+        else np.zeros(len(ranked), dtype=float)
+    )
     predicted_leverage = _leverage(
-        ranked["stop_bps"].to_numpy(float), round_trip_cost_bps
+        ranked["stop_bps"].to_numpy(float), round_trip_cost_bps + stop_reserve
     )
     if "expected_log_utility" not in ranked:
         implied_return = predicted_leverage * ranked["calibrated_ev_bps"].to_numpy(float) / 10_000
@@ -3143,12 +3230,15 @@ def sequential_replay(
     equity_before: list[float] = []
     daily_pnl_before: list[float] = []
     risk_remaining_before: list[float] = []
+    risk_violation_rows: list[bool] = []
     entry_actions: list[str] = []
     decisions: list[dict[str, Any]] = []
     free_at = pd.Timestamp.min.tz_localize("UTC")
-    equity = 1.0
-    current_day: pd.Timestamp | None = None
-    day_start_equity = 1.0
+    active_risk = risk_state if risk_state is not None else ReplayRiskState()
+    equity = active_risk.equity
+    peak_equity = active_risk.peak_equity
+    current_day = active_risk.current_day
+    day_start_equity = active_risk.day_start_equity
     risk_violations = 0
     pending_return: float | None = None
     active_side = 0
@@ -3165,6 +3255,7 @@ def sequential_replay(
                 current_day = exit_day
                 day_start_equity = equity
             equity *= 1 + pending_return
+            peak_equity = max(peak_equity, equity)
             pending_return = None
             active_side = 0
             active_expert = None
@@ -3184,9 +3275,13 @@ def sequential_replay(
             and current_price > 0
             else 0.0
         )
+        daily_floor = day_start_equity * (1 - MAXIMUM_DAILY_LOSS)
+        drawdown_floor = peak_equity * (1 - MAXIMUM_DRAWDOWN)
+        daily_risk_remaining = max(0.0, 1 - daily_floor / max(equity, 1e-12))
+        drawdown_risk_remaining = max(0.0, 1 - drawdown_floor / max(equity, 1e-12))
         state = SequentialState(
             daily_pnl_fraction=equity / day_start_equity - 1,
-            risk_remaining_fraction=max(0.0, MAXIMUM_DAILY_LOSS + equity / day_start_equity - 1),
+            risk_remaining_fraction=min(daily_risk_remaining, drawdown_risk_remaining),
             position_side=active_side if position_open else 0,
             time_in_position_seconds=(
                 int((entry - active_entry).total_seconds())
@@ -3213,6 +3308,17 @@ def sequential_replay(
                     }
                 )
             continue
+        if drawdown_risk_remaining <= 0:
+            if record_decisions:
+                decisions.append(
+                    {
+                        "timestamp": entry,
+                        "action": "WAIT",
+                        "reason": "MAXIMUM_DRAWDOWN_VETO",
+                        **asdict(state),
+                    }
+                )
+            continue
         if not bool(row.passes_ev_threshold):
             if record_decisions:
                 decisions.append(
@@ -3224,21 +3330,35 @@ def sequential_replay(
                     }
                 )
             continue
-        leverage = float(_leverage(np.asarray([float(row.stop_bps)]), round_trip_cost_bps)[0])
-        worst_risk = leverage * (float(row.stop_bps) + round_trip_cost_bps) / 10_000
+        row_stop_reserve = float(getattr(row, "risk_stop_overrun_reserve_bps", 0.0))
+        leverage = float(
+            _leverage(
+                np.asarray([float(row.stop_bps)]),
+                round_trip_cost_bps + row_stop_reserve,
+            )[0]
+        )
+        worst_risk = leverage * (
+            float(row.stop_bps) + round_trip_cost_bps + row_stop_reserve
+        ) / 10_000
         if state.risk_remaining_fraction + 1e-12 < worst_risk:
+            veto_reason = (
+                "MAXIMUM_DRAWDOWN_VETO"
+                if drawdown_risk_remaining < worst_risk
+                else "DAILY_RISK_VETO"
+            )
             if record_decisions:
                 decisions.append(
                     {
                         "timestamp": entry,
                         "action": "WAIT",
-                        "reason": "DAILY_RISK_VETO",
+                        "reason": veto_reason,
                         **asdict(state),
                     }
                 )
             continue
         portfolio_return = leverage * float(row.net_bps) / 10_000
-        if portfolio_return < -worst_risk - 1e-9:
+        risk_violation = portfolio_return < -worst_risk - 1e-9
+        if risk_violation:
             risk_violations += 1
         entry_action = "ENTER_LONG" if int(row.side) > 0 else "ENTER_SHORT"
         selected_rows.append(row_number)
@@ -3247,6 +3367,7 @@ def sequential_replay(
         equity_before.append(equity)
         daily_pnl_before.append(state.daily_pnl_fraction)
         risk_remaining_before.append(state.risk_remaining_fraction)
+        risk_violation_rows.append(risk_violation)
         entry_actions.append(entry_action)
         if record_decisions:
             decisions.append(
@@ -3314,6 +3435,13 @@ def sequential_replay(
         active_expert = str(row.expert_id)
         active_entry = entry
         active_entry_price = float(getattr(row, "entry_price", 0.0)) or None
+    if pending_return is not None:
+        exit_day = free_at.floor("D")
+        if current_day is None or exit_day != current_day:
+            current_day = exit_day
+            day_start_equity = equity
+        equity *= 1 + pending_return
+        peak_equity = max(peak_equity, equity)
     result = candidates.iloc[selected_rows].copy().reset_index(drop=True)
     if selected_rows:
         result["leverage"] = leverages
@@ -3321,9 +3449,14 @@ def sequential_replay(
         result["equity_before"] = equity_before
         result["daily_pnl_before"] = daily_pnl_before
         result["risk_remaining_before"] = risk_remaining_before
+        result["risk_violation"] = risk_violation_rows
         result["entry_action"] = entry_actions
         result["close_action"] = "CLOSE"
     result.attrs["risk_violations"] = risk_violations
+    active_risk.equity = equity
+    active_risk.peak_equity = peak_equity
+    active_risk.current_day = current_day
+    active_risk.day_start_equity = day_start_equity
     decision_rows = (
         pd.DataFrame(decisions).sort_values("timestamp", kind="stable").reset_index(drop=True)
         if decisions
@@ -3393,6 +3526,11 @@ def policy_metrics(
     peak = np.maximum.accumulate(np.r_[1.0, equity])[1:]
     active = daily.loc[daily.ne(0)]
     weekly = (1 + daily).resample("7D").prod() - 1
+    risk_violations = (
+        int(trades["risk_violation"].astype(bool).sum())
+        if "risk_violation" in trades
+        else int(trades.attrs.get("risk_violations", 0))
+    )
     return {
         "trades": len(trades),
         "trades_per_day": float(len(trades) / max(1, len(daily))),
@@ -3414,7 +3552,7 @@ def policy_metrics(
         ),
         "stress_1_5x_expectancy_bps": float(trades["stress_1_5x_bps"].mean()),
         "stress_2x_expectancy_bps": float(trades["stress_2x_bps"].mean()),
-        "risk_violations": int(trades.attrs.get("risk_violations", 0)),
+        "risk_violations": risk_violations,
         "long_trades": int(trades["side"].gt(0).sum()),
         "short_trades": int(trades["side"].lt(0).sum()),
     }
@@ -3739,6 +3877,7 @@ def walk_forward(
     trade_pieces: list[pd.DataFrame] = []
     decision_pieces: list[pd.DataFrame] = []
     diagnostics: list[dict[str, Any]] = []
+    walk_forward_risk = ReplayRiskState()
     for number, fold in enumerate(folds, start=1):
         fit = _period(matrix, None, fold["inner_start"], purge_exit=True)
         inner_split = fold["inner_start"] + pd.Timedelta(weeks=INNER_CALIBRATION_WEEKS)
@@ -3761,6 +3900,27 @@ def walk_forward(
             == 0
         ):
             continue
+        stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(
+            fit, fee.round_trip_bps
+        )
+        fit = apply_risk_sizing_contract(
+            fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
+        inner_calibration = apply_risk_sizing_contract(
+            inner_calibration, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
+        model_audit = apply_risk_sizing_contract(
+            model_audit, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
+        calibration = apply_risk_sizing_contract(
+            calibration, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
+        selection = apply_risk_sizing_contract(
+            selection, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
+        test = apply_risk_sizing_contract(
+            test, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+        )
         fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
             fit,
             number,
@@ -3774,10 +3934,26 @@ def walk_forward(
         plan_audit = plan_efficiency_audit(model_audit, fee)
         local_plan_variants_enabled = bool(plan_audit["material"])
         if local_plan_variants_enabled:
-            model_audit = label_local_plan_variants(model_audit, fee)
-            calibration = label_local_plan_variants(calibration, fee)
-            selection = label_local_plan_variants(selection, fee)
-            test = label_local_plan_variants(test, fee)
+            model_audit = apply_risk_sizing_contract(
+                label_local_plan_variants(model_audit, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            )
+            calibration = apply_risk_sizing_contract(
+                label_local_plan_variants(calibration, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            )
+            selection = apply_risk_sizing_contract(
+                label_local_plan_variants(selection, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            )
+            test = apply_risk_sizing_contract(
+                label_local_plan_variants(test, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            )
         _status(
             "plan_efficiency",
             f"fold {number}/{len(folds)} local variants "
@@ -3928,7 +4104,12 @@ def walk_forward(
             test_daily[str(candidate_threshold)] = _daily_returns(
                 candidate_trades, fold["test_start"], fold["test_end"]
             ).tolist()
-        trades, decisions = sequential_replay(scored_test, thresholds, fee.round_trip_bps)
+        trades, decisions = sequential_replay(
+            scored_test,
+            thresholds,
+            fee.round_trip_bps,
+            risk_state=walk_forward_risk,
+        )
         negative_controls = negative_control_metrics(
             scored_test,
             fee,
@@ -3986,10 +4167,11 @@ def walk_forward(
                 "negative_controls": negative_controls,
                 "continuation_value_audit": continuation_audit_metrics,
                 "economic_calibration": economic_calibration_buckets(scored_test),
-                "entry_rule": "Q_ENTER_LOG_UTILITY_GREATER_THAN_Q_WAIT_LOG_UTILITY",
+                "entry_rule": "DOMINANCE_SAFE_PAIRED_Q_ADVANTAGE_GT_ZERO",
                 "view_gating_audit": view_gating_audit(scored_test),
                 "plan_efficiency_audit": plan_audit,
                 "local_plan_variants_enabled": local_plan_variants_enabled,
+                "stop_loss_overrun_reserve_bps": stop_loss_overrun_reserve_bps,
                 "fold_experts": {
                     "fold_scope": library["fold_scope"],
                     "catalog_path": library["catalog_path"],
@@ -4105,6 +4287,18 @@ def fit_forward_bundle(
     fit = _period(matrix, None, calibration_start, purge_exit=True)
     calibration = _period(matrix, calibration_start, selection_start, purge_exit=True)
     selection = _period(matrix, selection_start, end, purge_exit=True)
+    stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(
+        fit, fee.round_trip_bps
+    )
+    fit = apply_risk_sizing_contract(
+        fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+    )
+    calibration = apply_risk_sizing_contract(
+        calibration, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+    )
+    selection = apply_risk_sizing_contract(
+        selection, fee.round_trip_bps, stop_loss_overrun_reserve_bps
+    )
     fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
         fit,
         "forward",
@@ -4116,8 +4310,16 @@ def fit_forward_bundle(
         bool(item.get("local_plan_variants_enabled")) for item in folds
     ) > len(folds) / 2
     if local_plan_variants_enabled:
-        calibration = label_local_plan_variants(calibration, fee)
-        selection = label_local_plan_variants(selection, fee)
+        calibration = apply_risk_sizing_contract(
+            label_local_plan_variants(calibration, fee),
+            fee.round_trip_bps,
+            stop_loss_overrun_reserve_bps,
+        )
+        selection = apply_risk_sizing_contract(
+            label_local_plan_variants(selection, fee),
+            fee.round_trip_bps,
+            stop_loss_overrun_reserve_bps,
+        )
     champions: dict[str, str] = {}
     value_champions: dict[str, str] = {}
     heads: dict[int, dict[str, Any]] = {}
@@ -4174,6 +4376,7 @@ def fit_forward_bundle(
         "policy_selection_period": [selection_start.isoformat(), end.isoformat()],
         "frequency_pnl_frontiers": frontiers,
         "local_plan_variants_enabled": local_plan_variants_enabled,
+        "stop_loss_overrun_reserve_bps": stop_loss_overrun_reserve_bps,
         "fold_experts": {
             "fold_scope": library["fold_scope"],
             "catalog_path": library["catalog_path"],
@@ -4290,7 +4493,9 @@ def write_stage_reports(
         },
         WAIT_VALUE_REPORT: common
         | {
-            "entry_rule": "Q_ENTER_LOG_UTILITY_GREATER_THAN_Q_WAIT_LOG_UTILITY",
+            "entry_rule": (
+                "MIN(PAIRED_Q_ADVANTAGE, IMMEDIATE_EXPECTED_LOG_UTILITY)_GREATER_THAN_ZERO"
+            ),
             "folds": [item.get("continuation_value_audit", {}) for item in folds],
             "wait_is_constant_zero": False,
         },
@@ -4308,7 +4513,7 @@ def write_stage_reports(
         },
         ENTRY_STABILITY_REPORT: common
         | {
-            "entry_rule": "Q_ENTER_GT_Q_WAIT",
+            "entry_rule": "DOMINANCE_SAFE_PAIRED_Q_ADVANTAGE_GT_ZERO",
             "threshold_tuning_enabled": False,
             "diagnostic_frontiers": [
                 item.get("frequency_pnl_frontiers", {}) for item in folds

@@ -894,6 +894,93 @@ def test_wait_has_continuation_value_instead_of_constant_zero() -> None:
     assert first["target_q_wait_log_utility"] > first["target_q_enter_log_utility"]
 
 
+def test_continuation_cannot_rescue_negative_immediate_utility() -> None:
+    class Constant:
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def predict(self, values: np.ndarray) -> np.ndarray:
+            return np.full(len(values), self.value)
+
+    class Identity:
+        def predict(self, values: np.ndarray) -> np.ndarray:
+            return values
+
+    rows = pd.DataFrame({name: [0.0] for name in policy.MODEL_FEATURES})
+    rows["actual_entry_timestamp"] = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows["expected_log_utility"] = -0.001
+    scored = policy.score_continuation(
+        rows,
+        {
+            "enter": Constant(0.5),
+            "wait": Constant(0.4),
+            "advantage": Constant(0.1),
+        },
+        {"enter": Identity(), "wait": Identity(), "advantage": Identity()},
+    )
+    assert bool(scored.loc[0, "continuation_dominance_violation"])
+    assert scored.loc[0, "expected_log_utility"] == pytest.approx(-0.001)
+
+
+def test_past_stop_overrun_reserve_keeps_realized_risk_inside_budget() -> None:
+    entry = pd.Timestamp("2026-01-01T10:00:00Z")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [entry],
+            "exit_timestamp": [entry + pd.Timedelta(minutes=1)],
+            "calibrated_ev_bps": [5.0],
+            "expected_log_utility": [0.001],
+            "p_target": [0.1],
+            "expert_id": ["stop-overrun"],
+            "side": [1],
+            "stop_bps": [50.0],
+            "net_bps": [-58.1],
+            "funding_bps": [0.0],
+            "stress_1_5x_bps": [-62.1],
+            "stress_2x_bps": [-66.1],
+            "time_to_target_seconds": [-1],
+            "exit_seconds": [60],
+            "outcome": ["STOP"],
+        }
+    )
+    reserve = policy.fit_stop_loss_overrun_reserve(rows, 8.0)
+    assert reserve == pytest.approx(0.1)
+    sized = policy.apply_risk_sizing_contract(rows, 8.0, reserve)
+    trades, _ = policy.sequential_replay(sized, 0.0, 8.0)
+    assert len(trades) == 1
+    assert not bool(trades.loc[0, "risk_violation"])
+    assert -trades.loc[0, "portfolio_return"] <= policy.RISK_PER_TRADE + 1e-12
+
+
+def test_replay_vetoes_new_risk_before_maximum_drawdown_can_be_exceeded() -> None:
+    start = pd.Timestamp("2026-01-01T10:00:00Z")
+    entries = [start + pd.Timedelta(days=index) for index in range(12)]
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": entries,
+            "exit_timestamp": [value + pd.Timedelta(minutes=1) for value in entries],
+            "calibrated_ev_bps": [5.0] * len(entries),
+            "expected_log_utility": [0.001] * len(entries),
+            "p_target": [0.1] * len(entries),
+            "expert_id": ["drawdown-test"] * len(entries),
+            "side": [1] * len(entries),
+            "stop_bps": [50.0] * len(entries),
+            "net_bps": [-58.0] * len(entries),
+            "funding_bps": [0.0] * len(entries),
+            "stress_1_5x_bps": [-62.0] * len(entries),
+            "stress_2x_bps": [-66.0] * len(entries),
+            "time_to_target_seconds": [-1] * len(entries),
+            "exit_seconds": [60] * len(entries),
+            "outcome": ["STOP"] * len(entries),
+        }
+    )
+    trades, decisions = policy.sequential_replay(rows, 0.0, 8.0)
+    equity = np.cumprod(1 + trades["portfolio_return"].to_numpy(float))
+    drawdown = 1 - equity / np.maximum.accumulate(np.r_[1.0, equity])[1:]
+    assert float(drawdown.max(initial=0.0)) <= policy.MAXIMUM_DRAWDOWN
+    assert "MAXIMUM_DRAWDOWN_VETO" in decisions["reason"].tolist()
+
+
 def test_empty_threshold_frontier_is_strict_json() -> None:
     start = pd.Timestamp("2026-01-01T00:00:00Z")
     scored = pd.DataFrame(

@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: protocollo di lavoro; nessuno degli otto interventi è ancora completato  
+Stato: punti 1, 2 e 5 verificati; punto 3 corretto dopo la falsificazione OOS e da rieseguire  
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -50,6 +50,33 @@ Il protocollo `4ec0733e45ed33d2aa8798a6a652c931ddd17579651975ce3e62af32bc9a0e11`
 è fallito durante il preflight, prima di qualsiasi fold, con 19 secondi d'uscita apparentemente
 senza aggTrade. La causa era E-12 e non assenza di dati Binance; quel run non è un risultato di
 training e non viene ripreso.
+
+## Esito del protocollo ec1937 e correzione vincolante
+
+Il protocollo `ec1937faa8a1a694e71a213ed24878060741a607ea8748fb036841d37fd2dc05` ha
+completato tutti i dieci outer fold e ha prodotto `NO_STABLE_OOS_POLICY`. Non è un risultato
+ambiguo: 1.820 trade OOS, 6,5 trade/giorno, −8,2669 bps/trade, PF 0,3419, drawdown 96,87% e tutti i
+dieci fold negativi. Il movimento lordo scelto era −0,2667 bps medio contro 8 bps round-trip.
+
+L'audit ha localizzato tre errori nuovi, registrati per non ripeterli:
+
+- **E-13 — continuation rescue non valido.** `Q_ENTER≈0,349` e `Q_WAIT≈0,330` venivano calibrati
+  separatamente; la loro differenza aveva correlazione −0,0008 con l'utility realizzata. Il 98,96%
+  degli ingressi aveva utility immediata prevista negativa, ma la differenza dei Q lo promuoveva
+  ugualmente. Il controller sceglieva quasi sempre `TRAIL_TIGHTER`, pagando fee su movimenti nulli.
+- **E-14 — sizing senza stop-overrun reserve.** 184 stop su 185 oltrepassavano il budget di pochi
+  millesimi perché la leva consumava esattamente l'1% senza riserva per lo slippage osservato.
+- **E-15 — drawdown solo misurato, non vietato.** Il replay continuava a entrare oltre l'8%; inoltre
+  le metriche per lato ereditavano il contatore globale delle violazioni.
+
+La correzione congelata per il prossimo protocollo usa una regressione diretta del paired advantage
+e il vincolo di dominanza
+`decision_advantage = min(predicted_paired_advantage, immediate_expected_log_utility)`. In un mercato
+esogeno WAIT conserva tutte le opportunità future: il continuation value può quindi rifiutare un
+ingresso, ma non rendere conveniente una perdita immediata prevista. Il Risk Engine usa una riserva
+past-only al percentile 99,9% dell'overrun osservato e veta nuovo rischio prima del drawdown 8%.
+I test mirati sono 41/41 verdi; il nuovo walk-forward è necessario prima di spuntare di nuovo il
+punto 3.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
@@ -160,10 +187,13 @@ Un componente viene mantenuto soltanto se mostra valore incrementale paired OOS.
 | E-10 | Research overfitting | Decine di protocolli e periodi OOS già osservati richiedono un ledger globale, non solo nested folds. |
 | E-11 | Mancanza di controlli negativi completi | Non è ancora dimostrato quale componente batta casuale, FULL, equal-weight e regole semplici. |
 | E-12 | Exit bucket spostato di un secondo | `exit_seconds=1` valutava il bucket d'ingresso ma il raffinatore interrogava `entry+1s`, producendo falsi eventi mancanti. |
+| E-13 | Differenza di due Q sovrastimata | Due calibratori separati permettevano al continuation value di promuovere utility immediata negativa. |
+| E-14 | Stop overrun fuori sizing | Lo slippage event-level, pur piccolo, non aveva alcuna riserva nel budget 1%. |
+| E-15 | Drawdown senza veto | Il replay misurava l'8% solo a posteriori e duplicava le violazioni nelle metriche LONG/SHORT. |
 
 ## Ordine vincolante degli otto interventi
 
-### [ ] 1. Cross-fitting temporale del critic
+### [x] 1. Cross-fitting temporale del critic
 
 **Ipotesi.** Il critic appare più informativo nel fit perché ogni campione contribuisce alle
 statistiche del proprio leaf.
@@ -186,7 +216,7 @@ train/inner-OOS della distribuzione delle feature e del regret. Artefatto:
 **Completato quando.** Nessun sample vede il proprio outcome nel critic encoding e l'intera suite
 causale passa.
 
-### [ ] 2. Obiettivo unico sull'equity
+### [x] 2. Obiettivo unico sull'equity
 
 **Ipotesi.** Ordinare per `calibrated_ev_bps` non ordina correttamente piani con stop e leva diversi.
 
@@ -237,6 +267,10 @@ Artefatto: `data/reports/musca_btc_policy_wait_value.json`.
 
 **Completato quando.** WAIT ha un valore predetto OOS e non è più una costante zero.
 
+**Esito ec1937.** WAIT non era costante, ma l'ipotesi operativa è stata respinta: sottrarre due Q
+calibrati indipendentemente ha creato un advantage non economico. Il nuovo paired advantage con
+dominance cap è implementato e testato, ma resta non spuntato fino alla nuova evidenza OOS.
+
 ### [ ] 4. Audit di efficienza e correzione del plan generator
 
 **Ipotesi.** Il downstream rifiuta piani localmente inefficienti che non può modificare.
@@ -258,7 +292,7 @@ non allargabile e medesimo replay label/paper. Artefatto:
 **Completato quando.** Il generatore produce piani localmente efficienti OOS oppure viene dimostrato
 che il collo di bottiglia non è nei parametri del piano.
 
-### [ ] 5. Benchmark direct-EV e direct-utility
+### [x] 5. Benchmark direct-EV e direct-utility
 
 **Ipotesi.** La decomposizione TARGET/STOP/TIMEOUT perde segnale lungo la catena di modelli e
 calibratori.
@@ -280,6 +314,11 @@ calibratori.
 
 **Completato quando.** È congelata la testa che ordina meglio l'utility OOS, oppure entrambe vengono
 respinte con una diagnosi distinta `NO_PREDICTABLE_UTILITY`.
+
+**Esito ec1937.** Ridge è rimasto champion in 19 confronti su 20; direct è stato scelto soltanto in
+due lati/fold. I bucket erano monotoni solo in 3 fold su 10 e tutti i candidati con EV previsto
+positivo hanno realizzato −5,17 bps medi aggregati. Le due teste sono quindi respinte come
+`NO_PREDICTABLE_UTILITY` per quel protocollo; non si aggiungono modelli.
 
 ### [ ] 6. Stabilità della regola di ingresso
 
@@ -412,6 +451,11 @@ lo duplica riga per riga e non lo sostituisce.
 - dichiarare fill eseguibili usando last/mid senza bid/ask e profondità osservati;
 - confrontare EV in bps quando sizing e obiettivo sono sull'equity;
 - trattare WAIT/FLAT come vincita oppure come valore costante se esistono opportunità esclusive;
+- consentire al continuation value di rendere positivo un ingresso con utility immediata prevista
+  negativa in un mercato esogeno a una posizione;
+- sottrarre due Q calibrati indipendentemente senza un paired-advantage auditato;
+- dimensionare esattamente sullo stop senza una riserva causalmente stimata per l'overrun;
+- continuare ad aprire nuovo rischio quando il budget di drawdown residuo è inferiore al worst risk;
 - chiamare `HOLD/REDUCE/CLOSE` azioni apprese quando sono soltanto esecuzioni del piano;
 - aggiungere expert, viste, seed, Optuna trial o librerie prima dell'ablation che ne dimostra il bisogno;
 - usare consenso tra expert come sinonimo di accuratezza senza il test disaccordo→errore OOS;
@@ -469,6 +513,7 @@ drift. Il drift genera un alert e un audit; non autorizza retraining automatico.
 - Mixture of Experts: <https://www.cs.toronto.edu/~hinton/absps/jacobs.pdf>
 - Parameterized actions: <https://ojs.aaai.org/index.php/AAAI/article/view/10226>
 - Conservative Q-Learning: <https://proceedings.neurips.cc/paper/2020/hash/0d2b2061826a5df3221116a5085a6052-Abstract.html>
+- Average-cost semi-Markov decision processes: <https://doi.org/10.2307/3211944>
 - Offline RL limits: <https://proceedings.mlr.press/v178/foster22a.html>
 - Direct trading utility with costs: <https://pubmed.ncbi.nlm.nih.gov/18249919/>
 - Binance public data: <https://github.com/binance/binance-public-data/blob/master/README.md?plain=1>
