@@ -6,6 +6,7 @@ import math
 import os
 import re
 import time
+import zipfile
 from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import suppress
@@ -19,6 +20,8 @@ import duckdb
 import joblib
 import numpy as np
 import pandas as pd
+import pyarrow as pa  # type: ignore[import-untyped]
+import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from arch.bootstrap import SPA
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -36,6 +39,7 @@ SYMBOL = "BTCUSDT"
 VENUE = "Binance USD-M futures"
 ROOT = Path("data/ml/musca_btc_policy")
 LABEL_ROOT = ROOT / "state_actions"
+ORDERED_EVENT_ROOT = ROOT / "ordered_events"
 REGISTRY = ROOT / "research_registry.json"
 EXPERIMENT_LEDGER = ROOT / "experiment_ledger.json"
 REPORT = Path("data/reports/musca_btc_policy.json")
@@ -138,13 +142,13 @@ LABEL_PROTOCOL = {
     "symbol": SYMBOL,
     "venue": VENUE,
     "parent_protocol_hash": base.PROTOCOL_HASH,
-    "path_resolution_seconds": 1,
+    "path_resolution": "1s state path plus ordered millisecond aggregate-trade stop fills",
     "action_space": "parameterized plans composed from sparse weighted expert predictions",
     "sides": ["LONG", "SHORT"],
     "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
     "fixed_action_plans": False,
     "management": "dynamic horizon/TP1/TP2/partial exit/initial stop/non-widening trailing",
-    "same_second": "stop wins",
+    "same_second": "target/stop conflicts are excluded fail-closed",
     "entry": "first observed aggregate trade after decision",
     "terminal_return_prefilter": False,
     "economic_target": "log1p(risk-sized portfolio return after Binance 1x costs and funding)",
@@ -196,7 +200,7 @@ PROTOCOL = {
             "trailing_bps",
         ],
         "management": "same parameterized management path for labels and replay",
-        "same_second": "stop wins",
+        "same_second": "target/stop conflicts are excluded fail-closed",
         "gpu_cpu_tolerance_bps": GPU_CPU_TOLERANCE_BPS,
         "terminal_return_prefilter": False,
     },
@@ -597,6 +601,180 @@ def _one_second_path(month: str) -> Path:
     return base.MICRO_ROOT / f"{SYMBOL}-aggTrades-1s-{month}.parquet"
 
 
+def _datetime_ns(values: Any) -> np.ndarray:
+    index = pd.DatetimeIndex(pd.to_datetime(values, utc=True)).as_unit("ns")
+    return np.asarray(index.view("int64"), dtype=np.int64)
+
+
+def _ordered_event_path(month: str) -> Path:
+    return ORDERED_EVENT_ROOT / f"month={month}.parquet"
+
+
+def _ensure_ordered_event_source(month: str) -> Path:
+    output = _ordered_event_path(month)
+    if output.exists():
+        return output
+    ORDERED_EVENT_ROOT.mkdir(parents=True, exist_ok=True)
+    archive_path = base.MICRO_ROOT / f"{SYMBOL}-aggTrades-{month}.zip"
+    if not archive_path.exists():
+        raise FileNotFoundError(
+            f"missing official event archive for stop refinement: {archive_path}"
+        )
+    names = ["id", "price", "quantity", "first", "last", "timestamp", "buyer_maker"]
+    temporary = output.with_suffix(f".parquet.{os.getpid()}.tmp")
+    writer: pq.ParquetWriter | None = None
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = archive.namelist()
+            if len(members) != 1:
+                raise ValueError(f"unexpected aggregate-trade archive layout: {archive_path}")
+            chunks = pd.read_csv(
+                archive.open(members[0]),
+                header=None,
+                names=names,
+                usecols=["id", "price", "quantity", "timestamp", "buyer_maker"],
+                dtype=str,
+                chunksize=1_000_000,
+            )
+            for chunk_number, chunk in enumerate(chunks, start=1):
+                event_id = pd.to_numeric(chunk["id"], errors="coerce")
+                timestamp = pd.to_numeric(chunk["timestamp"], errors="coerce")
+                price = pd.to_numeric(chunk["price"], errors="coerce")
+                quantity = pd.to_numeric(chunk["quantity"], errors="coerce")
+                valid = event_id.notna() & timestamp.notna() & price.notna() & quantity.notna()
+                frame = pd.DataFrame(
+                    {
+                        "event_id": event_id.loc[valid].to_numpy(np.int64),
+                        "timestamp_ms": timestamp.loc[valid].to_numpy(np.int64),
+                        "second": np.floor_divide(
+                            timestamp.loc[valid].to_numpy(np.int64), 1_000
+                        ),
+                        "price": price.loc[valid].to_numpy(float),
+                        "quantity": quantity.loc[valid].to_numpy(float),
+                        "buyer_maker": chunk.loc[valid, "buyer_maker"]
+                        .astype(str)
+                        .str.lower()
+                        .eq("true")
+                        .to_numpy(bool),
+                    }
+                )
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(temporary, table.schema, compression="zstd")
+                writer.write_table(table)
+                _status(
+                    "ordered_events",
+                    f"{month} event chunk {chunk_number}",
+                    10,
+                    month=month,
+                    chunk=chunk_number,
+                )
+    finally:
+        if writer is not None:
+            writer.close()
+    if writer is None:
+        raise ValueError(f"no valid ordered aggregate trades in {archive_path}")
+    _atomic_replace(temporary, output)
+    return output
+
+
+def _raw_event_prices_for_seconds(seconds: set[int]) -> dict[int, list[float]]:
+    if not seconds:
+        return {}
+    target = pd.DataFrame({"second": sorted(seconds)})
+    paths = [
+        str(_ensure_ordered_event_source(month))
+        for month in sorted(
+            {
+                str(pd.Period(pd.Timestamp(second, unit="s", tz="UTC"), freq="M"))
+                for second in seconds
+            }
+        )
+    ]
+    connection = duckdb.connect()
+    try:
+        connection.register("target_exit_seconds", target)
+        selected = connection.execute(
+            """
+            SELECT event.second, event.price
+            FROM read_parquet(?) AS event
+            INNER JOIN target_exit_seconds AS target USING (second)
+            ORDER BY event.timestamp_ms, event.event_id
+            """,
+            [paths],
+        ).df()
+    finally:
+        connection.close()
+    result = {
+        int(cast(Any, second)): prices.to_list()
+        for second, prices in selected.groupby("second", sort=False)["price"]
+    }
+    missing = [second for second, prices in result.items() if not prices]
+    missing.extend(second for second in seconds if second not in result)
+    if missing:
+        raise ValueError(f"missing ordered aggregate trades for {len(missing)} exit seconds")
+    return result
+
+
+def refine_stop_fills_with_ordered_events(rows: pd.DataFrame) -> pd.DataFrame:
+    output = rows.copy()
+    exit_second = _datetime_ns(output["exit_timestamp"]) // 1_000_000_000
+    management = output["management_code"].to_numpy(int)
+    conflict = (
+        output["time_to_target_seconds"].to_numpy(int)
+        == output["time_to_stop_seconds"].to_numpy(int)
+    ) & output["time_to_target_seconds"].ge(0).to_numpy()
+    refinable = np.isin(management, (OUTCOME_STOP, 5)) & ~conflict
+    prices_by_second = _raw_event_prices_for_seconds(set(exit_second[refinable].tolist()))
+    gross = output["gross_bps"].to_numpy(float).copy()
+    fill_price = np.full(len(output), np.nan, dtype=float)
+    stop_level = np.full(len(output), np.nan, dtype=float)
+    slippage = np.full(len(output), np.nan, dtype=float)
+    refined = np.zeros(len(output), dtype=bool)
+    side = output["side"].to_numpy(int)
+    entry = output["entry_price"].to_numpy(float)
+    target_1 = output["target_1_bps"].to_numpy(float)
+    fraction = output["first_exit_fraction"].to_numpy(float)
+    initial_stop = output["stop_bps"].to_numpy(float)
+    target_time = output["time_to_target_seconds"].to_numpy(int)
+    for row in np.flatnonzero(refinable):
+        code = management[row]
+        if code == OUTCOME_STOP:
+            threshold = -initial_stop[row]
+            filled_fraction = 0.0
+            booked = 0.0
+        else:
+            filled_fraction = fraction[row]
+            booked = filled_fraction * target_1[row]
+            threshold = (gross[row] - booked) / max(1.0 - filled_fraction, 1e-12)
+        event_returns = side[row] * (
+            np.asarray(prices_by_second[int(exit_second[row])], dtype=float) / entry[row] - 1
+        ) * 10_000
+        crossing = np.flatnonzero(event_returns <= threshold + 1e-9)
+        if not len(crossing):
+            raise ValueError("coarse stop exit has no matching ordered aggregate trade")
+        actual_return = float(event_returns[crossing[0]])
+        gross[row] = booked + (1.0 - filled_fraction) * actual_return
+        fill_price[row] = float(prices_by_second[int(exit_second[row])][int(crossing[0])])
+        stop_level[row] = threshold
+        slippage[row] = max(0.0, threshold - actual_return)
+        refined[row] = True
+    for row in np.flatnonzero(management == 4):
+        filled_fraction = fraction[row] if target_time[row] >= 0 else 0.0
+        booked = filled_fraction * target_1[row]
+        actual_return = (gross[row] - booked) / max(1.0 - filled_fraction, 1e-12)
+        fill_price[row] = entry[row] * (1 + side[row] * actual_return / 10_000)
+        refined[row] = not conflict[row]
+    output["gross_bps"] = gross
+    output["event_fill_price"] = fill_price
+    output["event_stop_level_bps"] = stop_level
+    output["stop_slippage_bps"] = slippage
+    output["event_order_refined"] = refined
+    output["same_second_conflict"] = conflict
+    output["data_valid"] = ~conflict
+    return output
+
+
 def ensure_one_second_sources() -> dict[str, Any]:
     missing = [month for month in ONE_SECOND_MONTHS if not _one_second_path(month).exists()]
     if missing:
@@ -787,7 +965,9 @@ def build_execution_contract(
                 month: str(path) for month, path in raw_archives.items()
             },
             "current_label_resolution_seconds": int(source_manifest["resolution_seconds"]),
-            "event_order_inside_second_used_by_current_labels": False,
+            "ordered_stop_fill_resolution": "aggregate-trade timestamp_ms and event_id",
+            "event_order_inside_second_used_by_current_labels": True,
+            "same_second_target_stop_conflict": "EXCLUDED_FAIL_CLOSED",
             "fill_classification": "TRADE_PATH_PROXY_NO_HISTORICAL_L2",
             "bid_ask_historical": False,
             "depth_historical": False,
@@ -1518,6 +1698,7 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
             gpu=_gpu_info(),
         )
     output = pd.concat(pieces, ignore_index=True)
+    output = refine_stop_fills_with_ordered_events(output)
     output["funding_bps"] = _funding_for_actions(output)
     output["round_trip_cost_bps"] = fee.round_trip_bps
     output["net_bps"] = output["gross_bps"] + output["funding_bps"] - fee.round_trip_bps
@@ -1681,6 +1862,8 @@ def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFr
     output["exit_timestamp"] = output["actual_entry_timestamp"] + pd.to_timedelta(
         output["exit_seconds"], unit="s"
     )
+    output = refine_stop_fills_with_ordered_events(output)
+    output = output.loc[output["data_valid"]].reset_index(drop=True)
     output["funding_bps"] = _funding_for_actions(output)
     output["round_trip_cost_bps"] = fee.round_trip_bps
     output["net_bps"] = output["gross_bps"] + output["funding_bps"] - fee.round_trip_bps
@@ -1808,6 +1991,7 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
             rows=sum(len(piece) for piece in pieces),
         )
     matrix = pd.concat(pieces, ignore_index=True)
+    matrix = matrix.loc[matrix["data_valid"].astype(bool)].reset_index(drop=True)
     return matrix, manifest
 
 
@@ -2579,11 +2763,9 @@ def continuation_targets(rows: pd.DataFrame) -> pd.DataFrame:
     )
     if len(timestamps) < 2:
         raise ValueError("insufficient states for continuation targets")
-    timestamp_ns = timestamps.astype("int64").to_numpy()
-    exits_ns = pd.to_datetime(ordered["exit_timestamp"], utc=True).astype("int64").to_numpy()
-    entries_ns = (
-        pd.to_datetime(ordered["actual_entry_timestamp"], utc=True).astype("int64").to_numpy()
-    )
+    timestamp_ns = _datetime_ns(timestamps)
+    exits_ns = _datetime_ns(ordered["exit_timestamp"])
+    entries_ns = _datetime_ns(ordered["actual_entry_timestamp"])
     state_index = np.searchsorted(timestamp_ns, entries_ns, side="left")
     next_free = np.searchsorted(timestamp_ns, exits_ns, side="left")
     value = np.zeros(len(timestamps) + 1, dtype=float)

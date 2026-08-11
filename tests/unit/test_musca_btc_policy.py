@@ -152,6 +152,11 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     monkeypatch.setattr(policy, "_load_second_window", lambda month: source)
     monkeypatch.setattr(
         policy,
+        "_raw_event_prices_for_seconds",
+        lambda seconds: {second: [100.0, 99.0, 101.0, 98.0, 102.0] for second in seconds},
+    )
+    monkeypatch.setattr(
+        policy,
         "_funding_for_actions",
         lambda actions: np.zeros(len(actions), dtype=float),
     )
@@ -164,6 +169,84 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     assert labelled["execution_quality"].eq(
         "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
     ).all()
+
+
+def test_ordered_event_stop_uses_first_crossing_price_and_records_slippage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second = pd.Timestamp("2026-01-01T00:00:05Z")
+    rows = pd.DataFrame(
+        {
+            "exit_timestamp": [second],
+            "management_code": [policy.OUTCOME_STOP],
+            "time_to_target_seconds": [-1],
+            "time_to_stop_seconds": [5],
+            "gross_bps": [-10.0],
+            "side": [1],
+            "entry_price": [100.0],
+            "target_1_bps": [20.0],
+            "first_exit_fraction": [0.5],
+            "stop_bps": [10.0],
+        }
+    )
+    monkeypatch.setattr(
+        policy,
+        "_raw_event_prices_for_seconds",
+        lambda seconds: {int(second.timestamp()): [100.0, 99.8]},
+    )
+    refined = policy.refine_stop_fills_with_ordered_events(rows)
+    assert refined.loc[0, "gross_bps"] == pytest.approx(-20.0)
+    assert refined.loc[0, "stop_slippage_bps"] == pytest.approx(10.0)
+    assert refined.loc[0, "event_fill_price"] == pytest.approx(99.8)
+    assert bool(refined.loc[0, "event_order_refined"])
+
+
+def test_ordered_event_archive_preserves_timestamp_and_event_id_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: policy.Path
+) -> None:
+    archive = tmp_path / "BTCUSDT-aggTrades-2026-01.zip"
+    with policy.zipfile.ZipFile(archive, "w") as target:
+        target.writestr(
+            "BTCUSDT-aggTrades-2026-01.csv",
+            "2,99.8,0.1,2,2,1767225605001,true\n"
+            "3,100.2,0.2,3,3,1767225605002,false\n",
+        )
+    monkeypatch.setattr(policy.base, "MICRO_ROOT", tmp_path)
+    monkeypatch.setattr(policy, "ORDERED_EVENT_ROOT", tmp_path / "ordered")
+    second = 1767225605
+    prices = policy._raw_event_prices_for_seconds({second})
+    assert prices[second] == [99.8, 100.2]
+    stored = pd.read_parquet(policy._ordered_event_path("2026-01"))
+    assert stored["event_id"].tolist() == [2, 3]
+    assert stored["timestamp_ms"].tolist() == [1767225605001, 1767225605002]
+
+
+def test_same_second_target_stop_conflict_is_excluded_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    second = pd.Timestamp("2026-01-01T00:00:05Z")
+    rows = pd.DataFrame(
+        {
+            "exit_timestamp": [second],
+            "management_code": [policy.OUTCOME_STOP],
+            "time_to_target_seconds": [5],
+            "time_to_stop_seconds": [5],
+            "gross_bps": [-10.0],
+            "side": [1],
+            "entry_price": [100.0],
+            "target_1_bps": [20.0],
+            "first_exit_fraction": [0.5],
+            "stop_bps": [10.0],
+        }
+    )
+    monkeypatch.setattr(
+        policy,
+        "_raw_event_prices_for_seconds",
+        lambda seconds: {},
+    )
+    refined = policy.refine_stop_fills_with_ordered_events(rows)
+    assert bool(refined.loc[0, "same_second_conflict"])
+    assert not bool(refined.loc[0, "data_valid"])
 
 
 def test_same_second_target_and_stop_uses_stop_event_and_stop_management() -> None:

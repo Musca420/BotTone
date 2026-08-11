@@ -6,7 +6,7 @@ Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `24caa8b9311c901320f2fe45fc206bdb8bf4c3aba82df77d59854965949456da`.
+Protocollo challenger corrente: `4ec0733e45ed33d2aa8798a6a652c931ddd17579651975ce3e62af32bc9a0e11`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -15,6 +15,8 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - punto 2 implementato: `sized_portfolio_return`, `log_utility`, ranking e contabilità equity;
 - punto 3 implementato per l'ingresso: fitted value semi-Markov causale con
   `Q(ENTER)=utility+V(next_free)` e `Q(WAIT)=V(next_decision)`; nessun oracle entra nel test;
+- punto 4 implementato: perturbazioni locali one-family-at-a-time, audit past-only e abilitazione
+  per fold soltanto quando il regret supera 2 bps; nessuna griglia globale di azioni;
 - punto 5 implementato: testa decomposta e direct-net/direct-utility sulle stesse split, Ridge
   champion e XGBoost CUDA promosso soltanto con miglioramento congiunto;
 - punto 6 implementato: ingresso `Q(action)>Q(WAIT)`; la vecchia curva di soglie è soltanto audit;
@@ -24,13 +26,17 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
   relazione dispersione→errore; LIQUIDITY resta shadow-only;
 - collector Binance aggiornato senza cambiare i consumer: conserva anche timestamp exchange e
   receive-time di ogni aggTrade, latenza book e ritardo di aggregazione separati.
+- label execution aggiornati: gli archivi ufficiali vengono materializzati in Parquet ordinati per
+  `timestamp_ms,event_id`; stop e trailing usano il primo evento realmente attraversato e registrano
+  slippage, mentre i conflitti target/stop nello stesso secondo sono esclusi fail-closed.
 
 Verifiche locali correnti: 33 test mirati e 369 test completi verdi, Ruff verde e mypy verde sui
 due moduli modificati.
 `data/reports/musca_btc_execution_contract.json` rileva 16/16 archivi event-level disponibili ma
 soltanto 6 giornate L2 osservate. I label storici restano quindi dichiarati proxy e non possono
-autorizzare capitale reale. Mancano ancora l'uso completo dell'ordine event-level nei label,
-l'audit/correzione locale del plan generator e l'attivazione condizionale della policy intra-trade.
+autorizzare capitale reale: bid/ask, profondità e partial fill storici non esistono. La gestione usa
+ancora il percorso 1s tra gli eventi d'uscita; l'ordine event-level corregge i fill critici ma non
+inventa un order book. Resta condizionale l'attivazione della policy intra-trade.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
