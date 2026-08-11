@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -98,7 +99,8 @@ CROSSFIT_WARMUP_WEEKS = 8
 CROSSFIT_BLOCK_WEEKS = 4
 CONTINUATION_HALF_LIFE_SECONDS = 24 * 60 * 60
 CONTINUATION_CROSSFIT_MINIMUM_WEEKS = 4
-CONTINUATION_CROSSFIT_BLOCK_WEEKS = 4
+CONTINUATION_CROSSFIT_BLOCK_WEEKS = 1
+MINIMUM_CONTINUATION_CROSSFIT_BLOCKS = 4
 STOP_LOSS_OVERRUN_QUANTILE = 0.999
 MINIMUM_EXPERT_OPPORTUNITIES = 100
 LOCAL_PLAN_AUDIT_STATES = 2_000
@@ -107,6 +109,7 @@ LOCAL_PLAN_INNER_CALIBRATION_STATES = 5_000
 LOCAL_PLAN_REGRET_MATERIAL_BPS = 2.0
 MINIMUM_OOS_TRADES = 300
 MINIMUM_SIDE_OOS_TRADES = 100
+MINIMUM_CONTROLLER_SELECTION_TRADES = 30
 EXPERT_CATALOG_ROOT = ROOT / "fold_experts"
 ALPHA_FEATURES = (
     *base.GATING_CONTEXT,
@@ -267,14 +270,17 @@ PROTOCOL = {
         "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
         "state_features": list(STATE_FEATURES),
         "entry_value": (
-            "chronologically cross-fitted one-backup semi-Markov advantage capped by coherent "
-            "immediate expected log utility: continuation may veto an entry but cannot make a "
-            "negative immediate action enter"
+            "myopic coherent utility champion versus chronologically cross-fitted double-Q "
+            "semi-Markov challenger; continuation is used only after positive past-only policy "
+            "selection evidence and cannot make a negative immediate action enter"
         ),
         "continuation_target": (
-            "actual immediate utility plus the previous fitted model value at the next free "
-            "state; never the best future realized outcome"
+            "actual immediate utility plus a temporally split double-estimator value at the next "
+            "free state; action selection and evaluation use different past-only regressors, "
+            "never the best future realized outcome"
         ),
+        "minimum_continuation_crossfit_blocks": MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
+        "minimum_controller_selection_trades": MINIMUM_CONTROLLER_SELECTION_TRADES,
         "utility_consistency": (
             "predicted expected log utility cannot exceed log1p(leverage times predicted net EV)"
         ),
@@ -296,8 +302,8 @@ PROTOCOL = {
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
         "frequency": (
-            "paired Q advantage and immediate utility both positive; threshold frontier is "
-            "diagnostic only; no quota"
+            "coherent immediate utility positive; paired Q advantage is an optional challenger "
+            "selected on the prior policy window; threshold frontier is diagnostic only"
         ),
         "negative_controls": [
             "random prediction",
@@ -2915,11 +2921,20 @@ def score_actions(
     output["raw_ev_bps"] = output[f"raw_{value_head}_ev_bps"]
     output["calibrated_ev_bps"] = output[f"{value_head}_ev_bps"]
     output["expected_log_utility"] = output[f"{value_head}_log_utility"]
-    output["expected_time_to_target_seconds"] = np.maximum(
-        np.asarray(head["aux"]["time_to_target_seconds"].predict(values), dtype=float), 1.0
+    horizon = (
+        output["horizon_seconds"].to_numpy(float)
+        if "horizon_seconds" in output
+        else np.full(len(output), MAXIMUM_HORIZON_SECONDS, dtype=float)
     )
-    output["expected_holding_seconds"] = np.maximum(
-        np.asarray(head["aux"]["exit_seconds"].predict(values), dtype=float), 1.0
+    output["expected_time_to_target_seconds"] = np.clip(
+        np.asarray(head["aux"]["time_to_target_seconds"].predict(values), dtype=float),
+        1.0,
+        horizon,
+    )
+    output["expected_holding_seconds"] = np.clip(
+        np.asarray(head["aux"]["exit_seconds"].predict(values), dtype=float),
+        1.0,
+        horizon,
     )
     output["expected_ev_bps_per_minute"] = (
         output["calibrated_ev_bps"] * 60 / output["expected_holding_seconds"]
@@ -3017,17 +3032,59 @@ def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
     return "xgboost_cuda" if all(challenger[key] < ridge[key] for key in keys) else "ridge"
 
 
-def _fit_immediate_backup(rows: pd.DataFrame) -> Predictor:
+def _fit_immediate_backup(rows: pd.DataFrame, seed: int = 20261400) -> Predictor:
     return _fit_regressor(
         "ridge",
-        _regressor("ridge", 20261400),
+        _regressor("ridge", seed),
         _x(rows),
         rows["log_utility"].to_numpy(float),
         _timestamp_weights(rows),
     )
 
 
-def continuation_targets(rows: pd.DataFrame, backup_model: Predictor | None = None) -> pd.DataFrame:
+def _fit_double_immediate_backup(rows: pd.DataFrame) -> tuple[Predictor, Predictor]:
+    """Fit independent temporal estimators for Double-Q selection/evaluation."""
+    timestamp = pd.to_datetime(rows["actual_entry_timestamp"], utc=True)
+    week = ((timestamp - timestamp.min()).dt.total_seconds() // (7 * 86_400)).astype(int)
+    left = rows.loc[week.mod(2).eq(0)]
+    right = rows.loc[week.mod(2).eq(1)]
+    if min(len(left), len(right)) < 100:
+        raise ValueError("insufficient independent temporal support for double continuation backup")
+    return (
+        _fit_immediate_backup(left, 20261400),
+        _fit_immediate_backup(right, 20261404),
+    )
+
+
+def _double_state_value(
+    rows: pd.DataFrame,
+    backup: tuple[Predictor, Predictor],
+) -> pd.Series:
+    """Select with one estimator and evaluate with the other, symmetrically."""
+    values = _x(rows)
+    prediction_a = np.asarray(backup[0].predict(values), dtype=float)
+    prediction_b = np.asarray(backup[1].predict(values), dtype=float)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(rows["actual_entry_timestamp"], utc=True).to_numpy(),
+            "a": prediction_a,
+            "b": prediction_b,
+        }
+    )
+    selected_a = frame.groupby("timestamp", sort=True)["a"].idxmax()
+    selected_b = frame.groupby("timestamp", sort=True)["b"].idxmax()
+    evaluated = pd.Series(
+        (frame.loc[selected_a, "b"].to_numpy(float) + frame.loc[selected_b, "a"].to_numpy(float))
+        / 2,
+        index=pd.DatetimeIndex(frame.loc[selected_a, "timestamp"]),
+    )
+    return evaluated.clip(lower=0.0)
+
+
+def continuation_targets(
+    rows: pd.DataFrame,
+    backup_model: Predictor | tuple[Predictor, Predictor] | None = None,
+) -> pd.DataFrame:
     """Build one fitted semi-Markov backup without an oracle future maximum."""
     ordered = rows.sort_values(["actual_entry_timestamp", "side"], kind="stable").reset_index(
         drop=True
@@ -3044,21 +3101,22 @@ def continuation_targets(rows: pd.DataFrame, backup_model: Predictor | None = No
     next_free = np.searchsorted(timestamp_ns, exits_ns, side="left")
     fitted_value = np.zeros(len(timestamps) + 1, dtype=float)
     if backup_model is not None:
-        predicted_immediate = np.asarray(backup_model.predict(_x(ordered)), dtype=float)
-        fitted_value[:-1] = (
-            pd.DataFrame(
-                {
-                    "timestamp": pd.to_datetime(ordered["actual_entry_timestamp"], utc=True),
-                    "predicted_immediate": predicted_immediate,
-                }
+        if isinstance(backup_model, tuple):
+            state_value = _double_state_value(ordered, backup_model)
+        else:
+            predicted_immediate = np.asarray(backup_model.predict(_x(ordered)), dtype=float)
+            state_value = (
+                pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(ordered["actual_entry_timestamp"], utc=True),
+                        "predicted_immediate": predicted_immediate,
+                    }
+                )
+                .groupby("timestamp", sort=True)["predicted_immediate"]
+                .max()
+                .clip(lower=0.0)
             )
-            .groupby("timestamp", sort=True)["predicted_immediate"]
-            .max()
-            .reindex(timestamps)
-            .fillna(0.0)
-            .clip(lower=0.0)
-            .to_numpy(float)
-        )
+        fitted_value[:-1] = state_value.reindex(timestamps).fillna(0.0).to_numpy(float)
     q_wait = np.zeros(len(timestamps), dtype=float)
     if len(timestamps) > 1:
         wait_seconds = np.maximum(0.0, np.diff(timestamp_ns) / 1e9)
@@ -3079,7 +3137,11 @@ def continuation_targets(rows: pd.DataFrame, backup_model: Predictor | None = No
         best_enter.to_numpy(float), q_wait[state_index]
     )
     ordered["continuation_target_source"] = (
-        "PREVIOUS_FITTED_IMMEDIATE_VALUE" if backup_model is not None else "ZERO_BACKUP"
+        "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE"
+        if isinstance(backup_model, tuple)
+        else "SINGLE_FITTED_IMMEDIATE_VALUE"
+        if backup_model is not None
+        else "ZERO_BACKUP"
     )
     complete_before = timestamps[-1] - pd.Timedelta(seconds=MAXIMUM_HORIZON_SECONDS)
     ordered["continuation_target_complete"] = pd.to_datetime(
@@ -3103,7 +3165,7 @@ def _cross_fitted_continuation_targets(
         history = _period(ordered, None, block_start, purge_exit=True)
         held_out = _period(ordered, block_start, block_end, purge_exit=True)
         if len(history) >= 100 and len(held_out) >= 100:
-            backup = _fit_immediate_backup(history)
+            backup = _fit_double_immediate_backup(history)
             targets = continuation_targets(held_out, backup)
             pieces.append(targets.loc[targets["continuation_target_complete"]].copy())
             blocks += 1
@@ -3150,13 +3212,13 @@ def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Any]:
         ),
         weights,
     )
-    models["backup"] = _fit_immediate_backup(rows)
+    models["backup"] = _fit_double_immediate_backup(rows)
     models["crossfit"] = crossfit
     return models
 
 
 def fit_continuation_calibration(models: dict[str, Any], rows: pd.DataFrame) -> dict[str, Any]:
-    targets = continuation_targets(rows, cast(Predictor, models["backup"]))
+    targets = continuation_targets(rows, cast(tuple[Predictor, Predictor], models["backup"]))
     complete = targets.loc[targets["continuation_target_complete"]].copy()
     if len(complete) < 100:
         raise ValueError("insufficient complete continuation calibration targets")
@@ -3176,7 +3238,7 @@ def fit_continuation_calibration(models: dict[str, Any], rows: pd.DataFrame) -> 
         )
         for action in ("enter", "wait", "advantage")
     }
-    calibration["target_source"] = "PREVIOUS_FITTED_IMMEDIATE_VALUE"
+    calibration["target_source"] = "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE"
     return calibration
 
 
@@ -3184,8 +3246,10 @@ def score_continuation(
     rows: pd.DataFrame,
     models: dict[str, Any],
     calibration: dict[str, Any],
+    *,
+    copy: bool = True,
 ) -> pd.DataFrame:
-    output = rows.copy()
+    output = rows.copy() if copy else rows
     values = _x(output)
     for action in ("enter", "wait", "advantage"):
         raw = np.asarray(cast(Predictor, models[action]).predict(values), dtype=float)
@@ -3212,7 +3276,7 @@ def score_continuation(
 
 
 def continuation_metrics(scored: pd.DataFrame, models: dict[str, Any]) -> dict[str, Any]:
-    targets = continuation_targets(scored, cast(Predictor, models["backup"]))
+    targets = continuation_targets(scored, cast(tuple[Predictor, Predictor], models["backup"]))
     complete = targets["continuation_target_complete"].to_numpy(bool)
     target_advantage = targets.loc[complete, "target_q_enter_log_utility"].to_numpy(
         float
@@ -3251,7 +3315,7 @@ def continuation_metrics(scored: pd.DataFrame, models: dict[str, Any]) -> dict[s
         "dominance_violation_fraction": float(
             targets.loc[complete, "continuation_dominance_violation"].mean()
         ),
-        "target_source": "PREVIOUS_FITTED_IMMEDIATE_VALUE",
+        "target_source": "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE",
         "crossfit": models["crossfit"],
     }
 
@@ -3299,37 +3363,50 @@ def sequential_replay(
     *,
     record_decisions: bool = True,
     risk_state: ReplayRiskState | None = None,
+    value_column: str = "expected_log_utility",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if scored.empty:
         return scored.copy(), pd.DataFrame(columns=["timestamp", "action", "reason"])
-    ranked = scored.copy()
+    if value_column not in scored and value_column != "expected_log_utility":
+        raise ValueError(f"missing replay value column: {value_column}")
     stop_reserve = (
-        ranked["risk_stop_overrun_reserve_bps"].to_numpy(float)
-        if "risk_stop_overrun_reserve_bps" in ranked
-        else np.zeros(len(ranked), dtype=float)
+        scored["risk_stop_overrun_reserve_bps"].to_numpy(float)
+        if "risk_stop_overrun_reserve_bps" in scored
+        else np.zeros(len(scored), dtype=float)
     )
     predicted_leverage = _leverage(
-        ranked["stop_bps"].to_numpy(float), round_trip_cost_bps + stop_reserve
+        scored["stop_bps"].to_numpy(float), round_trip_cost_bps + stop_reserve
     )
-    if "expected_log_utility" not in ranked:
-        implied_return = predicted_leverage * ranked["calibrated_ev_bps"].to_numpy(float) / 10_000
-        ranked["expected_log_utility"] = np.log1p(np.maximum(implied_return, -0.999999))
-    if isinstance(threshold_bps, dict):
-        ranked["required_ev_bps"] = ranked["side"].map(threshold_bps).fillna(float("inf"))
+    if value_column in scored:
+        replay_value = scored[value_column].to_numpy(float)
     else:
-        ranked["required_ev_bps"] = float(threshold_bps)
-    required_return = predicted_leverage * ranked["required_ev_bps"].to_numpy(float) / 10_000
-    ranked["required_log_utility"] = np.log1p(required_return)
-    ranked["passes_value_threshold"] = ranked["expected_log_utility"].gt(
-        ranked["required_log_utility"]
+        implied_return = predicted_leverage * scored["calibrated_ev_bps"].to_numpy(float) / 10_000
+        replay_value = np.log1p(np.maximum(implied_return, -0.999999))
+    if isinstance(threshold_bps, dict):
+        required_ev_bps = scored["side"].map(threshold_bps).fillna(float("inf")).to_numpy(float)
+    else:
+        required_ev_bps = np.full(len(scored), float(threshold_bps), dtype=float)
+    required_return = predicted_leverage * required_ev_bps / 10_000
+    required_log_utility = np.log1p(required_return)
+    passes_value_threshold = replay_value > required_log_utility
+    ranking = pd.DataFrame(
+        {
+            "row_number": np.arange(len(scored), dtype=np.int64),
+            "actual_entry_timestamp": pd.to_datetime(
+                scored["actual_entry_timestamp"], utc=True
+            ).to_numpy(),
+            "passes_value_threshold": passes_value_threshold,
+            "replay_value": replay_value,
+            "p_target": scored["p_target"].to_numpy(float),
+            "expert_id": scored["expert_id"].astype(str).to_numpy(),
+        }
     )
-    ranked["passes_ev_threshold"] = ranked["passes_value_threshold"]
-    candidates = (
-        ranked.sort_values(
+    selected = (
+        ranking.sort_values(
             [
                 "actual_entry_timestamp",
                 "passes_value_threshold",
-                "expected_log_utility",
+                "replay_value",
                 "p_target",
                 "expert_id",
             ],
@@ -3340,6 +3417,13 @@ def sequential_replay(
         .sort_values("actual_entry_timestamp")
         .reset_index(drop=True)
     )
+    candidate_positions = selected["row_number"].to_numpy(np.int64)
+    candidates = scored.iloc[candidate_positions].copy().reset_index(drop=True)
+    candidates["expected_log_utility"] = replay_value[candidate_positions]
+    candidates["required_ev_bps"] = required_ev_bps[candidate_positions]
+    candidates["required_log_utility"] = required_log_utility[candidate_positions]
+    candidates["passes_value_threshold"] = passes_value_threshold[candidate_positions]
+    candidates["passes_ev_threshold"] = candidates["passes_value_threshold"]
     if {
         "fold_expert_scope",
         "expert_tree_index",
@@ -3463,6 +3547,30 @@ def sequential_replay(
                         "timestamp": entry,
                         "action": "WAIT",
                         "reason": "EXPECTED_EQUITY_UTILITY_BELOW_THRESHOLD",
+                        "candidate_side": int(row.side),
+                        "candidate_plan_id": str(getattr(row, "plan_id", row.expert_id)),
+                        "candidate_local_variant": str(getattr(row, "local_variant", "BASE")),
+                        "candidate_calibrated_ev_bps": float(row.calibrated_ev_bps),
+                        "candidate_immediate_log_utility": float(
+                            getattr(row, "immediate_expected_log_utility", row.expected_log_utility)
+                        ),
+                        "candidate_action_advantage_log_utility": float(
+                            getattr(row, "action_advantage_log_utility", row.expected_log_utility)
+                        ),
+                        "candidate_q_enter_log_utility": float(
+                            getattr(row, "q_enter_log_utility", 0.0)
+                        ),
+                        "candidate_q_wait_log_utility": float(
+                            getattr(row, "q_wait_log_utility", 0.0)
+                        ),
+                        "candidate_expected_holding_seconds": float(
+                            getattr(
+                                row,
+                                "expected_holding_seconds",
+                                getattr(row, "horizon_seconds", MAXIMUM_HORIZON_SECONDS),
+                            )
+                        ),
+                        "candidate_target_probability": float(row.p_target),
                         **asdict(state),
                     }
                 )
@@ -3985,6 +4093,88 @@ def _choose_frequency_threshold(
     return float(selected["threshold_bps"]), frontier
 
 
+def select_entry_controller(
+    scored: pd.DataFrame,
+    fee: FeeContract,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    continuation_blocks: int,
+) -> tuple[str, dict[str, Any]]:
+    """Promote continuation only when it beats a viable myopic controller past-only."""
+    candidates = {
+        "MYOPIC": "immediate_expected_log_utility",
+        "CONTINUATION": "action_advantage_log_utility",
+    }
+    audit: dict[str, Any] = {}
+    for name, value_column in candidates.items():
+        trades, _ = sequential_replay(
+            scored,
+            0.0,
+            fee.round_trip_bps,
+            record_decisions=False,
+            value_column=value_column,
+        )
+        metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
+        returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
+        selection_utility = (
+            float(np.log1p(returns).sum()) if len(returns) and np.all(returns > -1) else None
+        )
+        enough_continuation_blocks = (
+            name != "CONTINUATION" or continuation_blocks >= MINIMUM_CONTINUATION_CROSSFIT_BLOCKS
+        )
+        eligible = (
+            enough_continuation_blocks
+            and len(trades) >= MINIMUM_CONTROLLER_SELECTION_TRADES
+            and selection_utility is not None
+            and selection_utility > 0
+            and int(metrics.get("risk_violations", 1)) == 0
+            and metrics.get("maximum_drawdown") is not None
+            and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN
+        )
+        audit[name] = {
+            "value_column": value_column,
+            "metrics": metrics,
+            "selection_utility": selection_utility,
+            "minimum_trades": MINIMUM_CONTROLLER_SELECTION_TRADES,
+            "continuation_crossfit_blocks": continuation_blocks,
+            "minimum_continuation_crossfit_blocks": MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
+            "eligible": eligible,
+        }
+    viable = [name for name, values in audit.items() if values["eligible"]]
+    selected = (
+        max(viable, key=lambda name: float(audit[name]["selection_utility"]))
+        if viable
+        else "DISABLED"
+    )
+    audit["selected"] = selected
+    audit["selection_period_only"] = True
+    audit["outer_test_read_for_selection"] = False
+    return selected, audit
+
+
+def apply_entry_controllers(
+    rows: pd.DataFrame,
+    controllers: dict[int, str],
+) -> pd.DataFrame:
+    output = rows
+    output["selected_entry_controller"] = "DISABLED"
+    output["expected_log_utility"] = -1.0
+    for side, controller in controllers.items():
+        positions = output["side"].eq(side)
+        if controller == "MYOPIC":
+            output.loc[positions, "expected_log_utility"] = output.loc[
+                positions, "immediate_expected_log_utility"
+            ]
+        elif controller == "CONTINUATION":
+            output.loc[positions, "expected_log_utility"] = output.loc[
+                positions, "action_advantage_log_utility"
+            ]
+        elif controller != "DISABLED":
+            raise ValueError(f"unknown entry controller: {controller}")
+        output.loc[positions, "selected_entry_controller"] = controller
+    return output
+
+
 def _folds(rows: pd.DataFrame) -> list[dict[str, pd.Timestamp]]:
     start = pd.to_datetime(rows["actual_entry_timestamp"], utc=True).min().floor("D")
     end = pd.to_datetime(rows["actual_entry_timestamp"], utc=True).max().ceil("D")
@@ -4225,9 +4415,32 @@ def walk_forward(
         continuation_model = fit_continuation_models(continuation_refit)
         continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
         scored_selection = score_continuation(
-            scored_selection, continuation_model, continuation_calibration
+            scored_selection,
+            continuation_model,
+            continuation_calibration,
+            copy=False,
         )
-        scored_test = score_continuation(scored_test, continuation_model, continuation_calibration)
+        scored_test = score_continuation(
+            scored_test,
+            continuation_model,
+            continuation_calibration,
+            copy=False,
+        )
+        continuation_blocks = int(continuation_model["crossfit"]["blocks"])
+        controllers: dict[int, str] = {}
+        controller_audit: dict[str, Any] = {}
+        for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+            controller, audit = select_entry_controller(
+                scored_selection.loc[scored_selection["side"].eq(side)],
+                fee,
+                fold["selection_start"],
+                fold["test_start"],
+                continuation_blocks,
+            )
+            controllers[side] = controller
+            controller_audit[side_name] = audit
+        scored_selection = apply_entry_controllers(scored_selection, controllers)
+        scored_test = apply_entry_controllers(scored_test, controllers)
         thresholds: dict[int, float] = {1: 0.0, -1: 0.0}
         frontiers: dict[str, list[dict[str, Any]]] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
@@ -4240,11 +4453,13 @@ def walk_forward(
             frontiers[side_name] = side_frontier
         _status(
             "policy_replay",
-            f"fold {number}/{len(folds)} LONG="
-            f"{thresholds[1] if math.isfinite(thresholds[1]) else 'OFF'} bps; SHORT="
-            f"{thresholds[-1] if math.isfinite(thresholds[-1]) else 'OFF'} bps",
+            f"fold {number}/{len(folds)} LONG={controllers[1]}; SHORT={controllers[-1]}",
             62 + 16 * number / len(folds),
             fold=f"{number}/{len(folds)}",
+            selected_entry_controllers={
+                "LONG": controllers[1],
+                "SHORT": controllers[-1],
+            },
             selected_thresholds_bps={
                 "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
                 "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
@@ -4329,6 +4544,7 @@ def walk_forward(
                     "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
                     "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
                 },
+                "entry_controller_selection": controller_audit,
                 "frequency_pnl_frontiers": frontiers,
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
@@ -4336,7 +4552,7 @@ def walk_forward(
                 "negative_controls": negative_controls,
                 "continuation_value_audit": continuation_audit_metrics,
                 "economic_calibration": economic_calibration_buckets(scored_test),
-                "entry_rule": "DOMINANCE_SAFE_PAIRED_Q_ADVANTAGE_GT_ZERO",
+                "entry_rule": "PAST_ONLY_MYOPIC_CHAMPION_VS_DOUBLE_Q_CONTINUATION_CHALLENGER",
                 "view_gating_audit": view_gating_audit(scored_test),
                 "plan_efficiency_audit": plan_audit,
                 "local_plan_variants_enabled": local_plan_variants_enabled,
@@ -4352,6 +4568,18 @@ def walk_forward(
                 },
             }
         )
+        del (
+            continuation_refit,
+            scored_selection,
+            scored_test,
+            permuted_test,
+            scored_selection_pieces,
+            scored_test_pieces,
+            permuted_test_pieces,
+            continuation_audit,
+            continuation_audit_rows,
+        )
+        gc.collect()
     risk_violations = sum(int(piece.attrs.get("risk_violations", 0)) for piece in trade_pieces)
     trades = pd.concat(trade_pieces, ignore_index=True) if trade_pieces else matrix.iloc[:0].copy()
     trades.attrs["risk_violations"] = risk_violations
@@ -4500,8 +4728,11 @@ def fit_forward_bundle(
     calibrations: dict[int, dict[str, Any]] = {}
     thresholds: dict[int, float] = {}
     frontiers: dict[str, list[dict[str, Any]]] = {}
+    controllers: dict[int, str] = {}
+    controller_audit: dict[str, Any] = {}
     continuation_model = fit_continuation_models(fit)
     continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
+    continuation_blocks = int(continuation_model["crossfit"]["blocks"])
     for side, side_name in ((1, "LONG"), (-1, "SHORT")):
         observed = [str(item["champions"][side_name]) for item in folds]
         champion = (
@@ -4524,8 +4755,21 @@ def fit_forward_bundle(
             selection.loc[selection["side"].eq(side)], head, calibrated, value_champion
         )
         scored_selection = score_continuation(
-            scored_selection, continuation_model, continuation_calibration
+            scored_selection,
+            continuation_model,
+            continuation_calibration,
+            copy=False,
         )
+        controller, audit = select_entry_controller(
+            scored_selection,
+            fee,
+            selection_start,
+            end,
+            continuation_blocks,
+        )
+        controllers[side] = controller
+        controller_audit[side_name] = audit
+        scored_selection = apply_entry_controllers(scored_selection, {side: controller})
         _, frontier = _choose_frequency_threshold(scored_selection, fee, selection_start, end)
         heads[side] = head
         calibrations[side] = calibrated
@@ -4538,6 +4782,11 @@ def fit_forward_bundle(
         "calibrations": calibrations,
         "continuation_models": continuation_model,
         "continuation_calibration": continuation_calibration,
+        "entry_controllers": {
+            "LONG": controllers[1],
+            "SHORT": controllers[-1],
+        },
+        "entry_controller_selection": controller_audit,
         "expert_library": library,
         "thresholds_bps": {
             "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
@@ -4750,8 +4999,18 @@ def preflight_gates(
         ),
         "fitted_continuation_only": all(
             item["continuation_value_audit"].get("target_source")
-            == "PREVIOUS_FITTED_IMMEDIATE_VALUE"
+            == "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE"
             and bool(item["continuation_value_audit"].get("crossfit", {}).get("strictly_past_only"))
+            and int(item["continuation_value_audit"].get("crossfit", {}).get("blocks", 0))
+            >= MINIMUM_CONTINUATION_CROSSFIT_BLOCKS
+            for item in folds
+        ),
+        "controller_selection_past_only": all(
+            all(
+                bool(side_audit.get("selection_period_only"))
+                and not bool(side_audit.get("outer_test_read_for_selection", True))
+                for side_audit in item.get("entry_controller_selection", {}).values()
+            )
             for item in folds
         ),
         "local_actions_supported_in_fit": all(
@@ -4884,7 +5143,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
         forward_bundle = fit_forward_bundle(matrix, fee, folds, resume=resume)
         if verdict == "RESEARCH_PAPER_READY" and not any(
-            value is not None for value in forward_bundle["thresholds_bps"].values()
+            value != "DISABLED" for value in forward_bundle["entry_controllers"].values()
         ):
             verdict = "NO_CALIBRATED_POLICY"
     daily = _daily_returns(trades, audit_start, audit_end)
@@ -5007,6 +5266,9 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             ),
             "thresholds_bps": (
                 None if forward_bundle is None else forward_bundle["thresholds_bps"]
+            ),
+            "entry_controllers": (
+                None if forward_bundle is None else forward_bundle["entry_controllers"]
             ),
             "enabled_sides": [
                 name for name, result in sides.items() if all(result["gates"].values())

@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; punti 3 e 4 corretti dopo la seconda falsificazione OOS e in preflight
+Stato: punti 1, 2 e 5 verificati; punti 3 e 4 corretti dopo la terza falsificazione OOS e in preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -130,6 +130,48 @@ uv run adaptive-bot musca-btc-policy-train --resume --preflight-only
 uv run adaptive-bot musca-btc-policy-train --resume  # consentito solo dopo PREFLIGHT_PASSED
 ```
 
+## Esito preflight 5561e5af e terzo audit causale
+
+Il preflight `5561e5afdb53b1b1ea38adf42e69a23d3ce52f750b077d9a587574832457fc63`
+ha completato due fold in 1.739 secondi senza crash, leakage, lettura dell'holdout o violazioni di
+rischio. Ha correttamente bloccato il training completo: zero trade in entrambi i fold. La
+correzione E-16…E-19 è verificata (`utility_ev_consistency_violations=0`, supporto locale nel fit
+399.714/399.705 righe, target continuation past-only), ma il controller ha annullato ogni azione.
+
+Il fallimento non equivale a assenza totale di opportunità immediate. Nel primo test erano presenti
+965 righe-azione con EV previsto oltre 20 bps, EV realizzato medio +3,5879 bps; nel secondo test
+quattro righe tra 12 e 20 bps hanno realizzato +123,2101 bps. Sono diagnostiche non trade
+indipendenti, ma provano che il blocco è avvenuto dopo la testa immediata. Tutte le 80.618 decisioni
+compatte sono state `WAIT / EXPECTED_EQUITY_UTILITY_BELOW_THRESHOLD`.
+
+Il terzo audit ha localizzato cinque errori aggiuntivi:
+
+- **E-20 — continuation imposto senza benchmark.** Il piano richiedeva il confronto sulle stesse
+  split tra controller miope e continuation; il codice sostituiva sempre l'utility immediata con il
+  paired advantage, anche quando il challenger non aveva prodotto alcun trade nella selection.
+- **E-21 — maximization bias nel backup.** Lo stesso regressore sceglieva e valutava il massimo fra
+  tutte le azioni del timestamp. Con molte perturbazioni rumorose questo sovrastima il valore di
+  WAIT. La correzione usa due regressori addestrati su settimane temporali disgiunte: uno seleziona
+  l'azione e l'altro la valuta, simmetricamente.
+- **E-22 — supporto temporale insufficiente del continuation critic.** Il fold 1 aveva un solo blocco
+  cross-fitted e il fold 2 soltanto due; nel secondo test la frazione di advantage predetto positivo
+  era 0%. Il blocco passa da quattro a una settimana e la promozione ne richiede almeno quattro.
+- **E-23 — durata ausiliaria fuori dominio.** `expected_holding_seconds` arrivava a 428.693 secondi
+  nonostante il massimo piano fosse 21.600 secondi. Tempo a target e holding vengono ora limitati
+  causalmente all'orizzonte del piano.
+- **E-24 — decision audit opaco e replay largo.** Il log conservava il motivo WAIT ma non EV,
+  advantage, Q, piano e durata del candidato respinto; inoltre ordinava copie dell'intero frame. Il
+  replay ora ordina soltanto un indice compatto, conserva i campi economici del candidato e libera i
+  frame a fine fold.
+
+Il nuovo protocollo preregistrato è
+`4735bba967f512b2de21ac2f5550b906b83c59ded098b64da609fa39c2530aa9`; l'hash dei
+label canonici resta `64de949ad7b21c124bb5e6a8234df91a0b84766ca95388a390a2b10aade06a5c`.
+La regola del controller è ora: il controller miope coerente è champion; il continuation Double-Q è
+challenger e viene promosso soltanto se, sulla selection antecedente, ha almeno 30 trade, log-equity
+positiva, rischio valido, almeno quattro blocchi temporali e utility superiore al miope. Se nessuno
+dei due è economicamente valido, il lato resta disabilitato. Il test outer non partecipa alla scelta.
+
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
 Una modifica parziale non conta come completamento.
@@ -246,6 +288,11 @@ Un componente viene mantenuto soltanto se mostra valore incrementale paired OOS.
 | E-17 | Continuation target ancora oracle | Il backup ricorsivo usava il massimo futuro realizzato e generava livelli Q circa mille volte l'utility immediata. |
 | E-18 | Local plan fuori supporto | Le perturbazioni erano etichettate da model-audit in poi ma non nel fit principale; tutti i trade c474 erano locali. |
 | E-19 | Audit locale incompleto | Mancavano quota parziale e controllo esplicito della coerenza EV–utility. |
+| E-20 | Continuation imposto | Il paired advantage sostituiva sempre il champion miope senza evidenza incrementale sulla selection. |
+| E-21 | Massimo dello stesso regressore | Lo stesso modello sceglieva e valutava l'azione futura, sovrastimando WAIT. |
+| E-22 | 1–2 blocchi continuation | Il critic dell'advantage non aveva supporto temporale indipendente sufficiente. |
+| E-23 | Durata prevista fuori piano | Il regressore ausiliario poteva prevedere giorni per un piano massimo di sei ore. |
+| E-24 | WAIT opaco e replay largo | Mancavano valori del candidato respinto e venivano ordinate copie di tutti i campi. |
 
 ## Ordine vincolante degli otto interventi
 
@@ -513,6 +560,11 @@ lo duplica riga per riga e non lo sostituisce.
 - calibrare EV netto e utility come due autorizzazioni indipendenti quando violano il bound di Jensen;
 - costruire continuation target con il massimo futuro realizzato invece del precedente modello fitted;
 - autorizzare in test una perturbazione di piano che non possiede esempi etichettati nel fit;
+- imporre il continuation controller senza un confronto paired con il controller miope sulla
+  selection antecedente;
+- usare lo stesso regressore per selezionare e valutare il massimo futuro fra molte azioni;
+- promuovere un continuation critic con meno di quattro blocchi temporali cross-fitted;
+- accettare una durata prevista maggiore dell'orizzonte del piano;
 - dimensionare esattamente sullo stop senza una riserva causalmente stimata per l'overrun;
 - continuare ad aprire nuovo rischio quando il budget di drawdown residuo è inferiore al worst risk;
 - chiamare `HOLD/REDUCE/CLOSE` azioni apprese quando sono soltanto esecuzioni del piano;

@@ -881,7 +881,30 @@ def test_wait_has_continuation_value_instead_of_constant_zero() -> None:
     first = targets.iloc[0]
     assert first["target_q_wait_log_utility"] > 0
     assert first["target_q_wait_log_utility"] > first["target_q_enter_log_utility"]
-    assert targets["continuation_target_source"].eq("PREVIOUS_FITTED_IMMEDIATE_VALUE").all()
+    assert targets["continuation_target_source"].eq("SINGLE_FITTED_IMMEDIATE_VALUE").all()
+
+
+def test_double_backup_does_not_value_the_action_selected_by_the_same_noisy_model() -> None:
+    class Fixed:
+        def __init__(self, prediction: list[float]) -> None:
+            self.prediction = np.asarray(prediction, dtype=float)
+
+        def predict(self, values: np.ndarray) -> np.ndarray:
+            return self.prediction[: len(values)]
+
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows = pd.DataFrame({name: [0.0] * 4 for name in policy.MODEL_FEATURES})
+    rows["actual_entry_timestamp"] = [
+        start,
+        start,
+        start + pd.Timedelta(minutes=1),
+        start + pd.Timedelta(minutes=1),
+    ]
+    value = policy._double_state_value(
+        rows,
+        (Fixed([10.0, 0.0, 10.0, 0.0]), Fixed([-10.0, 1.0, -10.0, 1.0])),
+    )
+    assert value.eq(0.0).all()
 
 
 def test_predicted_utility_cannot_be_positive_when_predicted_net_ev_is_negative() -> None:
@@ -904,6 +927,7 @@ def test_predicted_utility_cannot_be_positive_when_predicted_net_ev_is_negative(
 
     rows = pd.DataFrame({name: [0.0] for name in policy.MODEL_FEATURES})
     rows["sized_leverage"] = 10.0
+    rows["horizon_seconds"] = 30
     head: dict[str, Any] = {
         "classifier": Classifier(),
         "conditional": {event: Constant(-10.0) for event in range(3)},
@@ -928,6 +952,44 @@ def test_predicted_utility_cannot_be_positive_when_predicted_net_ev_is_negative(
         assert scored.loc[0, f"{name}_ev_bps"] < 0
         assert scored.loc[0, f"{name}_log_utility"] < 0
         assert bool(scored.loc[0, f"{name}_utility_consistency_clipped"])
+    assert scored.loc[0, "expected_holding_seconds"] == 30
+    assert scored.loc[0, "expected_time_to_target_seconds"] == 30
+
+
+def test_controller_falls_back_to_positive_myopic_policy_when_continuation_is_unfit() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    entries = pd.date_range(start, periods=policy.MINIMUM_CONTROLLER_SELECTION_TRADES, freq="10min")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": entries,
+            "exit_timestamp": entries + pd.Timedelta(minutes=1),
+            "calibrated_ev_bps": 10.0,
+            "immediate_expected_log_utility": 0.001,
+            "action_advantage_log_utility": -0.001,
+            "expected_log_utility": -0.001,
+            "p_target": 0.6,
+            "expert_id": "myopic-control",
+            "side": 1,
+            "stop_bps": 50.0,
+            "net_bps": 10.0,
+            "funding_bps": 0.0,
+            "stress_1_5x_bps": 6.0,
+            "stress_2x_bps": 2.0,
+            "time_to_target_seconds": 30,
+            "exit_seconds": 60,
+            "outcome": "TARGET",
+        }
+    )
+    selected, audit = policy.select_entry_controller(
+        rows,
+        policy.FeeContract(2.0, 4.0, 0.0, "test"),
+        start,
+        start + pd.Timedelta(days=28),
+        policy.MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
+    )
+    assert selected == "MYOPIC"
+    assert audit["MYOPIC"]["eligible"] is True
+    assert audit["CONTINUATION"]["eligible"] is False
 
 
 def test_continuation_cannot_rescue_negative_immediate_utility() -> None:
@@ -1061,6 +1123,9 @@ def test_empty_threshold_frontier_is_strict_json() -> None:
     assert not policy.math.isfinite(threshold)
     assert all(item["selection_utility"] is None for item in frontier)
     policy.json.dumps(frontier, allow_nan=False)
+    _, decisions = policy.sequential_replay(scored, 0.0, fee.round_trip_bps)
+    assert decisions.loc[0, "candidate_calibrated_ev_bps"] == pytest.approx(-1.0)
+    assert decisions.loc[0, "candidate_side"] == 1
 
 
 def test_full_training_is_forbidden_without_passing_same_protocol_preflight(
@@ -1085,8 +1150,21 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
         "test_metrics": {"expectancy_bps": 1.0},
         "economic_calibration": {"utility_ev_consistency_violations": 0},
         "continuation_value_audit": {
-            "target_source": "PREVIOUS_FITTED_IMMEDIATE_VALUE",
-            "crossfit": {"strictly_past_only": True},
+            "target_source": "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE",
+            "crossfit": {
+                "strictly_past_only": True,
+                "blocks": policy.MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
+            },
+        },
+        "entry_controller_selection": {
+            "LONG": {
+                "selection_period_only": True,
+                "outer_test_read_for_selection": False,
+            },
+            "SHORT": {
+                "selection_period_only": True,
+                "outer_test_read_for_selection": False,
+            },
         },
         "local_plan_variants_enabled": True,
         "local_plan_training_support": {"fit": {"added_rows": 1}},
