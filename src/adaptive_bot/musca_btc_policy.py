@@ -4486,12 +4486,7 @@ def walk_forward(
             number,
             resume=resume,
         )
-        inner_calibration = apply_fold_expert_library(raw_inner_calibration, library)
-        model_audit = apply_fold_expert_library(raw_model_audit, library)
-        calibration = apply_fold_expert_library(raw_calibration, library)
-        selection = apply_fold_expert_library(raw_selection, library)
-        test = apply_fold_expert_library(raw_test, library)
-        plan_audit = plan_efficiency_audit(model_audit, fee)
+        plan_audit = plan_efficiency_audit(raw_model_audit, fee)
         local_plan_variants_enabled = bool(plan_audit["material"])
         local_plan_training_support = {
             "fit": {"sampled_states": 0, "added_rows": 0},
@@ -4510,6 +4505,8 @@ def walk_forward(
                 f"{number}-local",
                 resume=resume,
             )
+            del augmented_fit
+            gc.collect()
             augmented_inner, local_plan_training_support["inner_calibration"] = (
                 augment_local_plan_training_support(
                     raw_inner_calibration,
@@ -4520,6 +4517,8 @@ def walk_forward(
                 )
             )
             inner_calibration = apply_fold_expert_library(augmented_inner, library)
+            del augmented_inner
+            gc.collect()
             model_audit = apply_fold_expert_library(
                 apply_risk_sizing_contract(
                     label_local_plan_variants(raw_model_audit, fee),
@@ -4552,6 +4551,21 @@ def walk_forward(
                 ),
                 library,
             )
+        else:
+            inner_calibration = apply_fold_expert_library(raw_inner_calibration, library)
+            model_audit = apply_fold_expert_library(raw_model_audit, library)
+            calibration = apply_fold_expert_library(raw_calibration, library)
+            selection = apply_fold_expert_library(raw_selection, library)
+            test = apply_fold_expert_library(raw_test, library)
+        del (
+            raw_fit,
+            raw_inner_calibration,
+            raw_model_audit,
+            raw_calibration,
+            raw_selection,
+            raw_test,
+        )
+        gc.collect()
         row_calibration_end = fold["calibration_start"] + pd.Timedelta(weeks=ROW_CALIBRATION_WEEKS)
         row_calibration = _period(
             calibration,

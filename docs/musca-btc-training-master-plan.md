@@ -290,6 +290,13 @@ library a ogni blocco, scrive il cache encoded e fa una sola merge finale. Il fi
 avviene prima della merge. Split, righe, target, modelli e protocol hash sono invariati; cambia
 soltanto il picco di memoria. Un nuovo preflight riparte dalle 16 partizioni gia verificate.
 
+Il primo resume ha inoltre rivelato una seconda duplicazione: prima di sapere se le varianti locali
+fossero abilitate, il codice applicava il critic base a inner calibration, model audit, calibration,
+selection e test; se l'audit risultava materiale, conservava quelle cinque copie e le sostituiva con
+cinque nuove copie locali. Il picco ha raggiunto 24,23 GB. L'audit di efficienza non usa feature del
+critic, quindi viene ora eseguito sui raw label; solo dopo si materializza una delle due famiglie,
+mai entrambe. I frame `augmented_*` e raw vengono liberati appena consumati.
+
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
 Una modifica parziale non conta come completamento.
