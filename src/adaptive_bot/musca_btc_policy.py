@@ -1735,42 +1735,13 @@ def _simulate_gpu(
         if np.ndim(horizon) == 0
         else np.asarray(horizon, dtype=np.int32)
     )
-    missing_prefix = np.concatenate(([0], np.cumsum(~observed, dtype=np.int64)))
-    path_ends = np.asarray(positions, dtype=np.int64) + horizons
-    dirty = (missing_prefix[path_ends] - missing_prefix[positions]) > 0
-    if np.any(dirty):
-        clean_rows = np.flatnonzero(~dirty)
-        dirty_rows = np.flatnonzero(dirty)
-        parameters = [
-            np.asarray(values, dtype=float)
-            for values in (target_1, target_2, stop, trailing, first_exit_fraction)
-        ]
-        dirty_result = _simulate_cpu(
-            source,
-            np.asarray(positions, dtype=np.int64)[dirty_rows],
-            side,
-            horizons[dirty_rows],
-            *(values[dirty_rows] for values in parameters),
-        )
-        if not len(clean_rows):
-            return dirty_result
-        clean_result = _simulate_gpu(
-            source,
-            np.asarray(positions, dtype=np.int64)[clean_rows],
-            side,
-            horizons[clean_rows],
-            *(values[clean_rows] for values in parameters),
-        )
-        combined: dict[str, np.ndarray] = {}
-        for name, clean_values in clean_result.items():
-            values = np.empty(count, dtype=clean_values.dtype)
-            values[clean_rows] = clean_values
-            values[dirty_rows] = dirty_result[name]
-            combined[name] = values
-        return combined
-    device_values = [
-        cp.asarray(source[name].to_numpy(np.float64)) for name in ("open", "high", "low", "close")
+    host_values = [
+        source[name].to_numpy(np.float64).copy() for name in ("open", "high", "low", "close")
     ]
+    host_values[0][~observed] = np.nan
+    host_values[1][~observed] = -np.inf
+    host_values[2][~observed] = np.inf
+    device_values = [cp.asarray(values) for values in host_values]
     gpu_positions = cp.asarray(positions, dtype=cp.int64)
     gpu_horizons = cp.asarray(horizons, dtype=cp.int32)
     timeout_positions = _timeout_positions(observed, positions, horizons)

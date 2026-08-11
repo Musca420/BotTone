@@ -474,6 +474,40 @@ def test_state_action_labels_are_versioned_by_execution_protocol() -> None:
     assert "non-executable" in policy.LABEL_PROTOCOL["no_trade_seconds"]
 
 
+def test_gpu_does_not_fall_back_to_cpu_for_no_trade_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not policy._gpu_info().get("available"):
+        pytest.skip("CUDA unavailable")
+    source = _source(
+        [
+            (100.0, 100.0, 100.0, 100.0),
+            (99.0, 99.0, 99.0, 99.0),
+            (101.0, 101.0, 101.0, 101.0),
+        ]
+    )
+    source["observed_trade"] = [True, False, True]
+
+    def fail_cpu(*args: object, **kwargs: object) -> dict[str, np.ndarray]:
+        del args, kwargs
+        pytest.fail("no-trade paths must remain GPU accelerated")
+
+    monkeypatch.setattr(policy, "_simulate_cpu", fail_cpu)
+    result = policy._simulate_gpu(
+        source,
+        np.asarray([0]),
+        1,
+        np.asarray([2]),
+        np.asarray([500.0]),
+        np.asarray([600.0]),
+        np.asarray([50.0]),
+        np.asarray([50.0]),
+        np.asarray([0.5]),
+    )
+    assert result["management_code"][0] == policy.OUTCOME_TIMEOUT
+    assert result["gross_bps"][0] == pytest.approx(100.0)
+
+
 def test_target_probability_means_target_before_stop() -> None:
     class Classifier:
         classes_ = np.asarray([0, 1, 2])

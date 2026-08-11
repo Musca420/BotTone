@@ -37,7 +37,7 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - diagnostica P1 implementata: `expected_ev_bps_per_minute` e
   `expected_log_utility_per_hour`; non partecipano alla promozione o alla scelta dei parametri.
 
-Verifiche locali correnti: 52 test Musca verdi; la suite globale ha superato 388 test e l'unico
+Verifiche locali correnti: 53 test Musca verdi; la suite globale ha superato 388 test e l'unico
 health-check Hypothesis `too_slow` estraneo al training è passato al rerun isolato. Ruff e mypy sono
 verdi sul modulo policy modificato. Il mypy globale conserva errori preesistenti nei moduli legacy
 fuori ambito; non sono stati nascosti né modificati.
@@ -266,8 +266,9 @@ La correzione vincolante e:
 - bucket con `observed_trade=False` non sono eseguibili e non attivano stop, target o trailing;
 - il timeout viene eseguito sul primo bucket con trade osservato a partire dall'orizzonte;
 - se quel trade futuro non e presente, la riga fallisce closed;
-- i rari piani che attraversano un secondo vuoto vengono simulati sulla CPU; il restante universo
-  conserva il kernel GPU congelato;
+- sulla GPU i bucket vuoti usano sentinel neutrali (`open=NaN`, `high=-inf`, `low=+inf`) che rendono
+  impossibile ogni crossing senza modificare il kernel congelato; il timeout viene poi corretto sul
+  primo trade osservato con la stessa formula CPU;
 - il protocollo dei label e versionato nell'albero `state_actions/<label-hash>`: gli undici mesi
   parziali costruiti con la semantica precedente restano preservati ma non possono essere riusati.
 
