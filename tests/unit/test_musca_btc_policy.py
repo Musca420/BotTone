@@ -82,16 +82,18 @@ def _inherited_expert_rows() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_multi_expert_generator_replaces_ten_templates_with_parameterized_plans() -> None:
+def test_multi_expert_generator_preserves_distinct_supported_horizons() -> None:
     inherited = _inherited_expert_rows()
     plans = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
     repeated = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
     assert len(inherited) == 10
-    assert len(plans) == 2
+    assert len(plans) >= 2
     assert plans["plan_id"].tolist() == repeated["plan_id"].tolist()
-    assert (~plans["horizon_seconds"].isin(policy.PREDICTION_HORIZONS_SECONDS)).any()
+    assert plans["horizon_seconds"].isin(policy.PREDICTION_HORIZONS_SECONDS).all()
+    assert plans.groupby(["entry_timestamp", "side"])["horizon_seconds"].nunique().ge(1).all()
     assert plans["gate_effective_experts"].gt(1).all()
-    assert plans["plan_contributors"].str.count(",").eq(2).all()
+    assert plans["proposal_support_fraction"].gt(0).all()
+    assert plans["proposal_consensus_selected"].isin([0.0, 1.0]).all()
     assert plans["target_2_bps"].gt(plans["target_1_bps"]).all()
     assert plans["trailing_bps"].le(plans["stop_bps"]).all()
     assert all(f"view_{view}_prediction_bps" in plans for view in policy.base.VIEWS)
@@ -103,11 +105,43 @@ def test_plan_identity_changes_when_expert_mixture_changes() -> None:
     inherited = _inherited_expert_rows()
     baseline = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
     changed = inherited.copy()
-    changed.loc[changed["side"].eq(1), "expert_21600s_flow"] += 500.0
+    changed.loc[changed["side"].eq(1), "expert_60s_flow"] += 500.0
     challenger = policy.compose_parameterized_plans(changed, round_trip_cost_bps=8.0)
-    baseline_long = baseline.loc[baseline["side"].eq(1), "plan_id"].item()
-    challenger_long = challenger.loc[challenger["side"].eq(1), "plan_id"].item()
+    baseline_long = set(baseline.loc[baseline["side"].eq(1), "plan_id"])
+    challenger_long = set(challenger.loc[challenger["side"].eq(1), "plan_id"])
     assert baseline_long != challenger_long
+
+
+def test_specialist_horizons_are_not_averaged_into_a_virtual_plan() -> None:
+    inherited = _inherited_expert_rows()
+    for column in policy.base.EXPERT_COLUMNS:
+        inherited[column] = -100.0
+    long = inherited["side"].eq(1)
+    short = inherited["side"].eq(-1)
+    inherited.loc[long, "expert_60s_flow"] = 50.0
+    inherited.loc[long, "expert_21600s_trend"] = 60.0
+    inherited.loc[short, "expert_300s_vwap"] = 55.0
+    plans = policy.compose_parameterized_plans(inherited, round_trip_cost_bps=8.0)
+    long_horizons = set(plans.loc[plans["side"].eq(1), "horizon_seconds"])
+    short_horizons = set(plans.loc[plans["side"].eq(-1), "horizon_seconds"])
+    assert {60, 21_600}.issubset(long_horizons)
+    assert 300 in short_horizons
+    assert plans["horizon_seconds"].isin(policy.PREDICTION_HORIZONS_SECONDS).all()
+
+
+def test_fold_generator_representation_is_plan_aware() -> None:
+    plan = policy.compose_parameterized_plans(
+        _inherited_expert_rows(), round_trip_cost_bps=8.0
+    ).iloc[[0]]
+    shorter = plan.copy()
+    shorter["horizon_seconds"] = 60
+    shorter["horizon_fraction"] = 60 / policy.MAXIMUM_HORIZON_SECONDS
+    longer = plan.copy()
+    longer["horizon_seconds"] = 21_600
+    longer["horizon_fraction"] = 1.0
+    values = policy._generator_x(pd.concat([shorter, longer], ignore_index=True))
+    assert not np.array_equal(values[0], values[1])
+    assert policy.GENERATOR_FEATURES != policy.base.GATING_CONTEXT
 
 
 def test_local_plan_neighborhood_is_bounded_and_preserves_management_constraints() -> None:
@@ -706,6 +740,9 @@ def test_fold_expert_application_does_not_read_future_outcome(
     rows["side"] = 1
     rows["horizon_seconds"] = 300
     rows["expert_id"] = policy.expert_id(1, 300)
+    for name in policy.GENERATOR_FEATURES:
+        if name not in rows:
+            rows[name] = 0.0
     library = {
         "fold_scope": "fold-a",
         "groups": {

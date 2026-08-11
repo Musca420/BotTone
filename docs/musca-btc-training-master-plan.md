@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; punto 6 corretto dopo il quarto preflight falsificato
+Stato: punti 1, 2 e 5 verificati; action-space in correzione dopo il quinto preflight falsificato
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -211,6 +211,46 @@ Gli artefatti del protocollo precedente sono preservati in:
 - `data/reports/archive/4735bba967f512b2/musca_btc_policy.preflight.json`;
 - `data/ml/musca_btc_policy/audits/4735bba967f512b2/preflight_decisions.parquet`;
 - `data/ml/musca_btc_policy/audits/4735bba967f512b2/preflight_trades.parquet`.
+
+## Esito preflight e5560023 e causa strutturale dell'action-space
+
+Il preflight `e5560023f084bde0e2b8356112f303b983ff4a65ccec595b2bdc76527bd92f9d`
+ha completato due fold in 1.871 secondi. Tutti i gate di causalita, rischio, coerenza EV-utility,
+continuation, selezione del controller e supporto locale sono passati. Il calibratore sul vincitore
+ha pero disabilitato entrambi i lati e il replay ha prodotto zero trade. Non e un nuovo guasto di
+`FLAT`: ha correttamente rifiutato un ranking non informativo.
+
+Nel periodo winner-only antecedente al test, il candidato scelto era realmente la migliore azione
+soltanto nel 7,062% degli stati del fold 1 e nel 6,540% del fold 2. L'EV realizzata dei vincitori era
+rispettivamente -7,8292 e -7,9692 bps. Gli audit aggiuntivi hanno escluso due correzioni isolate:
+aggiungere le 29 feature causali omesse e usare un ranker pairwise non ha prodotto EV OOS positiva.
+
+La causa nuova e nel passaggio expert -> piano:
+
+- **E-28 - compressione multimodale degli orizzonti.** Cinque viste per cinque orizzonti vengono
+  mediate in un unico orizzonte geometrico per lato. Il 97,7% dei piani risultanti cade tra 5 e 60
+  minuti, mentre almeno una vista propone sei ore nell'85,53% degli stati. Le proposte specialistiche
+  vengono quindi distrutte prima che la policy possa confrontarle.
+- **E-29 - foglie chiamate impropriamente esperti.** I 2.343-2.574 candidati dei due fold sono leaf
+  context dello stesso piano per lato; non sono strategie eseguibili con gestione distinta.
+- **E-30 - critic non consapevole del piano.** Il generatore dei leaf legge soltanto il contesto di
+  mercato. Horizon, target, stop, trailing e quota parziale non entrano nelle sue feature; le
+  perturbazioni locali ereditano quindi la stessa rappresentazione del piano base.
+- **E-31 - media di quantili incompatibili.** Quantili MFE/MAE appartenenti a distribuzioni e
+  orizzonti differenti vengono mediati per costruire un piano virtuale. Questo non conserva ne la
+  distribuzione first-passage ne una strategia specialistica osservabile.
+
+La correzione preregistrata non aggiunge soglie economiche e non osserva il test: ogni vista propone
+causalmente il proprio orizzonte migliore, le proposte identiche vengono deduplicate, il consenso e
+registrato come supporto ma non puo cancellare uno specialista. Ogni piano mantiene i quantili del
+proprio orizzonte e viene etichettato con la stessa gestione event-level. Il critic diventa
+plan-aware. Solo dopo un audit antecedente positivo questa action-space puo raggiungere il preflight.
+
+Gli artefatti e556 sono preservati in:
+
+- `data/reports/archive/e5560023f084bde0/musca_btc_policy.preflight.json`;
+- `data/ml/musca_btc_policy/audits/e5560023f084bde0/preflight_decisions.parquet`;
+- `data/ml/musca_btc_policy/audits/e5560023f084bde0/preflight_trades.parquet`.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.

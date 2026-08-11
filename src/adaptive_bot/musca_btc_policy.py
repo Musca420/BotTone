@@ -40,7 +40,8 @@ from adaptive_bot.musca_v8_binance import fee_schedule, load_config
 SYMBOL = "BTCUSDT"
 VENUE = "Binance USD-M futures"
 ROOT = Path("data/ml/musca_btc_policy")
-LABEL_ROOT = ROOT / "state_actions"
+LABEL_ROOT_BASE = ROOT / "state_actions"
+LABEL_ROOT = LABEL_ROOT_BASE
 ORDERED_EVENT_ROOT = ROOT / "ordered_events"
 REGISTRY = ROOT / "research_registry.json"
 EXPERIMENT_LEDGER = ROOT / "experiment_ledger.json"
@@ -128,6 +129,11 @@ ALPHA_FEATURES = (
     "gate_entropy",
     "gate_effective_experts",
     "gate_top_weight",
+    *(f"view_{view}_prediction_bps" for view in base.VIEWS),
+    *(f"proposal_{view}_support" for view in base.VIEWS),
+    "proposal_support_fraction",
+    "proposal_consensus_selected",
+    "proposal_rank_fraction",
     "first_exit_fraction",
 )
 FOLD_EXPERT_FEATURES = (
@@ -142,6 +148,7 @@ FOLD_EXPERT_FEATURES = (
     "managed_generator_score_bps",
 )
 MODEL_FEATURES = (*ALPHA_FEATURES, *FOLD_EXPERT_FEATURES)
+GENERATOR_FEATURES = ALPHA_FEATURES
 STATE_FEATURES = (
     "daily_pnl_fraction",
     "risk_remaining_fraction",
@@ -159,10 +166,14 @@ LABEL_PROTOCOL = {
         "1s state path plus ordered millisecond aggregate-trade entry, target, stop and trailing "
         "fills"
     ),
-    "action_space": "parameterized plans composed from sparse weighted expert predictions",
+    "action_space": "variable expert-supported plans preserving distinct horizon proposals",
     "sides": ["LONG", "SHORT"],
     "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
     "fixed_action_plans": False,
+    "proposal_rule": (
+        "each specialist proposes its best horizon; identical horizons are deduplicated; "
+        "consensus is recorded without averaging incompatible first-passage distributions"
+    ),
     "management": "dynamic horizon/TP1/TP2/partial exit/initial stop/non-widening trailing",
     "same_second": "target/stop conflicts are excluded fail-closed",
     "entry": "first observed aggregate trade after decision",
@@ -174,6 +185,7 @@ LABEL_PROTOCOL = {
 LABEL_PROTOCOL_HASH = hashlib.sha256(
     json.dumps(LABEL_PROTOCOL, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
+LABEL_ROOT = LABEL_ROOT_BASE / LABEL_PROTOCOL_HASH[:16]
 
 PROTOCOL = {
     "name": "musca_btc_binance_canonical_policy_challenger",
@@ -207,6 +219,10 @@ PROTOCOL = {
         "position_types": ["HOLD", "REDUCE", "CLOSE", "TIGHTEN_STOP", "UPDATE_TRAIL"],
         "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
         "fixed_action_plans": False,
+        "proposal_rule": (
+            "each specialist proposes its best horizon; identical horizons are deduplicated; "
+            "consensus is support metadata and cannot average away a specialist"
+        ),
         "plan_parameters": [
             "horizon_seconds",
             "target_1_bps",
@@ -235,8 +251,8 @@ PROTOCOL = {
         ),
     },
     "fold_local_experts": {
-        "generator": "XGBRFRegressor CUDA critic context trained on exact managed net_bps",
-        "candidate": "every context leaf by side after multi-expert plan composition",
+        "generator": ("plan-aware XGBRFRegressor CUDA critic trained on exact managed net_bps"),
+        "candidate": "every state-plan context leaf by side after expert proposal preservation",
         "terminal_prefilter": False,
         "minimum_support_after_managed_evaluation": MINIMUM_EXPERT_OPPORTUNITIES,
         "compression": "active-leaf managed statistics; leaves do not define the plan",
@@ -245,9 +261,12 @@ PROTOCOL = {
     },
     "plan_generator": {
         "experts": "OOF heterogeneous horizon/view return and path-quantile predictors",
-        "gating": "robust sparse weights across views and horizons",
-        "plans_per_state": "data-driven LONG/SHORT parameterized proposals; not ten templates",
-        "objective": "expected gross movement, disagreement, path quantiles and Binance 1x cost",
+        "gating": (
+            "each view proposes its strongest horizon; identical proposals are deduplicated and "
+            "consensus is metadata rather than a destructive average"
+        ),
+        "plans_per_state": "variable expert-supported LONG/SHORT proposals; not ten templates",
+        "objective": "view support, disagreement, horizon-specific path quantiles and Binance cost",
         "local_perturbations": (
             "one parameter family at a time around each expert-composed plan; enabled only by "
             "past-only local-regret audit"
@@ -571,14 +590,14 @@ def build_research_registry() -> dict[str, Any]:
                 "protocol_hash": PROTOCOL_HASH,
                 "git_commit": _git_commit(),
                 "hypothesis": (
-                    "coherent EV-to-utility calibration, previous-model fitted continuation and "
-                    "fit-supported local plans remove the c474 structural false entries"
+                    "preserving distinct specialist horizon proposals and making the managed "
+                    "critic plan-aware removes the e556 action-space collapse"
                 ),
                 "changes": [
-                    "Jensen-consistent EV-to-utility bound",
-                    "chronological previous-model semi-Markov backup",
-                    "fit-supported local plan perturbations including partial exit",
-                    "mandatory proportional economic preflight",
+                    "variable deduplicated plans proposed by the expert views",
+                    "horizon-specific first-passage quantiles without cross-horizon averaging",
+                    "plan-aware fold-local managed critic",
+                    "versioned state-action labels preserving prior protocol artifacts",
                 ],
                 "periods_observed": [
                     HISTORICAL_START.isoformat(),
@@ -1271,7 +1290,7 @@ def _softmax_rows(values: np.ndarray) -> np.ndarray:
 def compose_parameterized_plans(
     inherited: pd.DataFrame, round_trip_cost_bps: float
 ) -> pd.DataFrame:
-    """Compose executable plans from multiple OOF experts instead of inherited templates."""
+    """Preserve distinct expert proposals instead of averaging incompatible horizons."""
     if inherited.empty:
         return inherited.copy()
     keys = ["available_at", "entry_timestamp", "decision_position", "side"]
@@ -1295,89 +1314,98 @@ def compose_parameterized_plans(
         ],
         axis=1,
     )
-    center = np.median(expert_values, axis=2, keepdims=True)
-    absolute_deviation = np.abs(expert_values - center)
-    view_scale = np.maximum(np.median(absolute_deviation, axis=2, keepdims=True), 2.0)
-    view_weights = _softmax_rows(
-        (-absolute_deviation / view_scale).reshape(-1, len(views))
-    ).reshape(expert_values.shape)
-    horizon_consensus = np.sum(view_weights * expert_values, axis=2)
-    horizon_disagreement = np.sqrt(
-        np.sum(view_weights * (expert_values - horizon_consensus[:, :, None]) ** 2, axis=2)
-    )
-
-    robust_gross = horizon_consensus - 0.5 * horizon_disagreement
-    temperature = np.maximum(
-        np.median(np.abs(robust_gross), axis=1, keepdims=True),
-        max(2.0, float(round_trip_cost_bps)),
-    )
-    horizon_weights = _softmax_rows(robust_gross / temperature)
-    joint_weights = horizon_weights[:, :, None] * view_weights
-    flat_joint = joint_weights.reshape(len(representatives), -1)
-    gate_entropy = -np.sum(flat_joint * np.log(np.maximum(flat_joint, 1e-12)), axis=1)
-    maximum_entropy = math.log(flat_joint.shape[1])
-
     q50 = ordered["predicted_favorable_q50_bps"].to_numpy(float).reshape(-1, len(horizons))
     q75 = ordered["predicted_favorable_q75_bps"].to_numpy(float).reshape(-1, len(horizons))
     adverse = ordered["predicted_adverse_q75_bps"].to_numpy(float).reshape(-1, len(horizons))
-    dynamic_horizon = np.rint(
-        np.exp(np.sum(horizon_weights * np.log(horizons.astype(float))[None, :], axis=1))
-    ).astype(int)
-    dynamic_horizon = np.clip(dynamic_horizon, horizons.min(), horizons.max())
-    target_1 = np.maximum(np.sum(horizon_weights * q50, axis=1), float(round_trip_cost_bps) + 1.0)
-    target_2 = np.maximum(np.sum(horizon_weights * q75, axis=1), target_1 + 1.0)
-    stop = np.clip(np.sum(horizon_weights * adverse, axis=1), 3.0, base.MAX_STOP_BPS)
+    selected_by_view = np.argmax(expert_values, axis=1)
+    horizon_center = np.median(expert_values, axis=2)
+    horizon_disagreement = np.std(expert_values, axis=2)
+    robust_horizon_score = horizon_center - 0.5 * horizon_disagreement
+    consensus_horizon = np.argmax(robust_horizon_score, axis=1)
+    rank = np.argsort(np.argsort(-robust_horizon_score, axis=1), axis=1)
+    proposal_support = np.stack(
+        [(selected_by_view == number).sum(axis=1) for number in range(len(horizons))],
+        axis=1,
+    )
+    proposal_mask = proposal_support > 0
+    proposal_mask[np.arange(len(representatives)), consensus_horizon] = True
+    equal_weight_prediction = expert_values.mean(axis=(1, 2))
     volatility = np.clip(representatives["volatility_percentile"].to_numpy(float), 0.0, 1.0)
-    trailing = np.clip(stop * (0.65 + 0.35 * volatility), 3.0, base.MAX_STOP_BPS)
-    first_exit_fraction = np.clip(
-        0.35 + 0.30 * gate_entropy / maximum_entropy,
-        0.35,
-        0.65,
-    )
 
-    flat_names = [f"{horizon}s:{view}" for horizon in horizons for view in views]
-    contributor_rows: list[str] = []
-    for weights in flat_joint:
-        top = np.argsort(weights, kind="stable")[-3:][::-1]
-        contributor_rows.append(
-            ",".join(f"{flat_names[index]}={weights[index]:.6f}" for index in top)
+    pieces: list[pd.DataFrame] = []
+    for horizon_number, horizon in enumerate(horizons):
+        active = proposal_mask[:, horizon_number]
+        if not active.any():
+            continue
+        positions = np.flatnonzero(active)
+        scores = expert_values[active, horizon_number, :]
+        score_scale = np.maximum(np.median(np.abs(scores), axis=1, keepdims=True), 2.0)
+        view_weights = _softmax_rows(scores / score_scale)
+        entropy = -np.sum(view_weights * np.log(np.maximum(view_weights, 1e-12)), axis=1)
+        maximum_entropy = math.log(len(views))
+        stop = np.clip(adverse[active, horizon_number], 3.0, base.MAX_STOP_BPS)
+        target_1 = np.maximum(q50[active, horizon_number], float(round_trip_cost_bps) + 1.0)
+        target_2 = np.maximum(q75[active, horizon_number], target_1 + 1.0)
+        support = selected_by_view[active] == horizon_number
+        bitmask = np.sum(
+            support.astype(np.int16) * (1 << np.arange(len(views), dtype=np.int16)), axis=1
         )
+        contributor_lookup = {
+            mask: ",".join(view for number, view in enumerate(views) if mask & (1 << number))
+            for mask in range(1, 1 << len(views))
+        }
+        contributors = [
+            f"{int(horizon)}s:{contributor_lookup.get(int(mask), 'consensus')}"
+            + (":consensus" if consensus_horizon[position] == horizon_number else "")
+            for mask, position in zip(bitmask, positions, strict=True)
+        ]
 
-    output = representatives.loc[:, [*keys, *base.GATING_CONTEXT]].copy()
-    output["side"] = output["side"].astype(int)
-    output["horizon_seconds"] = dynamic_horizon
-    output["horizon_fraction"] = dynamic_horizon / float(MAXIMUM_HORIZON_SECONDS)
-    output["target_1_bps"] = np.clip(target_1, 1.0, base.MAX_TARGET_BPS - 1.0)
-    output["target_2_bps"] = np.clip(
-        np.maximum(target_2, output["target_1_bps"].to_numpy(float) + 1.0),
-        2.0,
-        base.MAX_TARGET_BPS,
-    )
-    output["stop_bps"] = stop
-    output["trailing_bps"] = np.minimum(trailing, stop)
-    output["first_exit_fraction"] = first_exit_fraction
-    output["predicted_favorable_q50_bps"] = np.sum(horizon_weights * q50, axis=1)
-    output["predicted_favorable_q75_bps"] = np.sum(horizon_weights * q75, axis=1)
-    output["predicted_adverse_q75_bps"] = np.sum(horizon_weights * adverse, axis=1)
-    output["gate_expected_gross_bps"] = np.sum(horizon_weights * horizon_consensus, axis=1)
-    output["gate_disagreement_bps"] = np.sum(horizon_weights * horizon_disagreement, axis=1)
-    output["gate_entropy"] = gate_entropy
-    output["gate_effective_experts"] = np.exp(gate_entropy)
-    output["gate_top_weight"] = flat_joint.max(axis=1)
-    weighted_prediction = np.sum(joint_weights * expert_values, axis=(1, 2))
-    output["equal_weight_expert_prediction_bps"] = expert_values.mean(axis=(1, 2))
-    for view_number, view in enumerate(views):
-        view_weight = joint_weights[:, :, view_number].sum(axis=1)
-        view_contribution = np.sum(
-            joint_weights[:, :, view_number] * expert_values[:, :, view_number], axis=1
+        output = representatives.loc[active, [*keys, *base.GATING_CONTEXT]].copy()
+        output["side"] = output["side"].astype(int)
+        output["horizon_seconds"] = int(horizon)
+        output["horizon_fraction"] = float(horizon) / MAXIMUM_HORIZON_SECONDS
+        output["target_1_bps"] = np.clip(target_1, 1.0, base.MAX_TARGET_BPS - 1.0)
+        output["target_2_bps"] = np.clip(
+            np.maximum(target_2, output["target_1_bps"].to_numpy(float) + 1.0),
+            2.0,
+            base.MAX_TARGET_BPS,
         )
-        output[f"view_{view}_prediction_bps"] = np.sum(
-            horizon_weights * expert_values[:, :, view_number], axis=1
+        output["stop_bps"] = stop
+        trailing = np.clip(stop * (0.65 + 0.35 * volatility[active]), 3.0, base.MAX_STOP_BPS)
+        output["trailing_bps"] = np.minimum(trailing, stop)
+        output["first_exit_fraction"] = np.clip(0.35 + 0.30 * entropy / maximum_entropy, 0.35, 0.65)
+        output["predicted_favorable_q50_bps"] = q50[active, horizon_number]
+        output["predicted_favorable_q75_bps"] = q75[active, horizon_number]
+        output["predicted_adverse_q75_bps"] = adverse[active, horizon_number]
+        output["gate_expected_gross_bps"] = np.sum(view_weights * scores, axis=1)
+        output["gate_disagreement_bps"] = np.sqrt(
+            np.sum(
+                view_weights
+                * (scores - output["gate_expected_gross_bps"].to_numpy(float)[:, None]) ** 2,
+                axis=1,
+            )
         )
-        output[f"gate_without_{view}_prediction_bps"] = (
-            weighted_prediction - view_contribution
-        ) / np.maximum(1.0 - view_weight, 1e-12)
-    output["plan_contributors"] = contributor_rows
+        output["gate_entropy"] = entropy
+        output["gate_effective_experts"] = np.exp(entropy)
+        output["gate_top_weight"] = view_weights.max(axis=1)
+        output["proposal_support_fraction"] = support.mean(axis=1)
+        output["proposal_consensus_selected"] = (
+            consensus_horizon[active] == horizon_number
+        ).astype(float)
+        output["proposal_rank_fraction"] = rank[active, horizon_number] / max(len(horizons) - 1, 1)
+        output["equal_weight_expert_prediction_bps"] = equal_weight_prediction[active]
+        for view_number, view in enumerate(views):
+            output[f"view_{view}_prediction_bps"] = scores[:, view_number]
+            output[f"proposal_{view}_support"] = support[:, view_number].astype(float)
+            output[f"gate_without_{view}_prediction_bps"] = np.mean(
+                np.delete(scores, view_number, axis=1), axis=1
+            )
+        output["plan_contributors"] = contributors
+        pieces.append(output)
+
+    if not pieces:
+        raise ValueError("expert proposal generator produced no executable plan")
+    output = pd.concat(pieces, ignore_index=True)
     output["plan_id"] = [
         parameterized_plan_id(
             int(side),
@@ -1413,7 +1441,11 @@ def compose_parameterized_plans(
     output["expert_id"] = output["plan_id"]
     if not np.isfinite(output.loc[:, ALPHA_FEATURES].to_numpy(float)).all():
         raise ValueError("parameterized plan features must be finite")
-    return output.sort_values(["entry_timestamp", "side"], kind="stable").reset_index(drop=True)
+    if output.duplicated([*keys, "horizon_seconds"]).any():
+        raise ValueError("expert proposals must be unique per state, side and horizon")
+    return output.sort_values(
+        ["entry_timestamp", "side", "horizon_seconds"], kind="stable"
+    ).reset_index(drop=True)
 
 
 def _first_observed_positions(
@@ -2281,7 +2313,7 @@ def _x(rows: pd.DataFrame) -> np.ndarray:
 
 
 def _generator_x(rows: pd.DataFrame) -> np.ndarray:
-    values = rows.loc[:, base.GATING_CONTEXT].to_numpy(np.float32)
+    values = rows.loc[:, GENERATOR_FEATURES].to_numpy(np.float32)
     if not np.isfinite(values).all():
         raise ValueError("fold-local generator features must be finite")
     return values
@@ -4382,16 +4414,22 @@ def walk_forward(
             selection, fee.round_trip_bps, stop_loss_overrun_reserve_bps
         )
         test = apply_risk_sizing_contract(test, fee.round_trip_bps, stop_loss_overrun_reserve_bps)
+        raw_fit = fit
+        raw_inner_calibration = inner_calibration
+        raw_model_audit = model_audit
+        raw_calibration = calibration
+        raw_selection = selection
+        raw_test = test
         fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
-            fit,
+            raw_fit,
             number,
             resume=resume,
         )
-        inner_calibration = apply_fold_expert_library(inner_calibration, library)
-        model_audit = apply_fold_expert_library(model_audit, library)
-        calibration = apply_fold_expert_library(calibration, library)
-        selection = apply_fold_expert_library(selection, library)
-        test = apply_fold_expert_library(test, library)
+        inner_calibration = apply_fold_expert_library(raw_inner_calibration, library)
+        model_audit = apply_fold_expert_library(raw_model_audit, library)
+        calibration = apply_fold_expert_library(raw_calibration, library)
+        selection = apply_fold_expert_library(raw_selection, library)
+        test = apply_fold_expert_library(raw_test, library)
         plan_audit = plan_efficiency_audit(model_audit, fee)
         local_plan_variants_enabled = bool(plan_audit["material"])
         local_plan_training_support = {
@@ -4399,42 +4437,59 @@ def walk_forward(
             "inner_calibration": {"sampled_states": 0, "added_rows": 0},
         }
         if local_plan_variants_enabled:
-            fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
-                fit,
+            augmented_fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
+                raw_fit,
                 fee,
                 fee.round_trip_bps,
                 stop_loss_overrun_reserve_bps,
                 LOCAL_PLAN_TRAINING_STATES,
             )
-            (
-                inner_calibration,
-                local_plan_training_support["inner_calibration"],
-            ) = augment_local_plan_training_support(
-                inner_calibration,
-                fee,
-                fee.round_trip_bps,
-                stop_loss_overrun_reserve_bps,
-                LOCAL_PLAN_INNER_CALIBRATION_STATES,
+            fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
+                augmented_fit,
+                f"{number}-local",
+                resume=resume,
             )
-            model_audit = apply_risk_sizing_contract(
-                label_local_plan_variants(model_audit, fee),
-                fee.round_trip_bps,
-                stop_loss_overrun_reserve_bps,
+            augmented_inner, local_plan_training_support["inner_calibration"] = (
+                augment_local_plan_training_support(
+                    raw_inner_calibration,
+                    fee,
+                    fee.round_trip_bps,
+                    stop_loss_overrun_reserve_bps,
+                    LOCAL_PLAN_INNER_CALIBRATION_STATES,
+                )
             )
-            calibration = apply_risk_sizing_contract(
-                label_local_plan_variants(calibration, fee),
-                fee.round_trip_bps,
-                stop_loss_overrun_reserve_bps,
+            inner_calibration = apply_fold_expert_library(augmented_inner, library)
+            model_audit = apply_fold_expert_library(
+                apply_risk_sizing_contract(
+                    label_local_plan_variants(raw_model_audit, fee),
+                    fee.round_trip_bps,
+                    stop_loss_overrun_reserve_bps,
+                ),
+                library,
             )
-            selection = apply_risk_sizing_contract(
-                label_local_plan_variants(selection, fee),
-                fee.round_trip_bps,
-                stop_loss_overrun_reserve_bps,
+            calibration = apply_fold_expert_library(
+                apply_risk_sizing_contract(
+                    label_local_plan_variants(raw_calibration, fee),
+                    fee.round_trip_bps,
+                    stop_loss_overrun_reserve_bps,
+                ),
+                library,
             )
-            test = apply_risk_sizing_contract(
-                label_local_plan_variants(test, fee),
-                fee.round_trip_bps,
-                stop_loss_overrun_reserve_bps,
+            selection = apply_fold_expert_library(
+                apply_risk_sizing_contract(
+                    label_local_plan_variants(raw_selection, fee),
+                    fee.round_trip_bps,
+                    stop_loss_overrun_reserve_bps,
+                ),
+                library,
+            )
+            test = apply_fold_expert_library(
+                apply_risk_sizing_contract(
+                    label_local_plan_variants(raw_test, fee),
+                    fee.round_trip_bps,
+                    stop_loss_overrun_reserve_bps,
+                ),
+                library,
             )
         row_calibration_end = fold["calibration_start"] + pd.Timedelta(weeks=ROW_CALIBRATION_WEEKS)
         row_calibration = _period(
@@ -4842,34 +4897,48 @@ def fit_forward_bundle(
     selection = apply_risk_sizing_contract(
         selection, fee.round_trip_bps, stop_loss_overrun_reserve_bps
     )
+    raw_fit = fit
+    raw_calibration = calibration
+    raw_selection = selection
     fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
-        fit,
+        raw_fit,
         "forward",
         resume=resume,
     )
-    calibration = apply_fold_expert_library(calibration, library)
-    selection = apply_fold_expert_library(selection, library)
+    calibration = apply_fold_expert_library(raw_calibration, library)
+    selection = apply_fold_expert_library(raw_selection, library)
     local_plan_variants_enabled = (
         sum(bool(item.get("local_plan_variants_enabled")) for item in folds) > len(folds) / 2
     )
     local_plan_training_support = {"fit": {"sampled_states": 0, "added_rows": 0}}
     if local_plan_variants_enabled:
-        fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
-            fit,
+        augmented_fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
+            raw_fit,
             fee,
             fee.round_trip_bps,
             stop_loss_overrun_reserve_bps,
             LOCAL_PLAN_TRAINING_STATES,
         )
-        calibration = apply_risk_sizing_contract(
-            label_local_plan_variants(calibration, fee),
-            fee.round_trip_bps,
-            stop_loss_overrun_reserve_bps,
+        fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
+            augmented_fit,
+            "forward-local",
+            resume=resume,
         )
-        selection = apply_risk_sizing_contract(
-            label_local_plan_variants(selection, fee),
-            fee.round_trip_bps,
-            stop_loss_overrun_reserve_bps,
+        calibration = apply_fold_expert_library(
+            apply_risk_sizing_contract(
+                label_local_plan_variants(raw_calibration, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            ),
+            library,
+        )
+        selection = apply_fold_expert_library(
+            apply_risk_sizing_contract(
+                label_local_plan_variants(raw_selection, fee),
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+            ),
+            library,
         )
     row_calibration_end = calibration_start + pd.Timedelta(weeks=ROW_CALIBRATION_WEEKS)
     row_calibration = _period(calibration, calibration_start, row_calibration_end, purge_exit=True)
