@@ -1,12 +1,12 @@
 # Musca BTC Binance — piano master del training
 
-Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; action-space corretta, nuovo preflight in preparazione
+Aggiornato: 2026-08-12
+Stato: punti 1, 2 e 5 verificati; policy layer globale preregistrato, nuovo preflight necessario
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `e5560023f084bde0e2b8356112f303b983ff4a65ccec595b2bdc76527bd92f9d`.
+Protocollo challenger corrente: `a92e32434df575b4b88048858c77fe0b585c976b4083d4bf95632933f4040722`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -296,6 +296,47 @@ selection e test; se l'audit risultava materiale, conservava quelle cinque copie
 cinque nuove copie locali. Il picco ha raggiunto 24,23 GB. L'audit di efficienza non usa feature del
 critic, quindi viene ora eseguito sui raw label; solo dopo si materializza una delle due famiglie,
 mai entrambe. I frame `augmented_*` e raw vengono liberati appena consumati.
+
+## Esito preflight 11a4748b e policy layer globale
+
+Il preflight `11a4748b8fce81417f20e1eeb09fddaa953b18f3797285f585275711f5103ac7`
+ha completato due fold senza crash, leakage, lettura dell'holdout o violazioni di rischio. Il verdetto
+`PREFLIGHT_FAILED` è economico, non CUDA: zero trade e controller disabilitati. Nelle due finestre
+winner-only antecedenti, il piano scelto ha realizzato rispettivamente -13,5170 e -13,0059 bps; era
+la migliore azione realizzata soltanto nel 6,354% e 4,525% degli stati. Tutti i controlli eseguibili
+sono negativi. Forzare gli ordini avrebbe quindi prodotto perdite.
+
+L'audit ha localizzato cinque incongruenze nuove:
+
+- **E-34 - nessun policy learner globale.** LONG e SHORT venivano stimati da modelli separati e poi
+  confrontati su scale calibrate separatamente. Nessun modello apprendeva direttamente il ranking
+  congiunto fra lato e piano, nonostante la matrice contenga l'intero reward vector controfattuale.
+- **E-35 - selezione del modello disallineata dalla decisione.** Ridge/decomposed restava champion
+  quando un challenger riduceva molto il decision regret, se peggiorava anche marginalmente una
+  metrica media per riga. La metrica di scelta non rappresentava l'argmax state-action finale.
+- **E-36 - calibrazione non bilanciata e statistica diversa dall'argmax.** Il fit usava peso inverso
+  al numero di azioni del timestamp, ma probability/isotonic calibration no. Inoltre l'argmax usava
+  utility mentre l'EV winner-only veniva calibrata su uno score differente.
+- **E-37 - soglia scelta e poi scartata.** La frontiera frequenza-P&L calcolava una soglia past-only,
+  ma il replay impostava sempre zero. Il bug non ha causato gli zero trade di questo preflight, ma
+  avrebbe invalidato il primo controller abilitato.
+- **E-38 - controlli dopo DISABLED.** Random, shifted e side-only venivano calcolati dopo aver
+  sostituito ogni utility del lato disabilitato con -1; risultavano quindi FLAT per costruzione.
+
+Il protocollo successivo tratta correttamente il dataset come full-feedback policy learning. Un
+Ridge globale sull'utility è il champion; un `XGBRanker` CUDA `rank:pairwise`, raggruppato per
+`actual_entry_timestamp`, è il solo challenger. Il challenger deve migliorare sul model-audit
+antecedente EV selezionata, utility selezionata, regret in bps e utility, frazione best-action e
+maggioranza dei giorni paired. Il modello scelto ordina insieme lato e piano. Lo stesso identico
+score usato nell'argmax viene poi calibrato su EV e utility nella finestra winner-only successiva.
+Probability head, costi, label, rischio e gate finali restano invariati. La calibrazione per riga usa
+ora lo stesso peso per timestamp del fit; la soglia scelta viene realmente applicata; i controlli
+negativi vengono eseguiti prima di disabilitare i controller.
+
+Questa scelta segue la formulazione full-feedback come cost-sensitive learning e il ranking per
+gruppi documentato da XGBoost; non introduce PPO/SAC, nuove librerie o feedback inventato. Il nuovo
+protocollo è `a92e32434df575b4b88048858c77fe0b585c976b4083d4bf95632933f4040722`;
+l'hash dei label resta `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.

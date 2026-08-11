@@ -30,7 +30,7 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import mean_absolute_error
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier, XGBRegressor
+from xgboost import XGBClassifier, XGBRanker, XGBRegressor
 
 from adaptive_bot import musca_btc_auto_moe as discovery
 from adaptive_bot import musca_btc_moe as base
@@ -83,6 +83,7 @@ OUTCOME_TIMEOUT = 2
 OUTCOME_NAMES = ("TARGET", "STOP", "TIMEOUT")
 MODEL_SEEDS = (20260831, 20260901, 20260902)
 VALUE_HEADS = ("decomposed", "direct")
+POLICY_RANKERS = ("ridge", "xgboost_ranker_cuda")
 THRESHOLDS_BPS = (0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0)
 MINIMUM_FIT_WEEKS = 16
 WINDOW_WEEKS = 4
@@ -250,6 +251,21 @@ PROTOCOL = {
         "post_selection_calibration": (
             "row calibration on the first two weeks followed by winner-only calibration on the "
             "next two weeks; both precede policy selection and outer test"
+        ),
+        "row_calibration_weighting": "inverse number of actions at the same timestamp",
+    },
+    "policy_ranker": {
+        "feedback": "full counterfactual reward vector for every state-action group",
+        "group": "actual_entry_timestamp",
+        "champion": "global Ridge direct log-utility score",
+        "challenger": "XGBoost CUDA LambdaMART pairwise ranker",
+        "selection": (
+            "past-only paired state-action regret, selected EV, selected utility and daily "
+            "improvement; side and plan are ranked jointly"
+        ),
+        "winner_calibration": (
+            "the same score used for argmax is mapped to realized EV and log utility on a "
+            "strictly later winner-only window"
         ),
     },
     "fold_local_experts": {
@@ -2914,10 +2930,11 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
 
 def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str, Any]:
     values = _x(calibration)
+    weights = _timestamp_weights(calibration)
     raw_probability = np.clip(_probabilities(head["classifier"], values), 1e-6, 1.0)
     outcome = calibration["event_class"].to_numpy(int)
     probability = LogisticRegression(C=1.0, max_iter=2_000, random_state=20260831).fit(
-        np.log(raw_probability), outcome
+        np.log(raw_probability), outcome, sample_weight=weights
     )
     calibrated_probability = _probabilities(probability, np.log(raw_probability))
     conditional_bps = np.column_stack(
@@ -2942,10 +2959,12 @@ def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str
     value = {
         name: {
             "net_bps": IsotonicRegression(out_of_bounds="clip").fit(
-                raw["net_bps"], calibration["net_bps"].to_numpy(float)
+                raw["net_bps"], calibration["net_bps"].to_numpy(float), sample_weight=weights
             ),
             "log_utility": IsotonicRegression(out_of_bounds="clip").fit(
-                raw["log_utility"], calibration["log_utility"].to_numpy(float)
+                raw["log_utility"],
+                calibration["log_utility"].to_numpy(float),
+                sample_weight=weights,
             ),
         }
         for name, raw in raw_values.items()
@@ -3053,22 +3072,36 @@ def score_actions(
     return output
 
 
-def _multiclass_brier(truth: np.ndarray, probability: np.ndarray) -> float:
+def _multiclass_brier(
+    truth: np.ndarray, probability: np.ndarray, weights: np.ndarray | None = None
+) -> float:
     observed = np.eye(3, dtype=float)[truth]
-    return float(np.mean(np.sum((probability - observed) ** 2, axis=1)))
+    errors = np.sum((probability - observed) ** 2, axis=1)
+    return float(np.average(errors, weights=weights))
 
 
-def _calibration_error(actual: np.ndarray, predicted: np.ndarray) -> float:
+def _calibration_error(
+    actual: np.ndarray, predicted: np.ndarray, weights: np.ndarray | None = None
+) -> float:
     if not len(actual):
         return float("inf")
     bins = pd.qcut(pd.Series(predicted), q=min(10, len(np.unique(predicted))), duplicates="drop")
-    values = pd.DataFrame({"actual": actual, "predicted": predicted, "bin": bins})
-    grouped = values.groupby("bin", observed=True).agg(
-        actual=("actual", "mean"), predicted=("predicted", "mean"), size=("actual", "size")
+    sample_weight = np.ones(len(actual), dtype=float) if weights is None else weights
+    values = pd.DataFrame(
+        {"actual": actual, "predicted": predicted, "weight": sample_weight, "bin": bins}
     )
-    return float(
-        np.average(np.abs(grouped["actual"] - grouped["predicted"]), weights=grouped["size"])
-    )
+    errors: list[float] = []
+    bin_weights: list[float] = []
+    for _, group in values.groupby("bin", observed=True):
+        group_weight = group["weight"].to_numpy(float)
+        errors.append(
+            abs(
+                float(np.average(group["actual"], weights=group_weight))
+                - float(np.average(group["predicted"], weights=group_weight))
+            )
+        )
+        bin_weights.append(float(group_weight.sum()))
+    return float(np.average(errors, weights=bin_weights))
 
 
 def _decision_regret(rows: pd.DataFrame, prediction_column: str, actual_column: str) -> float:
@@ -3083,18 +3116,25 @@ def _decision_regret(rows: pd.DataFrame, prediction_column: str, actual_column: 
 
 
 def head_metrics(rows: pd.DataFrame, value_head: str) -> dict[str, float]:
+    weights = _timestamp_weights(rows)
     probability = rows.loc[:, ["p_target", "p_stop", "p_timeout"]].to_numpy(float)
     actual = rows["net_bps"].to_numpy(float)
     predicted = rows[f"{value_head}_ev_bps"].to_numpy(float)
     utility = rows["log_utility"].to_numpy(float)
     predicted_utility = rows[f"{value_head}_log_utility"].to_numpy(float)
     return {
-        "brier": _multiclass_brier(rows["event_class"].to_numpy(int), probability),
-        "ev_calibration_error_bps": _calibration_error(actual, predicted),
-        "ev_mae_bps": float(mean_absolute_error(actual, predicted)),
+        "brier": _multiclass_brier(
+            rows["event_class"].to_numpy(int), probability, weights
+        ),
+        "ev_calibration_error_bps": _calibration_error(actual, predicted, weights),
+        "ev_mae_bps": float(mean_absolute_error(actual, predicted, sample_weight=weights)),
         "decision_regret_bps": _decision_regret(rows, f"{value_head}_ev_bps", "net_bps"),
-        "utility_calibration_error": _calibration_error(utility, predicted_utility),
-        "utility_mae": float(mean_absolute_error(utility, predicted_utility)),
+        "utility_calibration_error": _calibration_error(
+            utility, predicted_utility, weights
+        ),
+        "utility_mae": float(
+            mean_absolute_error(utility, predicted_utility, sample_weight=weights)
+        ),
         "decision_regret_log_utility": _decision_regret(
             rows, f"{value_head}_log_utility", "log_utility"
         ),
@@ -3132,6 +3172,58 @@ def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
     return "xgboost_cuda" if all(challenger[key] < ridge[key] for key in keys) else "ridge"
 
 
+def fit_policy_ranker(kind: str, rows: pd.DataFrame) -> dict[str, Any]:
+    """Fit a global side-and-plan selector from the full state reward vector."""
+    if kind == "ridge":
+        model = _fit_regressor(
+            "ridge",
+            _regressor("ridge", MODEL_SEEDS[0] + 70),
+            _x(rows),
+            rows["log_utility"].to_numpy(float),
+            _timestamp_weights(rows),
+        )
+        return {"kind": kind, "model": model}
+    if kind != "xgboost_ranker_cuda":
+        raise ValueError(f"unknown policy ranker: {kind}")
+    ordered = rows.sort_values(
+        ["actual_entry_timestamp", "side", "plan_id"], kind="stable"
+    ).reset_index(drop=True)
+    qid = pd.factorize(
+        pd.to_datetime(ordered["actual_entry_timestamp"], utc=True), sort=False
+    )[0].astype(np.int32)
+    model = XGBRanker(
+        objective="rank:pairwise",
+        tree_method="hist",
+        device="cuda",
+        n_estimators=280,
+        learning_rate=0.035,
+        max_depth=5,
+        min_child_weight=100,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_lambda=30.0,
+        lambdarank_pair_method="topk",
+        lambdarank_num_pair_per_sample=8,
+        n_jobs=4,
+        random_state=MODEL_SEEDS[0] + 71,
+    )
+    model.fit(
+        _x(ordered),
+        ordered["log_utility"].to_numpy(float),
+        qid=qid,
+    )
+    return {"kind": kind, "model": model}
+
+
+def score_policy_ranker(rows: pd.DataFrame, ranker: dict[str, Any]) -> pd.DataFrame:
+    output = rows.copy()
+    output["policy_selection_score"] = np.asarray(
+        ranker["model"].predict(_x(output)), dtype=float
+    )
+    output["policy_ranker"] = str(ranker["kind"])
+    return output
+
+
 def _selected_action_positions(
     rows: pd.DataFrame, value_column: str = "expected_log_utility"
 ) -> np.ndarray:
@@ -3158,20 +3250,120 @@ def _selected_action_positions(
     )
 
 
-def fit_post_selection_calibration(rows: pd.DataFrame) -> dict[str, Any]:
+def policy_ranking_metrics(rows: pd.DataFrame, score_column: str) -> dict[str, Any]:
+    positions = _selected_action_positions(rows, score_column)
+    selected = rows.iloc[positions]
+    grouped_net = rows.groupby("actual_entry_timestamp", sort=False)["net_bps"].max()
+    grouped_utility = rows.groupby("actual_entry_timestamp", sort=False)["log_utility"].max()
+    timestamp = pd.to_datetime(selected["actual_entry_timestamp"], utc=True)
+    oracle_net = np.maximum(timestamp.map(grouped_net).to_numpy(float), 0.0)
+    oracle_utility = np.maximum(timestamp.map(grouped_utility).to_numpy(float), 0.0)
+    realized_net = selected["net_bps"].to_numpy(float)
+    realized_utility = selected["log_utility"].to_numpy(float)
+    by_day = pd.DataFrame(
+        {"day": timestamp.dt.floor("D"), "utility": realized_utility}
+    ).groupby("day", sort=True)["utility"].mean()
+    return {
+        "states": len(selected),
+        "selected_ev_bps": float(realized_net.mean()),
+        "selected_log_utility": float(realized_utility.mean()),
+        "decision_regret_bps": float(np.mean(oracle_net - realized_net)),
+        "decision_regret_log_utility": float(np.mean(oracle_utility - realized_utility)),
+        "selected_positive_fraction": float(np.mean(realized_net > 0)),
+        "selected_best_realized_action_fraction": float(
+            np.mean(realized_net >= oracle_net - 1e-12)
+        ),
+        "positive_days_fraction": float(by_day.gt(0).mean()),
+    }
+
+
+def select_policy_ranker(
+    fit: pd.DataFrame, audit: pd.DataFrame
+) -> tuple[str, dict[str, Any]]:
+    """Keep Ridge unless the GPU ranker improves paired policy decisions past-only."""
+    kinds = ["ridge"] + (["xgboost_ranker_cuda"] if _xgb_available() else [])
+    metrics: dict[str, Any] = {}
+    selected_utility: dict[str, pd.Series] = {}
+    for kind in kinds:
+        model = fit_policy_ranker(kind, fit)
+        scored = score_policy_ranker(audit, model)
+        positions = _selected_action_positions(scored, "policy_selection_score")
+        selected = scored.iloc[positions]
+        metrics[kind] = policy_ranking_metrics(scored, "policy_selection_score")
+        selected_utility[kind] = pd.Series(
+            selected["log_utility"].to_numpy(float),
+            index=pd.to_datetime(selected["actual_entry_timestamp"], utc=True),
+        )
+        del model, scored, selected
+        gc.collect()
+    selected_kind = "ridge"
+    paired_audit: dict[str, Any] = {"available": False}
+    if "xgboost_ranker_cuda" in metrics:
+        paired = pd.concat(
+            {
+                "ridge": selected_utility["ridge"],
+                "xgboost_ranker_cuda": selected_utility["xgboost_ranker_cuda"],
+            },
+            axis=1,
+            join="inner",
+        ).dropna()
+        difference = paired["xgboost_ranker_cuda"] - paired["ridge"]
+        daily = difference.groupby(pd.DatetimeIndex(difference.index).floor("D")).mean()
+        baseline = metrics["ridge"]
+        challenger = metrics["xgboost_ranker_cuda"]
+        improves = {
+            "selected_ev": challenger["selected_ev_bps"] > baseline["selected_ev_bps"],
+            "selected_utility": (
+                challenger["selected_log_utility"] > baseline["selected_log_utility"]
+            ),
+            "net_regret": challenger["decision_regret_bps"] < baseline["decision_regret_bps"],
+            "utility_regret": (
+                challenger["decision_regret_log_utility"]
+                < baseline["decision_regret_log_utility"]
+            ),
+            "best_action_fraction": (
+                challenger["selected_best_realized_action_fraction"]
+                >= baseline["selected_best_realized_action_fraction"]
+            ),
+            "majority_days_improved": float(daily.gt(0).mean()) > 0.5,
+        }
+        paired_audit = {
+            "available": True,
+            "states": len(paired),
+            "mean_log_utility_improvement": float(difference.mean()),
+            "positive_days_fraction": float(daily.gt(0).mean()),
+            "criteria": improves,
+        }
+        if all(improves.values()):
+            selected_kind = "xgboost_ranker_cuda"
+    return selected_kind, {
+        "candidates": metrics,
+        "paired_challenger_audit": paired_audit,
+        "selected": selected_kind,
+        "audit_period_only": True,
+        "outer_test_read_for_selection": False,
+    }
+
+
+def fit_post_selection_calibration(
+    rows: pd.DataFrame, selection_score_column: str = "expected_log_utility"
+) -> dict[str, Any]:
     """Calibrate the action that the policy would select, not the unused action rows."""
-    positions = _selected_action_positions(rows)
+    positions = _selected_action_positions(rows, selection_score_column)
     selected = rows.iloc[positions]
     if len(selected) < 100:
         raise ValueError("insufficient winner-only calibration states")
+    selection_score = selected[selection_score_column].to_numpy(float)
     raw_ev = selected["calibrated_ev_bps"].to_numpy(float)
     raw_utility = selected["expected_log_utility"].to_numpy(float)
     realized_ev = selected["net_bps"].to_numpy(float)
     realized_utility = selected["log_utility"].to_numpy(float)
-    ev_model = IsotonicRegression(out_of_bounds="clip").fit(raw_ev, realized_ev)
-    utility_model = IsotonicRegression(out_of_bounds="clip").fit(raw_utility, realized_utility)
-    calibrated_ev = np.asarray(ev_model.predict(raw_ev), dtype=float)
-    calibrated_utility = np.asarray(utility_model.predict(raw_utility), dtype=float)
+    ev_model = IsotonicRegression(out_of_bounds="clip").fit(selection_score, realized_ev)
+    utility_model = IsotonicRegression(out_of_bounds="clip").fit(
+        selection_score, realized_utility
+    )
+    calibrated_ev = np.asarray(ev_model.predict(selection_score), dtype=float)
+    calibrated_utility = np.asarray(utility_model.predict(selection_score), dtype=float)
     timestamp = pd.to_datetime(selected["actual_entry_timestamp"], utc=True)
     grouped_oracle = rows.groupby("actual_entry_timestamp", sort=False)["net_bps"].max()
     oracle = timestamp.map(grouped_oracle).to_numpy(float)
@@ -3181,6 +3373,8 @@ def fit_post_selection_calibration(rows: pd.DataFrame) -> dict[str, Any]:
         "selected_states": len(selected),
         "start": timestamp.min().isoformat(),
         "end": timestamp.max().isoformat(),
+        "selection_score_column": selection_score_column,
+        "mean_selection_score": float(np.mean(selection_score)),
         "preselection_predicted_ev_bps": float(np.mean(raw_ev)),
         "realized_selected_ev_bps": float(np.mean(realized_ev)),
         "winner_optimism_bps": float(np.mean(raw_ev - realized_ev)),
@@ -3192,7 +3386,12 @@ def fit_post_selection_calibration(rows: pd.DataFrame) -> dict[str, Any]:
         ),
         "selected_best_realized_action_fraction": float(np.mean(realized_ev >= oracle - 1e-12)),
     }
-    return {"net_bps": ev_model, "log_utility": utility_model, "audit": audit}
+    return {
+        "net_bps": ev_model,
+        "log_utility": utility_model,
+        "selection_score_column": selection_score_column,
+        "audit": audit,
+    }
 
 
 def apply_post_selection_calibration(
@@ -3200,7 +3399,10 @@ def apply_post_selection_calibration(
 ) -> pd.DataFrame:
     """Expose only the causally selected winner and correct its post-selection optimism."""
     output = rows.copy()
-    positions = _selected_action_positions(output)
+    selection_score_column = str(
+        calibration.get("selection_score_column", "expected_log_utility")
+    )
+    positions = _selected_action_positions(output, selection_score_column)
     output["preselection_calibrated_ev_bps"] = output["calibrated_ev_bps"]
     output["preselection_expected_log_utility"] = output["expected_log_utility"]
     output["post_selection_candidate"] = False
@@ -3209,10 +3411,11 @@ def apply_post_selection_calibration(
     if not len(positions):
         output["expected_log_utility"] = -1.0
         return output
-    raw_ev = output.iloc[positions]["calibrated_ev_bps"].to_numpy(float)
-    raw_utility = output.iloc[positions]["expected_log_utility"].to_numpy(float)
-    calibrated_ev = np.asarray(calibration["net_bps"].predict(raw_ev), dtype=float)
-    unconstrained_utility = np.asarray(calibration["log_utility"].predict(raw_utility), dtype=float)
+    selection_score = output.iloc[positions][selection_score_column].to_numpy(float)
+    calibrated_ev = np.asarray(calibration["net_bps"].predict(selection_score), dtype=float)
+    unconstrained_utility = np.asarray(
+        calibration["log_utility"].predict(selection_score), dtype=float
+    )
     leverage = output.iloc[positions]["sized_leverage"].to_numpy(float)
     coherent_upper = np.log1p(np.maximum(leverage * calibrated_ev / 10_000, -0.999999))
     calibrated_utility = np.minimum(unconstrained_utility, coherent_upper)
@@ -4602,6 +4805,18 @@ def walk_forward(
             continuation_calibration,
         )
         continuation_audit_metrics = continuation_metrics(continuation_audit, continuation_model)
+        _status(
+            "policy_ranker",
+            f"fold {number}/{len(folds)} global side-and-plan policy audit",
+            58 + 2 * number / len(folds),
+            fold=f"{number}/{len(folds)}",
+            gpu=_gpu_info(),
+        )
+        policy_ranker_champion, policy_ranker_audit = select_policy_ranker(fit, model_audit)
+        policy_refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
+        policy_ranker = fit_policy_ranker(policy_ranker_champion, policy_refit)
+        del policy_refit
+        gc.collect()
         kinds = ["ridge"] + (["xgboost_cuda"] if _xgb_available() else [])
         model_metrics: dict[str, Any] = {}
         champions: dict[int, str] = {}
@@ -4674,17 +4889,31 @@ def walk_forward(
             permuted_test_pieces.append(
                 score_actions(side_test, permuted_head, permuted_calibration, "decomposed")
             )
+        scored_winner_calibration = score_policy_ranker(
+            pd.concat(scored_winner_calibration_pieces, ignore_index=True), policy_ranker
+        )
+        scored_selection = score_policy_ranker(
+            pd.concat(scored_selection_pieces, ignore_index=True), policy_ranker
+        )
+        scored_test = score_policy_ranker(
+            pd.concat(scored_test_pieces, ignore_index=True), policy_ranker
+        )
+        del policy_ranker
+        gc.collect()
         post_selection_calibration = fit_post_selection_calibration(
-            pd.concat(scored_winner_calibration_pieces, ignore_index=True)
+            scored_winner_calibration,
+            "policy_selection_score",
         )
         scored_selection = apply_post_selection_calibration(
-            pd.concat(scored_selection_pieces, ignore_index=True),
+            scored_selection,
             post_selection_calibration,
         )
         scored_test = apply_post_selection_calibration(
-            pd.concat(scored_test_pieces, ignore_index=True),
+            scored_test,
             post_selection_calibration,
         )
+        del scored_winner_calibration
+        gc.collect()
         permuted_test = pd.concat(permuted_test_pieces, ignore_index=True)
         continuation_refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
         continuation_model = fit_continuation_models(continuation_refit)
@@ -4702,6 +4931,26 @@ def walk_forward(
             copy=False,
         )
         continuation_blocks = int(continuation_model["crossfit"]["blocks"])
+        negative_controls = negative_control_metrics(
+            scored_test,
+            fee,
+            fold["test_start"],
+            fold["test_end"],
+            label_exact_plans(train_median_constant_plans(test, fit), fee),
+        )
+        permuted_trades, _ = sequential_replay(
+            permuted_test,
+            0.0,
+            fee.round_trip_bps,
+            record_decisions=False,
+        )
+        negative_controls["label_permutation"] = policy_metrics(
+            permuted_trades,
+            fold["test_start"],
+            fold["test_end"],
+            daily_bootstrap=False,
+            weekly_bootstrap=False,
+        )
         controllers: dict[int, str] = {}
         controller_audit: dict[str, Any] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
@@ -4716,15 +4965,16 @@ def walk_forward(
             controller_audit[side_name] = audit
         scored_selection = apply_entry_controllers(scored_selection, controllers)
         scored_test = apply_entry_controllers(scored_test, controllers)
-        thresholds: dict[int, float] = {1: 0.0, -1: 0.0}
+        thresholds: dict[int, float] = {1: float("inf"), -1: float("inf")}
         frontiers: dict[str, list[dict[str, Any]]] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-            _, side_frontier = _choose_frequency_threshold(
+            threshold, side_frontier = _choose_frequency_threshold(
                 scored_selection.loc[scored_selection["side"].eq(side)],
                 fee,
                 fold["selection_start"],
                 fold["test_start"],
             )
+            thresholds[side] = threshold
             frontiers[side_name] = side_frontier
         _status(
             "policy_replay",
@@ -4769,26 +5019,6 @@ def walk_forward(
             fee.round_trip_bps,
             risk_state=walk_forward_risk,
         )
-        negative_controls = negative_control_metrics(
-            scored_test,
-            fee,
-            fold["test_start"],
-            fold["test_end"],
-            label_exact_plans(train_median_constant_plans(test, fit), fee),
-        )
-        permuted_trades, _ = sequential_replay(
-            permuted_test,
-            0.0,
-            fee.round_trip_bps,
-            record_decisions=False,
-        )
-        negative_controls["label_permutation"] = policy_metrics(
-            permuted_trades,
-            fold["test_start"],
-            fold["test_end"],
-            daily_bootstrap=False,
-            weekly_bootstrap=False,
-        )
         if not trades.empty:
             trade_pieces.append(trades)
         if not decisions.empty:
@@ -4817,6 +5047,8 @@ def walk_forward(
                     "LONG": value_champions[1],
                     "SHORT": value_champions[-1],
                 },
+                "policy_ranker_champion": policy_ranker_champion,
+                "policy_ranker_selection": policy_ranker_audit,
                 "selected_thresholds_bps": {
                     "LONG": thresholds[1] if math.isfinite(thresholds[1]) else None,
                     "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
@@ -5030,6 +5262,16 @@ def fit_forward_bundle(
     controller_audit: dict[str, Any] = {}
     scored_winner_calibration_pieces: list[pd.DataFrame] = []
     scored_selection_pieces: list[pd.DataFrame] = []
+    observed_policy_rankers = [
+        str(item.get("policy_ranker_champion", "ridge")) for item in folds
+    ]
+    policy_ranker_champion = (
+        "xgboost_ranker_cuda"
+        if observed_policy_rankers.count("xgboost_ranker_cuda")
+        > observed_policy_rankers.count("ridge")
+        else "ridge"
+    )
+    policy_ranker = fit_policy_ranker(policy_ranker_champion, fit)
     continuation_model = fit_continuation_models(fit)
     continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
     continuation_blocks = int(continuation_model["crossfit"]["blocks"])
@@ -5066,12 +5308,19 @@ def fit_forward_bundle(
         )
         heads[side] = head
         calibrations[side] = calibrated
-        thresholds[side] = 0.0
+        thresholds[side] = float("inf")
+    scored_winner_calibration = score_policy_ranker(
+        pd.concat(scored_winner_calibration_pieces, ignore_index=True), policy_ranker
+    )
+    scored_selection = score_policy_ranker(
+        pd.concat(scored_selection_pieces, ignore_index=True), policy_ranker
+    )
     post_selection_calibration = fit_post_selection_calibration(
-        pd.concat(scored_winner_calibration_pieces, ignore_index=True)
+        scored_winner_calibration,
+        "policy_selection_score",
     )
     scored_selection = apply_post_selection_calibration(
-        pd.concat(scored_selection_pieces, ignore_index=True),
+        scored_selection,
         post_selection_calibration,
     )
     scored_selection = score_continuation(
@@ -5092,11 +5341,16 @@ def fit_forward_bundle(
         controllers[side] = controller
         controller_audit[side_name] = audit
         side_selection = apply_entry_controllers(side_selection, {side: controller})
-        _, frontier = _choose_frequency_threshold(side_selection, fee, selection_start, end)
+        threshold, frontier = _choose_frequency_threshold(
+            side_selection, fee, selection_start, end
+        )
+        thresholds[side] = threshold
         frontiers[side_name] = frontier
     return {
         "champions": champions,
         "value_champions": value_champions,
+        "policy_ranker_champion": policy_ranker_champion,
+        "policy_ranker": policy_ranker,
         "heads": heads,
         "calibrations": calibrations,
         "post_selection_calibration": post_selection_calibration,
@@ -5348,6 +5602,15 @@ def preflight_gates(
             < pd.Timestamp(item["selection_start"])
             for item in folds
         ),
+        "policy_ranker_selection_past_only": all(
+            bool(item.get("policy_ranker_selection", {}).get("audit_period_only"))
+            and not bool(
+                item.get("policy_ranker_selection", {}).get(
+                    "outer_test_read_for_selection", True
+                )
+            )
+            for item in folds
+        ),
         "local_actions_supported_in_fit": all(
             not item.get("local_plan_variants_enabled")
             or int(item.get("local_plan_training_support", {}).get("fit", {}).get("added_rows", 0))
@@ -5564,6 +5827,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
                     "continuation_models",
                     "continuation_calibration",
                     "expert_library",
+                    "policy_ranker",
                 }
             }
         ),
@@ -5602,6 +5866,9 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             ),
             "expert_library": (
                 None if forward_bundle is None else forward_bundle["expert_library"]
+            ),
+            "policy_ranker": (
+                None if forward_bundle is None else forward_bundle["policy_ranker"]
             ),
             "thresholds_bps": (
                 None if forward_bundle is None else forward_bundle["thresholds_bps"]

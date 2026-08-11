@@ -1107,6 +1107,99 @@ def test_winner_only_calibration_corrects_selection_optimism_without_using_oracl
     assert calibration["audit"]["selected_best_realized_action_fraction"] == 0
 
 
+def test_winner_calibration_uses_the_same_global_score_as_action_selection() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows: list[dict[str, object]] = []
+    for number, timestamp in enumerate(pd.date_range(start, periods=120, freq="1min")):
+        rows.extend(
+            [
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "policy_selection_score": 2.0,
+                    "expected_log_utility": -0.001,
+                    "p_target": 0.4,
+                    "expert_id": f"global-winner-{number}",
+                    "calibrated_ev_bps": -5.0,
+                    "net_bps": 10.0,
+                    "log_utility": 0.001,
+                    "sized_leverage": 1.0,
+                    "expected_holding_seconds": 60.0,
+                },
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "policy_selection_score": 1.0,
+                    "expected_log_utility": 0.01,
+                    "p_target": 0.8,
+                    "expert_id": f"side-head-winner-{number}",
+                    "calibrated_ev_bps": 20.0,
+                    "net_bps": -10.0,
+                    "log_utility": -0.001,
+                    "sized_leverage": 1.0,
+                    "expected_holding_seconds": 60.0,
+                },
+            ]
+        )
+    frame = pd.DataFrame(rows)
+    calibration = policy.fit_post_selection_calibration(
+        frame, "policy_selection_score"
+    )
+    scored = policy.apply_post_selection_calibration(frame, calibration)
+    selected = scored.loc[scored["post_selection_candidate"]]
+    assert selected["expert_id"].str.startswith("global-winner").all()
+    assert selected["calibrated_ev_bps"].gt(0).all()
+    assert calibration["audit"]["selection_score_column"] == "policy_selection_score"
+
+
+def test_global_policy_ranker_challenger_is_selected_only_on_paired_improvement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows: list[dict[str, object]] = []
+    for timestamp in pd.date_range(start, periods=14 * 24, freq="1h"):
+        rows.extend(
+            [
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "side": 1,
+                    "plan_id": "ridge-choice",
+                    "expert_id": "ridge-choice",
+                    "p_target": 0.4,
+                    "net_bps": -5.0,
+                    "log_utility": -0.001,
+                },
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "side": -1,
+                    "plan_id": "ranker-choice",
+                    "expert_id": "ranker-choice",
+                    "p_target": 0.6,
+                    "net_bps": 10.0,
+                    "log_utility": 0.001,
+                },
+            ]
+        )
+    frame = pd.DataFrame(rows)
+
+    monkeypatch.setattr(policy, "_xgb_available", lambda: True)
+    monkeypatch.setattr(
+        policy, "fit_policy_ranker", lambda kind, rows: {"kind": kind, "model": object()}
+    )
+
+    def fake_score(rows: pd.DataFrame, ranker: dict[str, Any]) -> pd.DataFrame:
+        output = rows.copy()
+        prefer_ranker = ranker["kind"] == "xgboost_ranker_cuda"
+        output["policy_selection_score"] = np.where(
+            output["plan_id"].eq("ranker-choice") == prefer_ranker, 1.0, 0.0
+        )
+        output["policy_ranker"] = ranker["kind"]
+        return output
+
+    monkeypatch.setattr(policy, "score_policy_ranker", fake_score)
+    selected, audit = policy.select_policy_ranker(frame, frame)
+    assert selected == "xgboost_ranker_cuda"
+    assert all(audit["paired_challenger_audit"]["criteria"].values())
+
+
 def test_controller_falls_back_to_positive_myopic_policy_when_continuation_is_unfit() -> None:
     start = pd.Timestamp("2026-01-01T00:00:00Z")
     entries = pd.date_range(start, periods=policy.MINIMUM_CONTROLLER_SELECTION_TRADES, freq="10min")
@@ -1321,6 +1414,10 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
         "post_selection_calibration": {
             "strictly_past_only": True,
             "end": "2026-01-31T23:59:00+00:00",
+        },
+        "policy_ranker_selection": {
+            "audit_period_only": True,
+            "outer_test_read_for_selection": False,
         },
         "local_plan_variants_enabled": True,
         "local_plan_training_support": {"fit": {"added_rows": 1}},
