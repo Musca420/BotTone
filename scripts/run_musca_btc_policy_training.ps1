@@ -62,10 +62,17 @@ while (-not $worker.HasExited) {
 
 Clear-Host
 Write-Host "MUSCA BTC BINANCE - TRAINING CONCLUSO"
-if (Test-Path $status) { Get-Content $status }
-if ($worker.ExitCode -ne 0) {
+$finalStatus = $null
+if (Test-Path $status) {
+    Get-Content $status
+    try { $finalStatus = Get-Content $status -Raw | ConvertFrom-Json } catch { }
+}
+if ($worker.ExitCode -ne 0 -and $finalStatus.phase -ne "preflight_complete") {
     Write-Host "Worker fallito. Ultime righe stderr:"
     if (Test-Path $stderr) { Get-Content $stderr -Tail 80 }
+} elseif ($finalStatus.phase -eq "preflight_complete" -and `
+        -not $finalStatus.full_training_authorized) {
+    Write-Host "Preflight concluso correttamente: policy economica non autorizzata."
 }
 Write-Host "Premi Invio per chiudere. Il worker e' gia' terminato."
 Read-Host | Out-Null
