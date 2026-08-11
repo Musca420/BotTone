@@ -320,6 +320,7 @@ def _parser() -> argparse.ArgumentParser:
     hybrid_v14_forward.add_argument("--interval", type=float, default=3600.0)
     musca_btc_policy_train = commands.add_parser("musca-btc-policy-train")
     musca_btc_policy_train.add_argument("--resume", action="store_true")
+    musca_btc_policy_train.add_argument("--preflight-only", action="store_true")
     musca_btc_policy_status = commands.add_parser("musca-btc-policy-status")
     musca_btc_policy_status.add_argument("--watch", action="store_true")
     musca_btc_policy_status.add_argument("--interval", type=float, default=5.0)
@@ -1436,7 +1437,11 @@ def main(argv: list[str] | None = None) -> int:
         from adaptive_bot import musca_btc_policy
 
         try:
-            report = musca_btc_policy.train(resume=arguments.resume)
+            report = (
+                musca_btc_policy.preflight(resume=arguments.resume)
+                if arguments.preflight_only
+                else musca_btc_policy.train(resume=arguments.resume)
+            )
         except BrokenPipeError:
             return 0
         except Exception as error:

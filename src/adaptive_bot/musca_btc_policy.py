@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import time
 import zipfile
 from collections.abc import Iterable
@@ -44,9 +45,12 @@ REGISTRY = ROOT / "research_registry.json"
 EXPERIMENT_LEDGER = ROOT / "experiment_ledger.json"
 REPORT = Path("data/reports/musca_btc_policy.json")
 STATUS = Path("data/reports/musca_btc_policy.status.json")
+PREFLIGHT_REPORT = Path("data/reports/musca_btc_policy.preflight.json")
 BUNDLE = Path("data/models/musca_btc_policy/research_bundle.joblib")
 AUDIT_TRADES = ROOT / "audit_trades.parquet"
 AUDIT_DECISIONS = ROOT / "audit_decisions.parquet"
+PREFLIGHT_TRADES = ROOT / "preflight_trades.parquet"
+PREFLIGHT_DECISIONS = ROOT / "preflight_decisions.parquet"
 EXECUTION_REPORT = Path("data/reports/musca_btc_execution_contract.json")
 CRITIC_CROSSFIT_REPORT = Path("data/reports/musca_btc_policy_critic_crossfit.json")
 EQUITY_OBJECTIVE_REPORT = Path("data/reports/musca_btc_policy_equity_objective.json")
@@ -93,9 +97,13 @@ INNER_MODEL_AUDIT_WEEKS = 2
 CROSSFIT_WARMUP_WEEKS = 8
 CROSSFIT_BLOCK_WEEKS = 4
 CONTINUATION_HALF_LIFE_SECONDS = 24 * 60 * 60
+CONTINUATION_CROSSFIT_MINIMUM_WEEKS = 4
+CONTINUATION_CROSSFIT_BLOCK_WEEKS = 4
 STOP_LOSS_OVERRUN_QUANTILE = 0.999
 MINIMUM_EXPERT_OPPORTUNITIES = 100
 LOCAL_PLAN_AUDIT_STATES = 2_000
+LOCAL_PLAN_TRAINING_STATES = 20_000
+LOCAL_PLAN_INNER_CALIBRATION_STATES = 5_000
 LOCAL_PLAN_REGRET_MATERIAL_BPS = 2.0
 MINIMUM_OOS_TRADES = 300
 MINIMUM_SIDE_OOS_TRADES = 100
@@ -236,6 +244,10 @@ PROTOCOL = {
             "one parameter family at a time around each expert-composed plan; enabled only by "
             "past-only local-regret audit"
         ),
+        "local_training_support": (
+            "deterministic past-only sample with every local parameter family labelled by the "
+            "same execution engine before any local action can enter calibration or test"
+        ),
     },
     "controller": {
         "actions": [
@@ -255,8 +267,16 @@ PROTOCOL = {
         "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
         "state_features": list(STATE_FEATURES),
         "entry_value": (
-            "paired semi-Markov advantage capped by immediate expected log utility: "
-            "continuation may veto an entry but cannot make a negative immediate action enter"
+            "chronologically cross-fitted one-backup semi-Markov advantage capped by coherent "
+            "immediate expected log utility: continuation may veto an entry but cannot make a "
+            "negative immediate action enter"
+        ),
+        "continuation_target": (
+            "actual immediate utility plus the previous fitted model value at the next free "
+            "state; never the best future realized outcome"
+        ),
+        "utility_consistency": (
+            "predicted expected log utility cannot exceed log1p(leverage times predicted net EV)"
         ),
         "continuation_half_life_seconds": CONTINUATION_HALF_LIFE_SECONDS,
         "risk_stop_overrun_reserve": (
@@ -492,6 +512,18 @@ def _report_protocol_hash(path: Path) -> str | None:
     return None
 
 
+def _git_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
 def build_research_registry() -> dict[str, Any]:
     reports = sorted(Path("data/reports").glob("*.json"))
     protocols: dict[str, list[str]] = {}
@@ -514,9 +546,7 @@ def build_research_registry() -> dict[str, Any]:
                 experiments = [item for item in existing if isinstance(item, dict)]
             elif isinstance(existing, dict):
                 experiments = [
-                    item
-                    for item in existing.get("experiments", [])
-                    if isinstance(item, dict)
+                    item for item in existing.get("experiments", []) if isinstance(item, dict)
                 ]
         except (OSError, ValueError, TypeError):
             raise ValueError("research experiment ledger is not valid JSON") from None
@@ -526,16 +556,16 @@ def build_research_registry() -> dict[str, Any]:
             {
                 "experiment_id": experiment_id,
                 "protocol_hash": PROTOCOL_HASH,
+                "git_commit": _git_commit(),
                 "hypothesis": (
-                    "cross-fitted managed experts plus equity utility and causal continuation "
-                    "improve OOS decisions without changing the frozen discovery control"
+                    "coherent EV-to-utility calibration, previous-model fitted continuation and "
+                    "fit-supported local plans remove the c474 structural false entries"
                 ),
                 "changes": [
-                    "event/execution contract audit",
-                    "critic temporal cross-fitting",
-                    "risk-sized log-utility objective",
-                    "direct value benchmark",
-                    "continuation value and negative controls",
+                    "Jensen-consistent EV-to-utility bound",
+                    "chronological previous-model semi-Markov backup",
+                    "fit-supported local plan perturbations including partial exit",
+                    "mandatory proportional economic preflight",
                 ],
                 "periods_observed": [
                     HISTORICAL_START.isoformat(),
@@ -563,6 +593,7 @@ def build_research_registry() -> dict[str, Any]:
         "registered_auto_moe_experts": max(GLOBAL_EXPERT_FLOOR, expert_count),
         "frozen_control_protocol_hash": discovery.PROTOCOL_HASH,
         "challenger_protocol_hash": PROTOCOL_HASH,
+        "git_commit": _git_commit(),
         "future_holdout_start": FUTURE_HOLDOUT_START.isoformat(),
         "future_holdout_opened": False,
         "experiment_ledger": str(EXPERIMENT_LEDGER),
@@ -679,9 +710,7 @@ def _ensure_ordered_event_source(month: str) -> Path:
                     {
                         "event_id": event_id.loc[valid].to_numpy(np.int64),
                         "timestamp_ms": timestamp.loc[valid].to_numpy(np.int64),
-                        "second": np.floor_divide(
-                            timestamp.loc[valid].to_numpy(np.int64), 1_000
-                        ),
+                        "second": np.floor_divide(timestamp.loc[valid].to_numpy(np.int64), 1_000),
                         "price": price.loc[valid].to_numpy(float),
                         "quantity": quantity.loc[valid].to_numpy(float),
                         "buyer_maker": chunk.loc[valid, "buyer_maker"]
@@ -757,8 +786,7 @@ def _raw_events_for_seconds(seconds: set[int]) -> dict[int, list[tuple[int, int,
             for second in sorted(set(missing))[:20]
         ]
         raise ValueError(
-            f"missing ordered aggregate trades for {len(set(missing))} exit seconds: "
-            f"{examples}"
+            f"missing ordered aggregate trades for {len(set(missing))} exit seconds: {examples}"
         )
     return result
 
@@ -799,9 +827,7 @@ def _refine_entry_events(
     output["actual_entry_timestamp"] = actual_timestamp
     output["entry_price"] = actual_price
     output["entry_event_id"] = actual_event_id
-    output["entry_delay_seconds"] = (
-        _datetime_ns(actual_timestamp) - requested_ns
-    ) / 1_000_000_000
+    output["entry_delay_seconds"] = (_datetime_ns(actual_timestamp) - requested_ns) / 1_000_000_000
     return output
 
 
@@ -839,9 +865,11 @@ def refine_stop_fills_with_ordered_events(rows: pd.DataFrame) -> pd.DataFrame:
     for row in np.flatnonzero(refinable):
         code = management[row]
         events = events_by_second[int(exit_second[row])]
-        event_returns = side[row] * (
-            np.asarray([event[2] for event in events], dtype=float) / entry[row] - 1
-        ) * 10_000
+        event_returns = (
+            side[row]
+            * (np.asarray([event[2] for event in events], dtype=float) / entry[row] - 1)
+            * 10_000
+        )
         if code == 3:
             crossing = np.flatnonzero(event_returns >= output.iloc[row]["target_2_bps"] - 1e-9)
             if not len(crossing):
@@ -1070,12 +1098,9 @@ def _observed_l2_coverage() -> dict[str, Any]:
     }
 
 
-def build_execution_contract(
-    source_manifest: dict[str, Any], fee: FeeContract
-) -> dict[str, Any]:
+def build_execution_contract(source_manifest: dict[str, Any], fee: FeeContract) -> dict[str, Any]:
     raw_archives = {
-        month: base.MICRO_ROOT / f"{SYMBOL}-aggTrades-{month}.zip"
-        for month in ONE_SECOND_MONTHS
+        month: base.MICRO_ROOT / f"{SYMBOL}-aggTrades-{month}.zip" for month in ONE_SECOND_MONTHS
     }
     raw_available = all(path.exists() for path in raw_archives.values())
     l2 = _observed_l2_coverage()
@@ -1088,9 +1113,7 @@ def build_execution_contract(
         "alpha_path": {
             "source": "official monthly Binance aggregate trades",
             "raw_event_archives_available": raw_available,
-            "raw_event_archive_paths": {
-                month: str(path) for month, path in raw_archives.items()
-            },
+            "raw_event_archive_paths": {month: str(path) for month, path in raw_archives.items()},
             "current_label_resolution_seconds": int(source_manifest["resolution_seconds"]),
             "ordered_fill_resolution": "aggregate-trade timestamp_ms and event_id",
             "ordered_entry_fill_used_by_current_labels": True,
@@ -1813,9 +1836,7 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
         labelled["exit_bucket_timestamp"] = pd.to_datetime(
             labelled["entry_bucket_timestamp"], utc=True
         ) + pd.to_timedelta(labelled["exit_seconds"].to_numpy(int) - 1, unit="s")
-        labelled["exit_timestamp"] = labelled["exit_bucket_timestamp"] + pd.Timedelta(
-            seconds=1
-        )
+        labelled["exit_timestamp"] = labelled["exit_bucket_timestamp"] + pd.Timedelta(seconds=1)
         labelled["source_month"] = month
         pieces.append(labelled)
         _status(
@@ -1867,6 +1888,8 @@ def local_plan_variants(rows: pd.DataFrame) -> pd.DataFrame:
         ("STOP_WIDER", "stop", 1.15),
         ("TRAIL_TIGHTER", "trailing_bps", 0.80),
         ("TRAIL_WIDER", "trailing_bps", 1.20),
+        ("PARTIAL_SMALLER", "first_exit_fraction", 0.80),
+        ("PARTIAL_LARGER", "first_exit_fraction", 1.20),
     )
     pieces: list[pd.DataFrame] = []
     for name, parameter, scale in specifications:
@@ -1877,8 +1900,8 @@ def local_plan_variants(rows: pd.DataFrame) -> pd.DataFrame:
                 min(PREDICTION_HORIZONS_SECONDS),
                 MAXIMUM_HORIZON_SECONDS,
             ).astype(int)
-            variant["horizon_fraction"] = (
-                variant["horizon_seconds"] / float(MAXIMUM_HORIZON_SECONDS)
+            variant["horizon_fraction"] = variant["horizon_seconds"] / float(
+                MAXIMUM_HORIZON_SECONDS
             )
         elif parameter == "targets":
             variant["target_1_bps"] = np.clip(
@@ -1907,6 +1930,12 @@ def local_plan_variants(rows: pd.DataFrame) -> pd.DataFrame:
                 variant[parameter].to_numpy(float) * scale,
                 3.0,
                 variant["stop_bps"].to_numpy(float),
+            )
+        elif parameter == "first_exit_fraction":
+            variant[parameter] = np.clip(
+                variant[parameter].to_numpy(float) * scale,
+                0.10,
+                0.90,
             )
         variant["local_variant"] = name
         variant["local_parameter_distance"] = abs(math.log(scale)) if parameter else 0.0
@@ -1955,9 +1984,7 @@ def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
     pieces: list[pd.DataFrame] = []
     for month, month_rows in rows.groupby("source_month", sort=True):
         source = _load_second_window(str(month))
-        positions, _ = _first_observed_positions(
-            source, month_rows["actual_entry_timestamp"]
-        )
+        positions, _ = _first_observed_positions(source, month_rows["actual_entry_timestamp"])
         month_rows = _refine_entry_events(month_rows, source, positions)
         month_rows["_source_position"] = positions
         side_pieces: list[pd.DataFrame] = []
@@ -1981,9 +2008,7 @@ def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
             side_pieces.append(labelled)
         pieces.append(pd.concat(side_pieces, ignore_index=True))
     output = pd.concat(pieces, ignore_index=True)
-    output["outcome"] = [
-        _management_name(int(value)) for value in output["management_code"]
-    ]
+    output["outcome"] = [_management_name(int(value)) for value in output["management_code"]]
     output["event"] = [OUTCOME_NAMES[int(value)] for value in output["event_class"]]
     output["exit_bucket_timestamp"] = pd.to_datetime(
         output["entry_bucket_timestamp"], utc=True
@@ -1997,9 +2022,7 @@ def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
     output["stress_1_5x_bps"] = (
         output["gross_bps"] + output["funding_bps"] - 1.5 * fee.round_trip_bps
     )
-    output["stress_2x_bps"] = (
-        output["gross_bps"] + output["funding_bps"] - 2.0 * fee.round_trip_bps
-    )
+    output["stress_2x_bps"] = output["gross_bps"] + output["funding_bps"] - 2.0 * fee.round_trip_bps
     leverage = _leverage(output["stop_bps"].to_numpy(float), fee.round_trip_bps)
     output["sized_leverage"] = leverage
     output["sized_portfolio_return"] = leverage * output["net_bps"].to_numpy(float) / 10_000
@@ -2018,9 +2041,44 @@ def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFr
     return label_exact_plans(local_plan_variants(rows), fee)
 
 
-def train_median_constant_plans(
-    rows: pd.DataFrame, reference: pd.DataFrame
-) -> pd.DataFrame:
+def augment_local_plan_training_support(
+    rows: pd.DataFrame,
+    fee: FeeContract,
+    round_trip_cost_bps: float,
+    stop_loss_overrun_reserve_bps: float,
+    maximum_states: int,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Label a bounded, deterministic past-only sample before local plans reach OOS."""
+    timestamps = pd.DatetimeIndex(
+        pd.to_datetime(rows["actual_entry_timestamp"], utc=True).drop_duplicates()
+    )
+    count = min(maximum_states, len(timestamps))
+    if count == 0:
+        return rows.copy(), {"sampled_states": 0, "added_rows": 0}
+    positions = np.linspace(0, len(timestamps) - 1, count).astype(int)
+    sampled_timestamps = timestamps[np.unique(positions)]
+    sampled = rows.loc[rows["actual_entry_timestamp"].isin(sampled_timestamps)].copy()
+    variants = label_local_plan_variants(sampled, fee)
+    variants = variants.loc[variants["local_variant"].ne("BASE")].reset_index(drop=True)
+    base_rows = rows.copy()
+    base_rows["local_variant"] = "BASE"
+    base_rows["local_parameter_distance"] = 0.0
+    output = pd.concat([base_rows, variants], ignore_index=True)
+    output = apply_risk_sizing_contract(
+        output,
+        round_trip_cost_bps,
+        stop_loss_overrun_reserve_bps,
+    )
+    output = output.sort_values(
+        ["actual_entry_timestamp", "side", "local_variant"], kind="stable"
+    ).reset_index(drop=True)
+    return output, {
+        "sampled_states": len(sampled_timestamps),
+        "added_rows": len(variants),
+    }
+
+
+def train_median_constant_plans(rows: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
     """Build a fixed-management negative control from past-only train medians."""
     parameters = (
         "horizon_seconds",
@@ -2030,22 +2088,16 @@ def train_median_constant_plans(
         "trailing_bps",
         "first_exit_fraction",
     )
-    output = rows.drop_duplicates(
-        ["actual_entry_timestamp", "side"], keep="first"
-    ).copy()
+    output = rows.drop_duplicates(["actual_entry_timestamp", "side"], keep="first").copy()
     medians = reference.groupby("side", sort=False)[list(parameters)].median()
     for side in output["side"].drop_duplicates().to_list():
         if side not in medians.index:
             raise ValueError(f"constant-plan reference is missing side {side}")
         positions = output["side"].eq(side)
         for parameter in parameters:
-            output.loc[positions, parameter] = float(
-                cast(Any, medians.at[side, parameter])
-            )
+            output.loc[positions, parameter] = float(cast(Any, medians.at[side, parameter]))
     output["horizon_seconds"] = np.rint(output["horizon_seconds"]).astype(int)
-    output["horizon_fraction"] = output["horizon_seconds"] / float(
-        MAXIMUM_HORIZON_SECONDS
-    )
+    output["horizon_fraction"] = output["horizon_seconds"] / float(MAXIMUM_HORIZON_SECONDS)
     output["target_2_bps"] = np.maximum(
         output["target_2_bps"].to_numpy(float),
         output["target_1_bps"].to_numpy(float) + 1.0,
@@ -2095,9 +2147,7 @@ def plan_efficiency_audit(rows: pd.DataFrame, fee: FeeContract) -> dict[str, Any
         ["actual_entry_timestamp", "side"]
     )["net_bps"]
     regret = best.sub(baseline, fill_value=0.0).clip(lower=0.0)
-    winner = variants.loc[
-        variants.groupby(["actual_entry_timestamp", "side"])["net_bps"].idxmax()
-    ]
+    winner = variants.loc[variants.groupby(["actual_entry_timestamp", "side"])["net_bps"].idxmax()]
     mean_regret = float(regret.mean())
     return {
         "states": len(grouped),
@@ -2515,17 +2565,22 @@ def cross_fit_fold_expert_features(
     if resume and cache.exists():
         encoded = pd.read_parquet(cache)
         transformed = ordered.merge(encoded, on=keys, how="inner", validate="one_to_one")
-        if transformed.empty or not np.isfinite(
-            transformed.loc[:, FOLD_EXPERT_FEATURES].to_numpy(float)
-        ).all():
+        if (
+            transformed.empty
+            or not np.isfinite(transformed.loc[:, FOLD_EXPERT_FEATURES].to_numpy(float)).all()
+        ):
             raise ValueError("invalid cached cross-fitted critic features")
-        return transformed, final_library, {
-            "scope": scope,
-            "cache": str(cache),
-            "rows": len(transformed),
-            "blocks": int(encoded["fold_expert_scope"].nunique()),
-            "strictly_past_only": True,
-        }
+        return (
+            transformed,
+            final_library,
+            {
+                "scope": scope,
+                "cache": str(cache),
+                "rows": len(transformed),
+                "blocks": int(encoded["fold_expert_scope"].nunique()),
+                "strictly_past_only": True,
+            },
+        )
 
     pieces: list[pd.DataFrame] = []
     block_start = first_block
@@ -2564,14 +2619,18 @@ def cross_fit_fold_expert_features(
     temporary = cache.with_suffix(f".parquet.{os.getpid()}.tmp")
     transformed.loc[:, encoded_columns].to_parquet(temporary, index=False)
     _atomic_replace(temporary, cache)
-    return transformed, final_library, {
-        "scope": scope,
-        "cache": str(cache),
-        "rows": len(transformed),
-        "blocks": block_number,
-        "strictly_past_only": True,
-        "warmup_rows_excluded": len(ordered) - len(transformed),
-    }
+    return (
+        transformed,
+        final_library,
+        {
+            "scope": scope,
+            "cache": str(cache),
+            "rows": len(transformed),
+            "blocks": block_number,
+            "strictly_past_only": True,
+            "warmup_rows_excluded": len(ordered) - len(transformed),
+        },
+    )
 
 
 def _timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
@@ -2771,9 +2830,7 @@ def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str
         },
         "direct": {
             "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
-            "log_utility": np.asarray(
-                head["direct"]["log_utility"].predict(values), dtype=float
-            ),
+            "log_utility": np.asarray(head["direct"]["log_utility"].predict(values), dtype=float),
         },
     }
     value = {
@@ -2822,9 +2879,7 @@ def score_actions(
         },
         "direct": {
             "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
-            "log_utility": np.asarray(
-                head["direct"]["log_utility"].predict(values), dtype=float
-            ),
+            "log_utility": np.asarray(head["direct"]["log_utility"].predict(values), dtype=float),
         },
     }
     output = rows.copy()
@@ -2837,13 +2892,25 @@ def score_actions(
         output[f"expected_{name.lower()}_log_utility"] = conditional_utility[:, event]
     for name, raw in raw_values.items():
         output[f"raw_{name}_ev_bps"] = raw["net_bps"]
-        output[f"{name}_ev_bps"] = calibration["value"][name]["net_bps"].predict(
-            raw["net_bps"]
-        )
+        output[f"{name}_ev_bps"] = calibration["value"][name]["net_bps"].predict(raw["net_bps"])
         output[f"raw_{name}_log_utility"] = raw["log_utility"]
-        output[f"{name}_log_utility"] = calibration["value"][name]["log_utility"].predict(
-            raw["log_utility"]
+        unconstrained = calibration["value"][name]["log_utility"].predict(raw["log_utility"])
+        output[f"unconstrained_{name}_log_utility"] = unconstrained
+        leverage = (
+            output["sized_leverage"].to_numpy(float)
+            if "sized_leverage" in output
+            else np.ones(len(output), dtype=float)
         )
+        ev_implied_return = np.maximum(
+            leverage * output[f"{name}_ev_bps"].to_numpy(float) / 10_000,
+            -0.999999,
+        )
+        coherent = np.minimum(
+            unconstrained,
+            np.log1p(ev_implied_return),
+        )
+        output[f"{name}_utility_consistency_clipped"] = unconstrained > coherent
+        output[f"{name}_log_utility"] = coherent
     output["selected_value_head"] = value_head
     output["raw_ev_bps"] = output[f"raw_{value_head}_ev_bps"]
     output["calibrated_ev_bps"] = output[f"{value_head}_ev_bps"]
@@ -2889,9 +2956,7 @@ def _calibration_error(actual: np.ndarray, predicted: np.ndarray) -> float:
     )
 
 
-def _decision_regret(
-    rows: pd.DataFrame, prediction_column: str, actual_column: str
-) -> float:
+def _decision_regret(rows: pd.DataFrame, prediction_column: str, actual_column: str) -> float:
     values: list[float] = []
     for _, group in rows.groupby("actual_entry_timestamp", sort=False):
         prediction = group[prediction_column].to_numpy(float)
@@ -2952,9 +3017,21 @@ def choose_champion(metrics: dict[str, dict[str, float]]) -> str:
     return "xgboost_cuda" if all(challenger[key] < ridge[key] for key in keys) else "ridge"
 
 
-def continuation_targets(rows: pd.DataFrame) -> pd.DataFrame:
-    """Build semi-Markov training targets; future outcomes remain labels, never live inputs."""
-    ordered = rows.sort_values(["actual_entry_timestamp", "side"], kind="stable").copy()
+def _fit_immediate_backup(rows: pd.DataFrame) -> Predictor:
+    return _fit_regressor(
+        "ridge",
+        _regressor("ridge", 20261400),
+        _x(rows),
+        rows["log_utility"].to_numpy(float),
+        _timestamp_weights(rows),
+    )
+
+
+def continuation_targets(rows: pd.DataFrame, backup_model: Predictor | None = None) -> pd.DataFrame:
+    """Build one fitted semi-Markov backup without an oracle future maximum."""
+    ordered = rows.sort_values(["actual_entry_timestamp", "side"], kind="stable").reset_index(
+        drop=True
+    )
     timestamps = pd.DatetimeIndex(
         pd.to_datetime(ordered["actual_entry_timestamp"], utc=True).drop_duplicates()
     )
@@ -2965,27 +3042,45 @@ def continuation_targets(rows: pd.DataFrame) -> pd.DataFrame:
     entries_ns = _datetime_ns(ordered["actual_entry_timestamp"])
     state_index = np.searchsorted(timestamp_ns, entries_ns, side="left")
     next_free = np.searchsorted(timestamp_ns, exits_ns, side="left")
-    value = np.zeros(len(timestamps) + 1, dtype=float)
+    fitted_value = np.zeros(len(timestamps) + 1, dtype=float)
+    if backup_model is not None:
+        predicted_immediate = np.asarray(backup_model.predict(_x(ordered)), dtype=float)
+        fitted_value[:-1] = (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(ordered["actual_entry_timestamp"], utc=True),
+                    "predicted_immediate": predicted_immediate,
+                }
+            )
+            .groupby("timestamp", sort=True)["predicted_immediate"]
+            .max()
+            .reindex(timestamps)
+            .fillna(0.0)
+            .clip(lower=0.0)
+            .to_numpy(float)
+        )
     q_wait = np.zeros(len(timestamps), dtype=float)
-    q_enter = np.zeros(len(ordered), dtype=float)
+    if len(timestamps) > 1:
+        wait_seconds = np.maximum(0.0, np.diff(timestamp_ns) / 1e9)
+        q_wait[:-1] = np.exp(-wait_seconds / CONTINUATION_HALF_LIFE_SECONDS) * fitted_value[1:-1]
     utility = ordered["log_utility"].to_numpy(float)
-    row_groups = ordered.groupby("actual_entry_timestamp", sort=True).indices
-    for index in range(len(timestamps) - 1, -1, -1):
-        if index + 1 < len(timestamps):
-            wait_seconds = max(0.0, (timestamp_ns[index + 1] - timestamp_ns[index]) / 1e9)
-            q_wait[index] = math.exp(
-                -wait_seconds / CONTINUATION_HALF_LIFE_SECONDS
-            ) * value[index + 1]
-        positions = np.asarray(row_groups[timestamps[index]], dtype=int)
-        duration = np.maximum(0.0, (exits_ns[positions] - entries_ns[positions]) / 1e9)
-        continuation = value[np.minimum(next_free[positions], len(timestamps))]
-        q_enter[positions] = utility[positions] + np.exp(
-            -duration / CONTINUATION_HALF_LIFE_SECONDS
-        ) * continuation
-        value[index] = max(q_wait[index], float(q_enter[positions].max(initial=-math.inf)))
+    duration = np.maximum(0.0, (exits_ns - entries_ns) / 1e9)
+    q_enter = (
+        utility
+        + np.exp(-duration / CONTINUATION_HALF_LIFE_SECONDS)
+        * fitted_value[np.minimum(next_free, len(timestamps))]
+    )
     ordered["target_q_enter_log_utility"] = q_enter
     ordered["target_q_wait_log_utility"] = q_wait[state_index]
-    ordered["target_state_value_log_utility"] = value[state_index]
+    best_enter = ordered.groupby("actual_entry_timestamp", sort=True)[
+        "target_q_enter_log_utility"
+    ].transform("max")
+    ordered["target_state_value_log_utility"] = np.maximum(
+        best_enter.to_numpy(float), q_wait[state_index]
+    )
+    ordered["continuation_target_source"] = (
+        "PREVIOUS_FITTED_IMMEDIATE_VALUE" if backup_model is not None else "ZERO_BACKUP"
+    )
     complete_before = timestamps[-1] - pd.Timedelta(seconds=MAXIMUM_HORIZON_SECONDS)
     ordered["continuation_target_complete"] = pd.to_datetime(
         ordered["actual_entry_timestamp"], utc=True
@@ -2993,14 +3088,43 @@ def continuation_targets(rows: pd.DataFrame) -> pd.DataFrame:
     return ordered
 
 
-def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Predictor]:
-    targets = continuation_targets(rows)
-    complete = targets.loc[targets["continuation_target_complete"]].copy()
+def _cross_fitted_continuation_targets(
+    rows: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, int | bool]]:
+    ordered = rows.sort_values("actual_entry_timestamp", kind="stable")
+    timestamp = pd.to_datetime(ordered["actual_entry_timestamp"], utc=True)
+    start = timestamp.min().floor("D")
+    end = timestamp.max().ceil("D")
+    block_start = start + pd.Timedelta(weeks=CONTINUATION_CROSSFIT_MINIMUM_WEEKS)
+    pieces: list[pd.DataFrame] = []
+    blocks = 0
+    while block_start < end:
+        block_end = min(block_start + pd.Timedelta(weeks=CONTINUATION_CROSSFIT_BLOCK_WEEKS), end)
+        history = _period(ordered, None, block_start, purge_exit=True)
+        held_out = _period(ordered, block_start, block_end, purge_exit=True)
+        if len(history) >= 100 and len(held_out) >= 100:
+            backup = _fit_immediate_backup(history)
+            targets = continuation_targets(held_out, backup)
+            pieces.append(targets.loc[targets["continuation_target_complete"]].copy())
+            blocks += 1
+        block_start = block_end
+    if not pieces:
+        raise ValueError("insufficient chronology for continuation cross-fitting")
+    output = pd.concat(pieces, ignore_index=True)
+    return output, {
+        "strictly_past_only": True,
+        "blocks": blocks,
+        "rows": len(output),
+    }
+
+
+def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Any]:
+    complete, crossfit = _cross_fitted_continuation_targets(rows)
     if len(complete) < 100:
         raise ValueError("insufficient complete continuation targets")
     values = _x(complete)
     weights = _timestamp_weights(complete)
-    models = {
+    models: dict[str, Any] = {
         "enter": _fit_regressor(
             "ridge",
             _regressor("ridge", 20261401),
@@ -3026,14 +3150,16 @@ def fit_continuation_models(rows: pd.DataFrame) -> dict[str, Predictor]:
         ),
         weights,
     )
+    models["backup"] = _fit_immediate_backup(rows)
+    models["crossfit"] = crossfit
     return models
 
 
-def fit_continuation_calibration(
-    models: dict[str, Predictor], rows: pd.DataFrame
-) -> dict[str, IsotonicRegression]:
-    targets = continuation_targets(rows)
+def fit_continuation_calibration(models: dict[str, Any], rows: pd.DataFrame) -> dict[str, Any]:
+    targets = continuation_targets(rows, cast(Predictor, models["backup"]))
     complete = targets.loc[targets["continuation_target_complete"]].copy()
+    if len(complete) < 100:
+        raise ValueError("insufficient complete continuation calibration targets")
     values = _x(complete)
     target = {
         "enter": complete["target_q_enter_log_utility"].to_numpy(float),
@@ -3043,24 +3169,29 @@ def fit_continuation_calibration(
             - complete["target_q_wait_log_utility"].to_numpy(float)
         ),
     }
-    return {
+    calibration = {
         action: IsotonicRegression(out_of_bounds="clip").fit(
-            np.asarray(model.predict(values), dtype=float), target[action]
+            np.asarray(cast(Predictor, models[action]).predict(values), dtype=float),
+            target[action],
         )
-        for action, model in models.items()
+        for action in ("enter", "wait", "advantage")
     }
+    calibration["target_source"] = "PREVIOUS_FITTED_IMMEDIATE_VALUE"
+    return calibration
 
 
 def score_continuation(
     rows: pd.DataFrame,
-    models: dict[str, Predictor],
-    calibration: dict[str, IsotonicRegression],
+    models: dict[str, Any],
+    calibration: dict[str, Any],
 ) -> pd.DataFrame:
     output = rows.copy()
     values = _x(output)
-    for action, model in models.items():
-        raw = np.asarray(model.predict(values), dtype=float)
-        output[f"q_{action}_log_utility"] = calibration[action].predict(raw)
+    for action in ("enter", "wait", "advantage"):
+        raw = np.asarray(cast(Predictor, models[action]).predict(values), dtype=float)
+        output[f"q_{action}_log_utility"] = cast(IsotonicRegression, calibration[action]).predict(
+            raw
+        )
     output["q_wait_log_utility"] = output.groupby("actual_entry_timestamp", sort=False)[
         "q_wait_log_utility"
     ].transform("mean")
@@ -3069,9 +3200,9 @@ def score_continuation(
         output["q_enter_log_utility"] - output["q_wait_log_utility"]
     )
     output["raw_action_advantage_log_utility"] = output["q_advantage_log_utility"]
-    output["continuation_dominance_violation"] = output[
-        "raw_action_advantage_log_utility"
-    ].gt(output["immediate_expected_log_utility"])
+    output["continuation_dominance_violation"] = output["raw_action_advantage_log_utility"].gt(
+        output["immediate_expected_log_utility"]
+    )
     output["action_advantage_log_utility"] = np.minimum(
         output["raw_action_advantage_log_utility"].to_numpy(float),
         output["immediate_expected_log_utility"].to_numpy(float),
@@ -3080,9 +3211,13 @@ def score_continuation(
     return output
 
 
-def continuation_metrics(scored: pd.DataFrame) -> dict[str, float]:
-    targets = continuation_targets(scored)
+def continuation_metrics(scored: pd.DataFrame, models: dict[str, Any]) -> dict[str, Any]:
+    targets = continuation_targets(scored, cast(Predictor, models["backup"]))
     complete = targets["continuation_target_complete"].to_numpy(bool)
+    target_advantage = targets.loc[complete, "target_q_enter_log_utility"].to_numpy(
+        float
+    ) - targets.loc[complete, "target_q_wait_log_utility"].to_numpy(float)
+    predicted_advantage = targets.loc[complete, "raw_action_advantage_log_utility"].to_numpy(float)
     return {
         "enter_mae": float(
             mean_absolute_error(
@@ -3097,25 +3232,31 @@ def continuation_metrics(scored: pd.DataFrame) -> dict[str, float]:
             )
         ),
         "advantage_sign_accuracy": float(
-            np.mean(
-                np.sign(
-                    targets.loc[complete, "target_q_enter_log_utility"].to_numpy(float)
-                    - targets.loc[complete, "target_q_wait_log_utility"].to_numpy(float)
-                )
-                == np.sign(
-                    targets.loc[complete, "raw_action_advantage_log_utility"].to_numpy(float)
-                )
+            np.mean(np.sign(target_advantage) == np.sign(predicted_advantage))
+        ),
+        "advantage_mae": float(mean_absolute_error(target_advantage, predicted_advantage)),
+        "positive_target_fraction": float(np.mean(target_advantage > 0)),
+        "positive_prediction_fraction": float(np.mean(predicted_advantage > 0)),
+        "maximum_absolute_target_q": float(
+            np.max(
+                np.abs(
+                    targets.loc[
+                        complete,
+                        ["target_q_enter_log_utility", "target_q_wait_log_utility"],
+                    ].to_numpy(float)
+                ),
+                initial=0.0,
             )
         ),
         "dominance_violation_fraction": float(
             targets.loc[complete, "continuation_dominance_violation"].mean()
         ),
+        "target_source": "PREVIOUS_FITTED_IMMEDIATE_VALUE",
+        "crossfit": models["crossfit"],
     }
 
 
-def _leverage(
-    stop_bps: np.ndarray, round_trip_cost_bps: float | np.ndarray
-) -> np.ndarray:
+def _leverage(stop_bps: np.ndarray, round_trip_cost_bps: float | np.ndarray) -> np.ndarray:
     risk_fraction = (np.asarray(stop_bps, dtype=float) + round_trip_cost_bps) / 10_000
     return np.minimum(MAXIMUM_LEVERAGE, RISK_PER_TRADE / np.maximum(risk_fraction, 1e-9))
 
@@ -3126,9 +3267,7 @@ def fit_stop_loss_overrun_reserve(rows: pd.DataFrame, round_trip_cost_bps: float
         return 0.0
     overrun = np.maximum(
         0.0,
-        -rows["net_bps"].to_numpy(float)
-        - rows["stop_bps"].to_numpy(float)
-        - round_trip_cost_bps,
+        -rows["net_bps"].to_numpy(float) - rows["stop_bps"].to_numpy(float) - round_trip_cost_bps,
     )
     positive = overrun[overrun > 0]
     if not len(positive):
@@ -3144,9 +3283,7 @@ def apply_risk_sizing_contract(
     output = rows.copy()
     reserve = max(0.0, float(stop_loss_overrun_reserve_bps))
     output["risk_stop_overrun_reserve_bps"] = reserve
-    leverage = _leverage(
-        output["stop_bps"].to_numpy(float), round_trip_cost_bps + reserve
-    )
+    leverage = _leverage(output["stop_bps"].to_numpy(float), round_trip_cost_bps + reserve)
     output["sized_leverage"] = leverage
     output["sized_portfolio_return"] = leverage * output["net_bps"].to_numpy(float) / 10_000
     if np.any(output["sized_portfolio_return"].to_numpy(float) <= -1):
@@ -3337,9 +3474,9 @@ def sequential_replay(
                 round_trip_cost_bps + row_stop_reserve,
             )[0]
         )
-        worst_risk = leverage * (
-            float(row.stop_bps) + round_trip_cost_bps + row_stop_reserve
-        ) / 10_000
+        worst_risk = (
+            leverage * (float(row.stop_bps) + round_trip_cost_bps + row_stop_reserve) / 10_000
+        )
         if state.risk_remaining_fraction + 1e-12 < worst_risk:
             veto_reason = (
                 "MAXIMUM_DRAWDOWN_VETO"
@@ -3584,45 +3721,43 @@ def negative_control_metrics(
     controls["temporally_shifted_prediction"] = shifted
 
     no_gating = scored.copy()
-    no_gating_return = _leverage(
-        no_gating["stop_bps"].to_numpy(float), fee.round_trip_bps
-    ) * no_gating["managed_expert_mean_bps"].to_numpy(float) / 10_000
+    no_gating_return = (
+        _leverage(no_gating["stop_bps"].to_numpy(float), fee.round_trip_bps)
+        * no_gating["managed_expert_mean_bps"].to_numpy(float)
+        / 10_000
+    )
     no_gating["expected_log_utility"] = np.log1p(np.maximum(no_gating_return, -0.999999))
     controls["managed_expert_mean_no_gate"] = no_gating
 
     def expert_control(column: str) -> pd.DataFrame:
         control = scored.copy()
         net_prediction = control[column].to_numpy(float) - fee.round_trip_bps
-        predicted_return = _leverage(
-            control["stop_bps"].to_numpy(float), fee.round_trip_bps
-        ) * net_prediction / 10_000
-        control["expected_log_utility"] = np.log1p(
-            np.maximum(predicted_return, -0.999999)
+        predicted_return = (
+            _leverage(control["stop_bps"].to_numpy(float), fee.round_trip_bps)
+            * net_prediction
+            / 10_000
         )
+        control["expected_log_utility"] = np.log1p(np.maximum(predicted_return, -0.999999))
         return control
 
     def net_expert_control(column: str) -> pd.DataFrame:
         control = scored.copy()
-        predicted_return = _leverage(
-            control["stop_bps"].to_numpy(float), fee.round_trip_bps
-        ) * control[column].to_numpy(float) / 10_000
-        control["expected_log_utility"] = np.log1p(
-            np.maximum(predicted_return, -0.999999)
+        predicted_return = (
+            _leverage(control["stop_bps"].to_numpy(float), fee.round_trip_bps)
+            * control[column].to_numpy(float)
+            / 10_000
         )
+        control["expected_log_utility"] = np.log1p(np.maximum(predicted_return, -0.999999))
         return control
 
     if "view_full_prediction_bps" in scored:
         controls["full_only"] = expert_control("view_full_prediction_bps")
     if "equal_weight_expert_prediction_bps" in scored:
-        controls["equal_weight_experts"] = expert_control(
-            "equal_weight_expert_prediction_bps"
-        )
+        controls["equal_weight_experts"] = expert_control("equal_weight_expert_prediction_bps")
     if "gate_expected_gross_bps" in scored:
         controls["deterministic_gate_only"] = expert_control("gate_expected_gross_bps")
     if "managed_expert_best_lcb_bps" in scored:
-        controls["best_active_fold_expert"] = net_expert_control(
-            "managed_expert_best_lcb_bps"
-        )
+        controls["best_active_fold_expert"] = net_expert_control("managed_expert_best_lcb_bps")
 
     if constant_plan is not None and not constant_plan.empty:
         constant = constant_plan.copy()
@@ -3654,9 +3789,7 @@ def negative_control_metrics(
         if name == "always_wait":
             trades = rows
         else:
-            trades, _ = sequential_replay(
-                rows, 0.0, fee.round_trip_bps, record_decisions=False
-            )
+            trades, _ = sequential_replay(rows, 0.0, fee.round_trip_bps, record_decisions=False)
         result[name] = policy_metrics(
             trades,
             start,
@@ -3691,8 +3824,29 @@ def economic_calibration_buckets(scored: pd.DataFrame) -> dict[str, Any]:
         .reset_index()
     )
     realized = grouped["realized_log_utility"].to_numpy(float)
+    leverage = values["sized_leverage"].to_numpy(float)
+    coherent_upper = np.log1p(
+        np.maximum(
+            leverage * values["calibrated_ev_bps"].to_numpy(float) / 10_000,
+            -0.999999,
+        )
+    )
     return {
         "buckets": grouped.to_dict("records"),
+        "utility_ev_consistency_violations": int(
+            np.sum(
+                values["immediate_expected_log_utility"].to_numpy(float) > coherent_upper + 1e-12
+            )
+        ),
+        "utility_consistency_clip_fraction": float(
+            np.mean(
+                np.where(
+                    values["selected_value_head"].eq("direct"),
+                    values["direct_utility_consistency_clipped"],
+                    values["decomposed_utility_consistency_clipped"],
+                )
+            )
+        ),
         "realized_utility_monotone_non_decreasing": bool(
             len(realized) < 2 or np.all(np.diff(realized) >= 0)
         ),
@@ -3735,8 +3889,7 @@ def view_gating_audit(scored: pd.DataFrame) -> dict[str, Any]:
         for column in prediction_columns
     }
     gate_error = np.abs(
-        scored["gate_expected_gross_bps"].to_numpy(float)
-        - scored["net_bps"].to_numpy(float)
+        scored["gate_expected_gross_bps"].to_numpy(float) - scored["net_bps"].to_numpy(float)
     )
     dispersion = scored["gate_disagreement_bps"].to_numpy(float)
     dispersion_error_correlation = correlation(dispersion, gate_error)
@@ -3869,9 +4022,17 @@ def _xgb_available() -> bool:
 
 
 def walk_forward(
-    matrix: pd.DataFrame, fee: FeeContract, *, resume: bool = False
+    matrix: pd.DataFrame,
+    fee: FeeContract,
+    *,
+    resume: bool = False,
+    fold_limit: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, Any]]]:
     folds = _folds(matrix)
+    if fold_limit is not None:
+        if fold_limit < 1:
+            raise ValueError("fold_limit must be positive")
+        folds = folds[:fold_limit]
     if not folds:
         raise ValueError("insufficient chronology for nested walk-forward")
     trade_pieces: list[pd.DataFrame] = []
@@ -3900,12 +4061,8 @@ def walk_forward(
             == 0
         ):
             continue
-        stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(
-            fit, fee.round_trip_bps
-        )
-        fit = apply_risk_sizing_contract(
-            fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps
-        )
+        stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(fit, fee.round_trip_bps)
+        fit = apply_risk_sizing_contract(fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps)
         inner_calibration = apply_risk_sizing_contract(
             inner_calibration, fee.round_trip_bps, stop_loss_overrun_reserve_bps
         )
@@ -3918,9 +4075,7 @@ def walk_forward(
         selection = apply_risk_sizing_contract(
             selection, fee.round_trip_bps, stop_loss_overrun_reserve_bps
         )
-        test = apply_risk_sizing_contract(
-            test, fee.round_trip_bps, stop_loss_overrun_reserve_bps
-        )
+        test = apply_risk_sizing_contract(test, fee.round_trip_bps, stop_loss_overrun_reserve_bps)
         fit, library, crossfit_diagnostics = cross_fit_fold_expert_features(
             fit,
             number,
@@ -3933,7 +4088,28 @@ def walk_forward(
         test = apply_fold_expert_library(test, library)
         plan_audit = plan_efficiency_audit(model_audit, fee)
         local_plan_variants_enabled = bool(plan_audit["material"])
+        local_plan_training_support = {
+            "fit": {"sampled_states": 0, "added_rows": 0},
+            "inner_calibration": {"sampled_states": 0, "added_rows": 0},
+        }
         if local_plan_variants_enabled:
+            fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
+                fit,
+                fee,
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+                LOCAL_PLAN_TRAINING_STATES,
+            )
+            (
+                inner_calibration,
+                local_plan_training_support["inner_calibration"],
+            ) = augment_local_plan_training_support(
+                inner_calibration,
+                fee,
+                fee.round_trip_bps,
+                stop_loss_overrun_reserve_bps,
+                LOCAL_PLAN_INNER_CALIBRATION_STATES,
+            )
             model_audit = apply_risk_sizing_contract(
                 label_local_plan_variants(model_audit, fee),
                 fee.round_trip_bps,
@@ -3974,7 +4150,7 @@ def walk_forward(
             continuation_model,
             continuation_calibration,
         )
-        continuation_audit_metrics = continuation_metrics(continuation_audit)
+        continuation_audit_metrics = continuation_metrics(continuation_audit, continuation_model)
         kinds = ["ridge"] + (["xgboost_cuda"] if _xgb_available() else [])
         model_metrics: dict[str, Any] = {}
         champions: dict[int, str] = {}
@@ -4009,8 +4185,7 @@ def walk_forward(
                 candidate_calibration = fit_calibration(candidate_head, side_inner)
                 scored_inner = score_actions(side_audit, candidate_head, candidate_calibration)
                 value_metrics = {
-                    value_head: head_metrics(scored_inner, value_head)
-                    for value_head in VALUE_HEADS
+                    value_head: head_metrics(scored_inner, value_head) for value_head in VALUE_HEADS
                 }
                 selected_value_head = choose_value_head(value_metrics)
                 side_metrics[kind] = {
@@ -4046,19 +4221,13 @@ def walk_forward(
         scored_selection = pd.concat(scored_selection_pieces, ignore_index=True)
         scored_test = pd.concat(scored_test_pieces, ignore_index=True)
         permuted_test = pd.concat(permuted_test_pieces, ignore_index=True)
-        continuation_refit = pd.concat(
-            [fit, inner_calibration, model_audit], ignore_index=True
-        )
+        continuation_refit = pd.concat([fit, inner_calibration, model_audit], ignore_index=True)
         continuation_model = fit_continuation_models(continuation_refit)
-        continuation_calibration = fit_continuation_calibration(
-            continuation_model, calibration
-        )
+        continuation_calibration = fit_continuation_calibration(continuation_model, calibration)
         scored_selection = score_continuation(
             scored_selection, continuation_model, continuation_calibration
         )
-        scored_test = score_continuation(
-            scored_test, continuation_model, continuation_calibration
-        )
+        scored_test = score_continuation(scored_test, continuation_model, continuation_calibration)
         thresholds: dict[int, float] = {1: 0.0, -1: 0.0}
         frontiers: dict[str, list[dict[str, Any]]] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
@@ -4171,6 +4340,7 @@ def walk_forward(
                 "view_gating_audit": view_gating_audit(scored_test),
                 "plan_efficiency_audit": plan_audit,
                 "local_plan_variants_enabled": local_plan_variants_enabled,
+                "local_plan_training_support": local_plan_training_support,
                 "stop_loss_overrun_reserve_bps": stop_loss_overrun_reserve_bps,
                 "fold_experts": {
                     "fold_scope": library["fold_scope"],
@@ -4287,12 +4457,8 @@ def fit_forward_bundle(
     fit = _period(matrix, None, calibration_start, purge_exit=True)
     calibration = _period(matrix, calibration_start, selection_start, purge_exit=True)
     selection = _period(matrix, selection_start, end, purge_exit=True)
-    stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(
-        fit, fee.round_trip_bps
-    )
-    fit = apply_risk_sizing_contract(
-        fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps
-    )
+    stop_loss_overrun_reserve_bps = fit_stop_loss_overrun_reserve(fit, fee.round_trip_bps)
+    fit = apply_risk_sizing_contract(fit, fee.round_trip_bps, stop_loss_overrun_reserve_bps)
     calibration = apply_risk_sizing_contract(
         calibration, fee.round_trip_bps, stop_loss_overrun_reserve_bps
     )
@@ -4306,10 +4472,18 @@ def fit_forward_bundle(
     )
     calibration = apply_fold_expert_library(calibration, library)
     selection = apply_fold_expert_library(selection, library)
-    local_plan_variants_enabled = sum(
-        bool(item.get("local_plan_variants_enabled")) for item in folds
-    ) > len(folds) / 2
+    local_plan_variants_enabled = (
+        sum(bool(item.get("local_plan_variants_enabled")) for item in folds) > len(folds) / 2
+    )
+    local_plan_training_support = {"fit": {"sampled_states": 0, "added_rows": 0}}
     if local_plan_variants_enabled:
+        fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
+            fit,
+            fee,
+            fee.round_trip_bps,
+            stop_loss_overrun_reserve_bps,
+            LOCAL_PLAN_TRAINING_STATES,
+        )
         calibration = apply_risk_sizing_contract(
             label_local_plan_variants(calibration, fee),
             fee.round_trip_bps,
@@ -4352,9 +4526,7 @@ def fit_forward_bundle(
         scored_selection = score_continuation(
             scored_selection, continuation_model, continuation_calibration
         )
-        _, frontier = _choose_frequency_threshold(
-            scored_selection, fee, selection_start, end
-        )
+        _, frontier = _choose_frequency_threshold(scored_selection, fee, selection_start, end)
         heads[side] = head
         calibrations[side] = calibrated
         thresholds[side] = 0.0
@@ -4376,6 +4548,7 @@ def fit_forward_bundle(
         "policy_selection_period": [selection_start.isoformat(), end.isoformat()],
         "frequency_pnl_frontiers": frontiers,
         "local_plan_variants_enabled": local_plan_variants_enabled,
+        "local_plan_training_support": local_plan_training_support,
         "stop_loss_overrun_reserve_bps": stop_loss_overrun_reserve_bps,
         "fold_experts": {
             "fold_scope": library["fold_scope"],
@@ -4436,9 +4609,7 @@ def _verdict(
 ) -> str:
     if (
         not economics["has_positive_unconditional_action"]
-        and float(
-            economics.get("oracle_mean_log_utility", economics.get("oracle_mean_net_bps", 0))
-        )
+        and float(economics.get("oracle_mean_log_utility", economics.get("oracle_mean_net_bps", 0)))
         <= 0
     ):
         return "NO_ECONOMIC_ACTION_SET"
@@ -4474,9 +4645,7 @@ def write_stage_reports(
     payloads = {
         CRITIC_CROSSFIT_REPORT: common
         | {
-            "folds": [
-                item.get("fold_experts", {}).get("fit_crossfit", {}) for item in folds
-            ],
+            "folds": [item.get("fold_experts", {}).get("fit_crossfit", {}) for item in folds],
             "strictly_past_only": bool(folds)
             and all(
                 item.get("fold_experts", {})
@@ -4502,9 +4671,7 @@ def write_stage_reports(
         PLAN_EFFICIENCY_REPORT: common
         | {
             "folds": [item.get("plan_efficiency_audit", {}) for item in folds],
-            "enabled_by_fold": [
-                bool(item.get("local_plan_variants_enabled")) for item in folds
-            ],
+            "enabled_by_fold": [bool(item.get("local_plan_variants_enabled")) for item in folds],
         },
         VALUE_HEADS_REPORT: common
         | {
@@ -4515,9 +4682,7 @@ def write_stage_reports(
         | {
             "entry_rule": "DOMINANCE_SAFE_PAIRED_Q_ADVANTAGE_GT_ZERO",
             "threshold_tuning_enabled": False,
-            "diagnostic_frontiers": [
-                item.get("frequency_pnl_frontiers", {}) for item in folds
-            ],
+            "diagnostic_frontiers": [item.get("frequency_pnl_frontiers", {}) for item in folds],
         },
         INTRATRADE_REPORT: common
         | {
@@ -4560,10 +4725,118 @@ def append_experiment_result(verdict: str, metrics: dict[str, Any]) -> None:
     _atomic_json(EXPERIMENT_LEDGER, {"experiments": experiments})
 
 
+def preflight_gates(
+    metrics: dict[str, Any], folds: list[dict[str, Any]], total_fold_count: int
+) -> dict[str, bool]:
+    required_trades = math.ceil(MINIMUM_OOS_TRADES * len(folds) / max(total_fold_count, 1))
+    fold_expectancy = [item["test_metrics"].get("expectancy_bps") for item in folds]
+    return {
+        "folds_complete": len(folds) == 2,
+        "minimum_proportional_trades": int(metrics.get("trades", 0)) >= required_trades,
+        "expectancy_positive": float(metrics.get("expectancy_bps") or -math.inf) > 0,
+        "lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -math.inf) > 0,
+        "profit_factor_1_15": float(metrics.get("profit_factor") or -math.inf) >= 1.15,
+        "drawdown_8pct": metrics.get("maximum_drawdown") is not None
+        and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
+        "majority_active_days_positive": float(metrics.get("positive_active_days") or 0.0) > 0.5,
+        "majority_folds_positive": sum(
+            value is not None and float(value) > 0 for value in fold_expectancy
+        )
+        > len(folds) / 2,
+        "risk_respected": int(metrics.get("risk_violations", 0)) == 0,
+        "utility_ev_consistent": all(
+            int(item["economic_calibration"].get("utility_ev_consistency_violations", 1)) == 0
+            for item in folds
+        ),
+        "fitted_continuation_only": all(
+            item["continuation_value_audit"].get("target_source")
+            == "PREVIOUS_FITTED_IMMEDIATE_VALUE"
+            and bool(item["continuation_value_audit"].get("crossfit", {}).get("strictly_past_only"))
+            for item in folds
+        ),
+        "local_actions_supported_in_fit": all(
+            not item.get("local_plan_variants_enabled")
+            or int(item.get("local_plan_training_support", {}).get("fit", {}).get("added_rows", 0))
+            > 0
+            for item in folds
+        ),
+    }
+
+
+def preflight(*, resume: bool = False) -> dict[str, Any]:
+    """Run two frozen discovery folds; the ten-fold audit is forbidden until this passes."""
+    global _RUN_STARTED
+    _RUN_STARTED = time.monotonic()
+    started = time.monotonic()
+    _status("preflight", "loading canonical Binance state-actions", 0.5, gpu=_gpu_info())
+    registry = build_research_registry()
+    fee = resolve_fee_contract()
+    source_manifest = ensure_one_second_sources()
+    execution_contract = build_execution_contract(source_manifest, fee)
+    matrix, partitions = build_state_actions(fee, resume=resume)
+    if pd.to_datetime(matrix["actual_entry_timestamp"], utc=True).ge(FUTURE_HOLDOUT_START).any():
+        raise ValueError("sealed future holdout was read")
+    all_folds = _folds(matrix)
+    trades, decisions, folds = walk_forward(matrix, fee, resume=resume, fold_limit=2)
+    audit_start = min(pd.Timestamp(item["test_start"]) for item in folds)
+    audit_end = max(pd.Timestamp(item["test_end"]) for item in folds)
+    metrics = policy_metrics(trades, audit_start, audit_end)
+    gates = preflight_gates(metrics, folds, len(all_folds))
+    verdict = "PREFLIGHT_PASSED" if all(gates.values()) else "PREFLIGHT_FAILED"
+    PREFLIGHT_TRADES.parent.mkdir(parents=True, exist_ok=True)
+    temporary = PREFLIGHT_TRADES.with_suffix(".parquet.tmp")
+    trades.to_parquet(temporary, index=False)
+    os.replace(temporary, PREFLIGHT_TRADES)
+    temporary_decisions = PREFLIGHT_DECISIONS.with_suffix(".parquet.tmp")
+    decisions.to_parquet(temporary_decisions, index=False)
+    os.replace(temporary_decisions, PREFLIGHT_DECISIONS)
+    report = {
+        "protocol_hash": PROTOCOL_HASH,
+        "created_at": datetime.now(UTC).isoformat(),
+        "elapsed_seconds": round(time.monotonic() - started, 2),
+        "discovery_only": True,
+        "future_holdout_opened": False,
+        "full_training_authorized": all(gates.values()),
+        "fee_contract": asdict(fee) | {"round_trip_bps": fee.round_trip_bps},
+        "data": {
+            "source_manifest": source_manifest,
+            "label_partitions": partitions,
+            "state_action_rows": len(matrix),
+            "future_holdout_rows_read": 0,
+        },
+        "execution": execution_contract,
+        "registry": registry,
+        "folds": folds,
+        "metrics": metrics,
+        "gates": gates,
+        "verdict": verdict,
+    }
+    _atomic_json(PREFLIGHT_REPORT, report)
+    _status(
+        "preflight_complete",
+        verdict,
+        100,
+        verdict=verdict,
+        full_training_authorized=all(gates.values()),
+        gpu=_gpu_info(),
+    )
+    return report
+
+
 def train(*, resume: bool = False) -> dict[str, Any]:
     global _RUN_STARTED
     _RUN_STARTED = time.monotonic()
     started = time.monotonic()
+    try:
+        preflight_report = json.loads(PREFLIGHT_REPORT.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        preflight_report = {}
+    if preflight_report.get("protocol_hash") != PROTOCOL_HASH or not bool(
+        preflight_report.get("full_training_authorized")
+    ):
+        raise RuntimeError(
+            "full training is forbidden until musca-btc-policy-train --preflight-only passes"
+        )
     frozen_hash_before = _sha256(AUTO_MOE_REPORT)
     _status("registry", "registering all prior protocols and experts", 0.5, gpu=_gpu_info())
     registry = build_research_registry()

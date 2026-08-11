@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-11  
-Stato: punti 1, 2 e 5 verificati; punto 3 corretto dopo la falsificazione OOS e da rieseguire  
+Stato: punti 1, 2 e 5 verificati; punti 3 e 4 corretti dopo la seconda falsificazione OOS e in preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -77,6 +77,58 @@ ingresso, ma non rendere conveniente una perdita immediata prevista. Il Risk Eng
 past-only al percentile 99,9% dell'overrun osservato e veta nuovo rischio prima del drawdown 8%.
 I test mirati sono 41/41 verdi; il nuovo walk-forward è necessario prima di spuntare di nuovo il
 punto 3.
+
+## Esito del protocollo c474e38c e secondo audit causale
+
+Il protocollo `c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497` ha
+completato tutti i dieci outer fold senza crash e ha prodotto `NO_STABLE_OOS_POLICY`. La correzione
+del rischio ha funzionato, ma la policy economica no: 8 trade OOS, tutti LONG, −13,8404 bps/trade,
+PF equity 0,3138, drawdown 2,08%, nessuna violazione di rischio e soltanto 20% dei giorni attivi
+positivi. Otto fold non hanno aperto alcun trade; i due attivi sono entrambi negativi.
+
+Il run ha falsificato la vecchia implementazione del punto 3 e ha localizzato quattro errori nuovi:
+
+- **E-16 — EV e utility economicamente contraddittori.** Cinque degli otto ingressi avevano EV
+  netto calibrato negativo ma utility calibrata positiva. Con leva nota, Jensen impone
+  `E[log(1+L·R)] <= log(1+L·E[R])`: una utility positiva non può autorizzare un EV netto negativo.
+- **E-17 — backup ancora oracle.** I target ricorsivi usavano `max` del miglior futuro realizzato:
+  `Q_ENTER` e `Q_WAIT` arrivavano a circa 0,30 log-equity contro utility immediata nell'ordine di
+  0,0001. La sign accuracy del 94–95% era dominata dalla classe negativa e non dimostrava valore
+  decisionale.
+- **E-18 — azioni locali fuori supporto nel fit.** I local plan erano presenti in audit,
+  calibrazione e test, ma non nel fit principale. Tutti gli otto trade scelti erano perturbazioni
+  locali (`TRAIL_TIGHTER` o `TARGETS_TIGHTER`), quindi la policy stava estrapolando su azioni non
+  etichettate nella parte più ampia del training.
+- **E-19 — audit del piano incompleto.** Il regret locale era materiale in tutti i fold (81–83% degli
+  stati aveva un piano vicino migliore), ma mancavano perturbazioni della quota parziale e il report
+  non verificava la coerenza utility–EV.
+
+Le viste non sono la prima correzione: le correlazioni degli errori OOS sono 0,97–0,99 e tutti i
+controlli aggregati (`FULL`, equal-weight, no-gate, momentum, mean-reversion e best expert) restano
+negativi. Aggiungere expert o un gate più flessibile prima di correggere E-16…E-19 aumenterebbe solo
+la capacità di overfit.
+
+Il protocollo preregistrato successivo è
+`5561e5afdb53b1b1ea38adf42e69a23d3ce52f750b077d9a587574832457fc63` e mantiene invariato
+l'hash dei label canonici. Le sole modifiche ammesse sono:
+
+1. utility calibrata limitata dal bound coerente derivato dall'EV netto e dalla leva nota;
+2. un backup semi-Markov fitted, prodotto da un modello della precedente iterazione addestrato su
+   storia strettamente antecedente, mai dal miglior futuro osservato;
+3. supporto locale deterministico e past-only nel fit e nell'inner calibration prima di consentire
+   le stesse perturbazioni in test;
+4. perturbazioni della quota parziale e diagnostiche su target/prediction positive, advantage MAE e
+   violazioni della coerenza EV–utility.
+
+Prima dei dieci fold viene eseguito un preflight limitato e dichiarato discovery. Se non mostra
+coerenza contabile, supporto, almeno il numero proporzionale di trade e metriche economiche positive
+con gli stessi gate, il training completo non parte. Questo impedisce un altro run costoso noto in
+partenza come non economico; non trasforma il preflight in un holdout indipendente.
+
+```powershell
+uv run adaptive-bot musca-btc-policy-train --resume --preflight-only
+uv run adaptive-bot musca-btc-policy-train --resume  # consentito solo dopo PREFLIGHT_PASSED
+```
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
@@ -190,6 +242,10 @@ Un componente viene mantenuto soltanto se mostra valore incrementale paired OOS.
 | E-13 | Differenza di due Q sovrastimata | Due calibratori separati permettevano al continuation value di promuovere utility immediata negativa. |
 | E-14 | Stop overrun fuori sizing | Lo slippage event-level, pur piccolo, non aveva alcuna riserva nel budget 1%. |
 | E-15 | Drawdown senza veto | Il replay misurava l'8% solo a posteriori e duplicava le violazioni nelle metriche LONG/SHORT. |
+| E-16 | EV netto e utility contraddittori | Cinque degli otto ingressi c474 avevano EV calibrato negativo ma utility calibrata positiva. |
+| E-17 | Continuation target ancora oracle | Il backup ricorsivo usava il massimo futuro realizzato e generava livelli Q circa mille volte l'utility immediata. |
+| E-18 | Local plan fuori supporto | Le perturbazioni erano etichettate da model-audit in poi ma non nel fit principale; tutti i trade c474 erano locali. |
+| E-19 | Audit locale incompleto | Mancavano quota parziale e controllo esplicito della coerenza EV–utility. |
 
 ## Ordine vincolante degli otto interventi
 
@@ -454,6 +510,9 @@ lo duplica riga per riga e non lo sostituisce.
 - consentire al continuation value di rendere positivo un ingresso con utility immediata prevista
   negativa in un mercato esogeno a una posizione;
 - sottrarre due Q calibrati indipendentemente senza un paired-advantage auditato;
+- calibrare EV netto e utility come due autorizzazioni indipendenti quando violano il bound di Jensen;
+- costruire continuation target con il massimo futuro realizzato invece del precedente modello fitted;
+- autorizzare in test una perturbazione di piano che non possiede esempi etichettati nel fit;
 - dimensionare esattamente sullo stop senza una riserva causalmente stimata per l'overrun;
 - continuare ad aprire nuovo rischio quando il budget di drawdown residuo è inferiore al worst risk;
 - chiamare `HOLD/REDUCE/CLOSE` azioni apprese quando sono soltanto esecuzioni del piano;
