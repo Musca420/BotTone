@@ -142,7 +142,10 @@ LABEL_PROTOCOL = {
     "symbol": SYMBOL,
     "venue": VENUE,
     "parent_protocol_hash": base.PROTOCOL_HASH,
-    "path_resolution": "1s state path plus ordered millisecond aggregate-trade stop fills",
+    "path_resolution": (
+        "1s state path plus ordered millisecond aggregate-trade entry, target, stop and trailing "
+        "fills"
+    ),
     "action_space": "parameterized plans composed from sparse weighted expert predictions",
     "sides": ["LONG", "SHORT"],
     "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
@@ -269,6 +272,21 @@ PROTOCOL = {
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
         "frequency": "Q(action) > Q(wait); threshold frontier is diagnostic only; no quota",
+        "negative_controls": [
+            "random prediction",
+            "temporal shift",
+            "label permutation",
+            "FULL only",
+            "best active fold expert",
+            "equal-weight experts",
+            "no gate",
+            "train-median constant plan",
+            "LONG only",
+            "SHORT only",
+            "simple momentum",
+            "simple mean reversion",
+            "always WAIT",
+        ],
     },
     "gates": {
         "minimum_oos_trades": MINIMUM_OOS_TRADES,
@@ -678,7 +696,7 @@ def _ensure_ordered_event_source(month: str) -> Path:
     return output
 
 
-def _raw_event_prices_for_seconds(seconds: set[int]) -> dict[int, list[float]]:
+def _raw_events_for_seconds(seconds: set[int]) -> dict[int, list[tuple[int, int, float]]]:
     if not seconds:
         return {}
     target = pd.DataFrame({"second": sorted(seconds)})
@@ -696,7 +714,7 @@ def _raw_event_prices_for_seconds(seconds: set[int]) -> dict[int, list[float]]:
         connection.register("target_exit_seconds", target)
         selected = connection.execute(
             """
-            SELECT event.second, event.price
+            SELECT event.second, event.timestamp_ms, event.event_id, event.price
             FROM read_parquet(?) AS event
             INNER JOIN target_exit_seconds AS target USING (second)
             ORDER BY event.timestamp_ms, event.event_id
@@ -706,31 +724,97 @@ def _raw_event_prices_for_seconds(seconds: set[int]) -> dict[int, list[float]]:
     finally:
         connection.close()
     result = {
-        int(cast(Any, second)): prices.to_list()
-        for second, prices in selected.groupby("second", sort=False)["price"]
+        int(cast(Any, second)): list(
+            zip(
+                group["timestamp_ms"].astype("int64").to_list(),
+                group["event_id"].astype("int64").to_list(),
+                group["price"].astype(float).to_list(),
+                strict=True,
+            )
+        )
+        for second, group in selected.groupby("second", sort=False)
     }
-    missing = [second for second, prices in result.items() if not prices]
+    missing = [second for second, events in result.items() if not events]
     missing.extend(second for second in seconds if second not in result)
     if missing:
-        raise ValueError(f"missing ordered aggregate trades for {len(missing)} exit seconds")
+        examples = [
+            pd.Timestamp(second, unit="s", tz="UTC").isoformat()
+            for second in sorted(set(missing))[:20]
+        ]
+        raise ValueError(
+            f"missing ordered aggregate trades for {len(set(missing))} exit seconds: "
+            f"{examples}"
+        )
     return result
+
+
+def _raw_event_prices_for_seconds(seconds: set[int]) -> dict[int, list[float]]:
+    """Compatibility view used by focused tests and diagnostics."""
+    return {
+        second: [event[2] for event in events]
+        for second, events in _raw_events_for_seconds(seconds).items()
+    }
+
+
+def _refine_entry_events(
+    actions: pd.DataFrame,
+    source: pd.DataFrame,
+    positions: np.ndarray,
+) -> pd.DataFrame:
+    output = actions.copy()
+    bucket_timestamp = pd.to_datetime(source.loc[positions, "timestamp"], utc=True)
+    bucket_seconds = _datetime_ns(bucket_timestamp) // 1_000_000_000
+    events = _raw_events_for_seconds(set(bucket_seconds.tolist()))
+    requested_ns = _datetime_ns(output["entry_timestamp"])
+    actual_timestamp_ms = np.empty(len(output), dtype=np.int64)
+    actual_price = np.empty(len(output), dtype=float)
+    actual_event_id = np.empty(len(output), dtype=np.int64)
+    for row, second in enumerate(bucket_seconds):
+        candidates = events[int(second)]
+        requested_ms = math.ceil(requested_ns[row] / 1_000_000)
+        eligible = [event for event in candidates if event[0] >= requested_ms]
+        if not eligible:
+            raise ValueError("entry bucket does not contain an aggregate trade after decision")
+        timestamp_ms, event_id, price = eligible[0]
+        actual_timestamp_ms[row] = timestamp_ms
+        actual_event_id[row] = event_id
+        actual_price[row] = price
+    actual_timestamp = pd.to_datetime(actual_timestamp_ms, unit="ms", utc=True)
+    output["entry_bucket_timestamp"] = bucket_timestamp.to_numpy()
+    output["actual_entry_timestamp"] = actual_timestamp
+    output["entry_price"] = actual_price
+    output["entry_event_id"] = actual_event_id
+    output["entry_delay_seconds"] = (
+        _datetime_ns(actual_timestamp) - requested_ns
+    ) / 1_000_000_000
+    return output
 
 
 def refine_stop_fills_with_ordered_events(rows: pd.DataFrame) -> pd.DataFrame:
     output = rows.copy()
-    exit_second = _datetime_ns(output["exit_timestamp"]) // 1_000_000_000
+    if "exit_bucket_timestamp" in output:
+        bucket_timestamp = pd.to_datetime(output["exit_bucket_timestamp"], utc=True)
+    elif {"entry_bucket_timestamp", "exit_seconds"}.issubset(output.columns):
+        bucket_timestamp = pd.to_datetime(
+            output["entry_bucket_timestamp"], utc=True
+        ) + pd.to_timedelta(output["exit_seconds"].to_numpy(int) - 1, unit="s")
+    else:
+        bucket_timestamp = pd.to_datetime(output["exit_timestamp"], utc=True)
+    exit_second = _datetime_ns(bucket_timestamp) // 1_000_000_000
     management = output["management_code"].to_numpy(int)
     conflict = (
         output["time_to_target_seconds"].to_numpy(int)
         == output["time_to_stop_seconds"].to_numpy(int)
     ) & output["time_to_target_seconds"].ge(0).to_numpy()
-    refinable = np.isin(management, (OUTCOME_STOP, 5)) & ~conflict
-    prices_by_second = _raw_event_prices_for_seconds(set(exit_second[refinable].tolist()))
+    refinable = np.isin(management, (OUTCOME_STOP, 3, 4, 5)) & ~conflict
+    events_by_second = _raw_events_for_seconds(set(exit_second[refinable].tolist()))
     gross = output["gross_bps"].to_numpy(float).copy()
     fill_price = np.full(len(output), np.nan, dtype=float)
     stop_level = np.full(len(output), np.nan, dtype=float)
     slippage = np.full(len(output), np.nan, dtype=float)
     refined = np.zeros(len(output), dtype=bool)
+    fill_timestamp_ms = np.full(len(output), -1, dtype=np.int64)
+    fill_event_id = np.full(len(output), -1, dtype=np.int64)
     side = output["side"].to_numpy(int)
     entry = output["entry_price"].to_numpy(float)
     target_1 = output["target_1_bps"].to_numpy(float)
@@ -739,39 +823,67 @@ def refine_stop_fills_with_ordered_events(rows: pd.DataFrame) -> pd.DataFrame:
     target_time = output["time_to_target_seconds"].to_numpy(int)
     for row in np.flatnonzero(refinable):
         code = management[row]
+        events = events_by_second[int(exit_second[row])]
+        event_returns = side[row] * (
+            np.asarray([event[2] for event in events], dtype=float) / entry[row] - 1
+        ) * 10_000
+        if code == 3:
+            crossing = np.flatnonzero(event_returns >= output.iloc[row]["target_2_bps"] - 1e-9)
+            if not len(crossing):
+                raise ValueError("coarse target exit has no matching ordered aggregate trade")
+            event_index = int(crossing[0])
+            refined[row] = True
+            fill_price[row] = events[event_index][2]
+            fill_timestamp_ms[row] = events[event_index][0]
+            fill_event_id[row] = events[event_index][1]
+            continue
         if code == OUTCOME_STOP:
             threshold = -initial_stop[row]
             filled_fraction = 0.0
             booked = 0.0
+        elif code == 4:
+            filled_fraction = fraction[row] if target_time[row] >= 0 else 0.0
+            booked = filled_fraction * target_1[row]
+            event_index = 0
+            actual_return = float(event_returns[event_index])
+            gross[row] = booked + (1.0 - filled_fraction) * actual_return
+            fill_price[row] = events[event_index][2]
+            fill_timestamp_ms[row] = events[event_index][0]
+            fill_event_id[row] = events[event_index][1]
+            refined[row] = True
+            continue
         else:
             filled_fraction = fraction[row]
             booked = filled_fraction * target_1[row]
             threshold = (gross[row] - booked) / max(1.0 - filled_fraction, 1e-12)
-        event_returns = side[row] * (
-            np.asarray(prices_by_second[int(exit_second[row])], dtype=float) / entry[row] - 1
-        ) * 10_000
         crossing = np.flatnonzero(event_returns <= threshold + 1e-9)
         if not len(crossing):
             raise ValueError("coarse stop exit has no matching ordered aggregate trade")
         actual_return = float(event_returns[crossing[0]])
         gross[row] = booked + (1.0 - filled_fraction) * actual_return
-        fill_price[row] = float(prices_by_second[int(exit_second[row])][int(crossing[0])])
+        event_index = int(crossing[0])
+        fill_price[row] = events[event_index][2]
+        fill_timestamp_ms[row] = events[event_index][0]
+        fill_event_id[row] = events[event_index][1]
         stop_level[row] = threshold
         slippage[row] = max(0.0, threshold - actual_return)
         refined[row] = True
-    for row in np.flatnonzero(management == 4):
-        filled_fraction = fraction[row] if target_time[row] >= 0 else 0.0
-        booked = filled_fraction * target_1[row]
-        actual_return = (gross[row] - booked) / max(1.0 - filled_fraction, 1e-12)
-        fill_price[row] = entry[row] * (1 + side[row] * actual_return / 10_000)
-        refined[row] = not conflict[row]
+    exact = fill_timestamp_ms >= 0
+    output.loc[exact, "exit_timestamp"] = pd.to_datetime(
+        fill_timestamp_ms[exact], unit="ms", utc=True
+    )
     output["gross_bps"] = gross
     output["event_fill_price"] = fill_price
+    output["exit_event_timestamp_ms"] = fill_timestamp_ms
+    output["exit_event_id"] = fill_event_id
     output["event_stop_level_bps"] = stop_level
     output["stop_slippage_bps"] = slippage
     output["event_order_refined"] = refined
     output["same_second_conflict"] = conflict
     output["data_valid"] = ~conflict
+    output["event_holding_seconds"] = (
+        _datetime_ns(output["exit_timestamp"]) - _datetime_ns(output["actual_entry_timestamp"])
+    ) / 1_000_000_000
     return output
 
 
@@ -965,7 +1077,9 @@ def build_execution_contract(
                 month: str(path) for month, path in raw_archives.items()
             },
             "current_label_resolution_seconds": int(source_manifest["resolution_seconds"]),
-            "ordered_stop_fill_resolution": "aggregate-trade timestamp_ms and event_id",
+            "ordered_fill_resolution": "aggregate-trade timestamp_ms and event_id",
+            "ordered_entry_fill_used_by_current_labels": True,
+            "ordered_target_stop_trailing_fill_used_by_current_labels": True,
             "event_order_inside_second_used_by_current_labels": True,
             "same_second_target_stop_conflict": "EXCLUDED_FAIL_CLOSED",
             "fill_classification": "TRADE_PATH_PROXY_NO_HISTORICAL_L2",
@@ -1655,10 +1769,8 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
         return inherited
     actions = compose_parameterized_plans(inherited, fee.round_trip_bps)
     source = _load_second_window(month)
-    positions, entry_delay = _first_observed_positions(source, actions["entry_timestamp"])
-    actions["actual_entry_timestamp"] = source.loc[positions, "timestamp"].to_numpy()
-    actions["entry_price"] = source.loc[positions, "open"].to_numpy(float)
-    actions["entry_delay_seconds"] = entry_delay
+    positions, _ = _first_observed_positions(source, actions["entry_timestamp"])
+    actions = _refine_entry_events(actions, source, positions)
     pieces: list[pd.DataFrame] = []
     groups = list(actions.groupby("side", sort=True))
     for number, (side_value, group) in enumerate(groups, start=1):
@@ -1683,8 +1795,11 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
             _management_name(int(value)) for value in labelled["management_code"]
         ]
         labelled["event"] = [OUTCOME_NAMES[int(value)] for value in labelled["event_class"]]
-        labelled["exit_timestamp"] = labelled["actual_entry_timestamp"] + pd.to_timedelta(
-            labelled["exit_seconds"], unit="s"
+        labelled["exit_bucket_timestamp"] = pd.to_datetime(
+            labelled["entry_bucket_timestamp"], utc=True
+        ) + pd.to_timedelta(labelled["exit_seconds"].to_numpy(int) - 1, unit="s")
+        labelled["exit_timestamp"] = labelled["exit_bucket_timestamp"] + pd.Timedelta(
+            seconds=1
         )
         labelled["source_month"] = month
         pieces.append(labelled)
@@ -1821,18 +1936,14 @@ def local_plan_variants(rows: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
-    variants = local_plan_variants(rows)
+def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
     pieces: list[pd.DataFrame] = []
-    for month, month_rows in variants.groupby("source_month", sort=True):
+    for month, month_rows in rows.groupby("source_month", sort=True):
         source = _load_second_window(str(month))
-        positions, delay = _first_observed_positions(
+        positions, _ = _first_observed_positions(
             source, month_rows["actual_entry_timestamp"]
         )
-        month_rows = month_rows.copy()
-        month_rows["actual_entry_timestamp"] = source.loc[positions, "timestamp"].to_numpy()
-        month_rows["entry_price"] = source.loc[positions, "open"].to_numpy(float)
-        month_rows["entry_delay_seconds"] = delay
+        month_rows = _refine_entry_events(month_rows, source, positions)
         month_rows["_source_position"] = positions
         side_pieces: list[pd.DataFrame] = []
         for side, side_rows in month_rows.groupby("side", sort=True):
@@ -1859,9 +1970,10 @@ def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFr
         _management_name(int(value)) for value in output["management_code"]
     ]
     output["event"] = [OUTCOME_NAMES[int(value)] for value in output["event_class"]]
-    output["exit_timestamp"] = output["actual_entry_timestamp"] + pd.to_timedelta(
-        output["exit_seconds"], unit="s"
-    )
+    output["exit_bucket_timestamp"] = pd.to_datetime(
+        output["entry_bucket_timestamp"], utc=True
+    ) + pd.to_timedelta(output["exit_seconds"].to_numpy(int) - 1, unit="s")
+    output["exit_timestamp"] = output["exit_bucket_timestamp"] + pd.Timedelta(seconds=1)
     output = refine_stop_fills_with_ordered_events(output)
     output = output.loc[output["data_valid"]].reset_index(drop=True)
     output["funding_bps"] = _funding_for_actions(output)
@@ -1881,9 +1993,76 @@ def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFr
     output["proxy_net_bps"] = output["net_bps"]
     output["executable_return_available"] = False
     output["execution_quality"] = "TRADE_PATH_PROXY_NO_HISTORICAL_L2"
-    return output.sort_values(
-        ["actual_entry_timestamp", "side", "local_variant"], kind="stable"
-    ).reset_index(drop=True)
+    order = ["actual_entry_timestamp", "side"]
+    if "local_variant" in output:
+        order.append("local_variant")
+    return output.sort_values(order, kind="stable").reset_index(drop=True)
+
+
+def label_local_plan_variants(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
+    return label_exact_plans(local_plan_variants(rows), fee)
+
+
+def train_median_constant_plans(
+    rows: pd.DataFrame, reference: pd.DataFrame
+) -> pd.DataFrame:
+    """Build a fixed-management negative control from past-only train medians."""
+    parameters = (
+        "horizon_seconds",
+        "target_1_bps",
+        "target_2_bps",
+        "stop_bps",
+        "trailing_bps",
+        "first_exit_fraction",
+    )
+    output = rows.drop_duplicates(
+        ["actual_entry_timestamp", "side"], keep="first"
+    ).copy()
+    medians = reference.groupby("side", sort=False)[list(parameters)].median()
+    for side in output["side"].drop_duplicates().to_list():
+        if side not in medians.index:
+            raise ValueError(f"constant-plan reference is missing side {side}")
+        positions = output["side"].eq(side)
+        for parameter in parameters:
+            output.loc[positions, parameter] = float(
+                cast(Any, medians.at[side, parameter])
+            )
+    output["horizon_seconds"] = np.rint(output["horizon_seconds"]).astype(int)
+    output["horizon_fraction"] = output["horizon_seconds"] / float(
+        MAXIMUM_HORIZON_SECONDS
+    )
+    output["target_2_bps"] = np.maximum(
+        output["target_2_bps"].to_numpy(float),
+        output["target_1_bps"].to_numpy(float) + 1.0,
+    )
+    output["trailing_bps"] = np.minimum(
+        output["trailing_bps"].to_numpy(float), output["stop_bps"].to_numpy(float)
+    )
+    output["plan_contributors"] = "TRAIN_MEDIAN_CONSTANT_PLAN"
+    output["plan_id"] = [
+        parameterized_plan_id(
+            int(side),
+            int(horizon),
+            float(target_1),
+            float(target_2),
+            float(stop),
+            float(trailing),
+            float(fraction),
+            "TRAIN_MEDIAN_CONSTANT_PLAN",
+        )
+        for side, horizon, target_1, target_2, stop, trailing, fraction in zip(
+            output["side"],
+            output["horizon_seconds"],
+            output["target_1_bps"],
+            output["target_2_bps"],
+            output["stop_bps"],
+            output["trailing_bps"],
+            output["first_exit_fraction"],
+            strict=True,
+        )
+    ]
+    output["expert_id"] = output["plan_id"]
+    return output
 
 
 def plan_efficiency_audit(rows: pd.DataFrame, fee: FeeContract) -> dict[str, Any]:
@@ -2660,6 +2839,9 @@ def score_actions(
     output["expected_holding_seconds"] = np.maximum(
         np.asarray(head["aux"]["exit_seconds"].predict(values), dtype=float), 1.0
     )
+    output["expected_ev_bps_per_minute"] = (
+        output["calibrated_ev_bps"] * 60 / output["expected_holding_seconds"]
+    )
     output["expected_log_utility_per_hour"] = (
         output["expected_log_utility"] * 3_600 / output["expected_holding_seconds"]
     )
@@ -3243,6 +3425,7 @@ def negative_control_metrics(
     fee: FeeContract,
     start: pd.Timestamp,
     end: pd.Timestamp,
+    constant_plan: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Evaluate causal policy controls without using them for model selection."""
     controls: dict[str, pd.DataFrame] = {}
@@ -3280,6 +3463,16 @@ def negative_control_metrics(
         )
         return control
 
+    def net_expert_control(column: str) -> pd.DataFrame:
+        control = scored.copy()
+        predicted_return = _leverage(
+            control["stop_bps"].to_numpy(float), fee.round_trip_bps
+        ) * control[column].to_numpy(float) / 10_000
+        control["expected_log_utility"] = np.log1p(
+            np.maximum(predicted_return, -0.999999)
+        )
+        return control
+
     if "view_full_prediction_bps" in scored:
         controls["full_only"] = expert_control("view_full_prediction_bps")
     if "equal_weight_expert_prediction_bps" in scored:
@@ -3288,6 +3481,19 @@ def negative_control_metrics(
         )
     if "gate_expected_gross_bps" in scored:
         controls["deterministic_gate_only"] = expert_control("gate_expected_gross_bps")
+    if "managed_expert_best_lcb_bps" in scored:
+        controls["best_active_fold_expert"] = net_expert_control(
+            "managed_expert_best_lcb_bps"
+        )
+
+    if constant_plan is not None and not constant_plan.empty:
+        constant = constant_plan.copy()
+        direction = np.sign(constant["price_velocity_1m"].to_numpy(float))
+        constant["expected_log_utility"] = np.where(
+            constant["side"].to_numpy(int) == direction, 1e-6, -1.0
+        )
+        constant["p_target"] = 0.5
+        controls["train_median_constant_plan"] = constant
 
     momentum = scored.copy()
     momentum_direction = np.sign(momentum["price_velocity_1m"].to_numpy(float))
@@ -3339,6 +3545,8 @@ def economic_calibration_buckets(scored: pd.DataFrame) -> dict[str, Any]:
             predicted_log_utility=("immediate_expected_log_utility", "mean"),
             realized_log_utility=("log_utility", "mean"),
             expected_holding_seconds=("expected_holding_seconds", "mean"),
+            expected_ev_bps_per_minute=("expected_ev_bps_per_minute", "mean"),
+            expected_log_utility_per_hour=("expected_log_utility_per_hour", "mean"),
             first_timestamp=("actual_entry_timestamp", "min"),
             last_timestamp=("actual_entry_timestamp", "max"),
         )
@@ -3726,6 +3934,7 @@ def walk_forward(
             fee,
             fold["test_start"],
             fold["test_end"],
+            label_exact_plans(train_median_constant_plans(test, fit), fee),
         )
         permuted_trades, _ = sequential_replay(
             permuted_test,

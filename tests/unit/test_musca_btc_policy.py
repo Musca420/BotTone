@@ -152,8 +152,14 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     monkeypatch.setattr(policy, "_load_second_window", lambda month: source)
     monkeypatch.setattr(
         policy,
-        "_raw_event_prices_for_seconds",
-        lambda seconds: {second: [100.0, 99.0, 101.0, 98.0, 102.0] for second in seconds},
+        "_raw_events_for_seconds",
+        lambda seconds: {
+            second: [
+                (second * 1_000 + offset, offset, price)
+                for offset, price in enumerate([100.0, 99.0, 101.0, 98.0, 102.0])
+            ]
+            for second in seconds
+        },
     )
     monkeypatch.setattr(
         policy,
@@ -177,6 +183,7 @@ def test_ordered_event_stop_uses_first_crossing_price_and_records_slippage(
     second = pd.Timestamp("2026-01-01T00:00:05Z")
     rows = pd.DataFrame(
         {
+            "actual_entry_timestamp": [second - pd.Timedelta(seconds=5)],
             "exit_timestamp": [second],
             "management_code": [policy.OUTCOME_STOP],
             "time_to_target_seconds": [-1],
@@ -191,14 +198,96 @@ def test_ordered_event_stop_uses_first_crossing_price_and_records_slippage(
     )
     monkeypatch.setattr(
         policy,
-        "_raw_event_prices_for_seconds",
-        lambda seconds: {int(second.timestamp()): [100.0, 99.8]},
+        "_raw_events_for_seconds",
+        lambda seconds: {
+            int(second.timestamp()): [
+                (int(second.timestamp() * 1_000), 1, 100.0),
+                (int(second.timestamp() * 1_000) + 1, 2, 99.8),
+            ]
+        },
     )
     refined = policy.refine_stop_fills_with_ordered_events(rows)
     assert refined.loc[0, "gross_bps"] == pytest.approx(-20.0)
     assert refined.loc[0, "stop_slippage_bps"] == pytest.approx(10.0)
     assert refined.loc[0, "event_fill_price"] == pytest.approx(99.8)
+    assert refined.loc[0, "exit_event_id"] == 2
     assert bool(refined.loc[0, "event_order_refined"])
+
+
+def test_event_exit_bucket_is_not_shifted_to_the_next_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bucket = pd.Timestamp("2026-01-01T00:00:05Z")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [bucket - pd.Timedelta(seconds=5)],
+            "entry_bucket_timestamp": [bucket - pd.Timedelta(seconds=5)],
+            "exit_seconds": [6],
+            "exit_timestamp": [bucket + pd.Timedelta(seconds=1)],
+            "management_code": [policy.OUTCOME_STOP],
+            "time_to_target_seconds": [-1],
+            "time_to_stop_seconds": [6],
+            "gross_bps": [-10.0],
+            "side": [1],
+            "entry_price": [100.0],
+            "target_1_bps": [20.0],
+            "target_2_bps": [30.0],
+            "first_exit_fraction": [0.5],
+            "stop_bps": [10.0],
+        }
+    )
+    requested: list[set[int]] = []
+
+    def events(seconds: set[int]) -> dict[int, list[tuple[int, int, float]]]:
+        requested.append(seconds)
+        return {
+            int(bucket.timestamp()): [
+                (int(bucket.timestamp() * 1_000) + 25, 7, 99.8)
+            ]
+        }
+
+    monkeypatch.setattr(policy, "_raw_events_for_seconds", events)
+    refined = policy.refine_stop_fills_with_ordered_events(rows)
+    assert requested == [{int(bucket.timestamp())}]
+    assert refined.loc[0, "exit_timestamp"] == bucket + pd.Timedelta(milliseconds=25)
+
+
+def test_entry_uses_first_ordered_event_after_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bucket = pd.Timestamp("2026-01-01T00:00:05Z")
+    source = pd.DataFrame({"timestamp": [bucket]})
+    actions = pd.DataFrame({"entry_timestamp": [bucket + pd.Timedelta(milliseconds=10)]})
+    monkeypatch.setattr(
+        policy,
+        "_raw_events_for_seconds",
+        lambda seconds: {
+            int(bucket.timestamp()): [
+                (int(bucket.timestamp() * 1_000) + 5, 1, 99.9),
+                (int(bucket.timestamp() * 1_000) + 15, 2, 100.1),
+            ]
+        },
+    )
+    refined = policy._refine_entry_events(actions, source, np.asarray([0]))
+    assert refined.loc[0, "actual_entry_timestamp"] == bucket + pd.Timedelta(milliseconds=15)
+    assert refined.loc[0, "entry_price"] == pytest.approx(100.1)
+    assert refined.loc[0, "entry_event_id"] == 2
+    assert refined.loc[0, "entry_delay_seconds"] == pytest.approx(0.005)
+
+
+def test_constant_plan_uses_only_reference_medians() -> None:
+    rows = policy.compose_parameterized_plans(
+        _inherited_expert_rows(), round_trip_cost_bps=8.0
+    )
+    rows["actual_entry_timestamp"] = pd.Timestamp("2026-01-01T00:00:00Z")
+    reference = pd.concat([rows, rows], ignore_index=True)
+    reference.loc[: len(rows) - 1, "horizon_seconds"] = 300
+    reference.loc[len(rows) :, "horizon_seconds"] = 900
+    control = policy.train_median_constant_plans(rows, reference)
+    assert control["horizon_seconds"].eq(600).all()
+    assert control["target_2_bps"].gt(control["target_1_bps"]).all()
+    assert control["trailing_bps"].le(control["stop_bps"]).all()
+    assert control["plan_contributors"].eq("TRAIN_MEDIAN_CONSTANT_PLAN").all()
 
 
 def test_ordered_event_archive_preserves_timestamp_and_event_id_order(
@@ -227,6 +316,7 @@ def test_same_second_target_stop_conflict_is_excluded_fail_closed(
     second = pd.Timestamp("2026-01-01T00:00:05Z")
     rows = pd.DataFrame(
         {
+            "actual_entry_timestamp": [second - pd.Timedelta(seconds=5)],
             "exit_timestamp": [second],
             "management_code": [policy.OUTCOME_STOP],
             "time_to_target_seconds": [5],
@@ -241,7 +331,7 @@ def test_same_second_target_stop_conflict_is_excluded_fail_closed(
     )
     monkeypatch.setattr(
         policy,
-        "_raw_event_prices_for_seconds",
+        "_raw_events_for_seconds",
         lambda seconds: {},
     )
     refined = policy.refine_stop_fills_with_ordered_events(rows)

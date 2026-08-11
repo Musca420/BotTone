@@ -6,7 +6,7 @@ Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `4ec0733e45ed33d2aa8798a6a652c931ddd17579651975ce3e62af32bc9a0e11`.
+Protocollo challenger corrente: `ec1937faa8a1a694e71a213ed24878060741a607ea8748fb036841d37fd2dc05`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -20,23 +20,36 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - punto 5 implementato: testa decomposta e direct-net/direct-utility sulle stesse split, Ridge
   champion e XGBoost CUDA promosso soltanto con miglioramento congiunto;
 - punto 6 implementato: ingresso `Q(action)>Q(WAIT)`; la vecchia curva di soglie è soltanto audit;
-- controlli P0 implementati: ledger persistente, random/shift/permutation/FULL/equal-weight/no-gate,
-  LONG/SHORT/momentum/mean-reversion/always-WAIT e bucket di calibrazione economica;
+- controlli P0 implementati: ledger persistente, random/shift/permutation/FULL/best-active-expert/
+  equal-weight/no-gate/train-median-constant-plan, LONG/SHORT/momentum/mean-reversion/always-WAIT e
+  bucket di calibrazione economica;
 - audit punto 8 predisposto: correlazione prediction/error, residuo di FULL, leave-one-view-out e
   relazione dispersione→errore; LIQUIDITY resta shadow-only;
 - collector Binance aggiornato senza cambiare i consumer: conserva anche timestamp exchange e
   receive-time di ogni aggTrade, latenza book e ritardo di aggregazione separati.
 - label execution aggiornati: gli archivi ufficiali vengono materializzati in Parquet ordinati per
-  `timestamp_ms,event_id`; stop e trailing usano il primo evento realmente attraversato e registrano
-  slippage, mentre i conflitti target/stop nello stesso secondo sono esclusi fail-closed.
+  `timestamp_ms,event_id`; entry, target, stop, gap e trailing usano il primo evento compatibile e
+  conservano timestamp, ID, prezzo e stop slippage. I conflitti non risolvibili restano esclusi
+  fail-closed.
+- errore E-12 corretto: `exit_seconds` conta i bucket includendo quello d'ingresso; il vecchio
+  raffinatore cercava quindi il crossing nel secondo successivo. Il preflight di aprile ha ora
+  validato 86.310 righe, 20.164 exit event-level e nessun secondo di fill privo di trade.
+- diagnostica P1 implementata: `expected_ev_bps_per_minute` e
+  `expected_log_utility_per_hour`; non partecipano alla promozione o alla scelta dei parametri.
 
-Verifiche locali correnti: 33 test mirati e 369 test completi verdi, Ruff verde e mypy verde sui
-due moduli modificati.
+Verifiche locali correnti: 38 test mirati e 375 test completi verdi, Ruff verde e mypy verde sul
+modulo policy modificato. Il mypy globale conserva 33 errori preesistenti in sei moduli legacy fuori
+ambito; non sono stati nascosti né modificati.
 `data/reports/musca_btc_execution_contract.json` rileva 16/16 archivi event-level disponibili ma
 soltanto 6 giornate L2 osservate. I label storici restano quindi dichiarati proxy e non possono
 autorizzare capitale reale: bid/ask, profondità e partial fill storici non esistono. La gestione usa
 ancora il percorso 1s tra gli eventi d'uscita; l'ordine event-level corregge i fill critici ma non
 inventa un order book. Resta condizionale l'attivazione della policy intra-trade.
+
+Il protocollo `4ec0733e45ed33d2aa8798a6a652c931ddd17579651975ce3e62af32bc9a0e11`
+è fallito durante il preflight, prima di qualsiasi fold, con 19 secondi d'uscita apparentemente
+senza aggTrade. La causa era E-12 e non assenza di dati Binance; quel run non è un risultato di
+training e non viene ripreso.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.
@@ -146,6 +159,7 @@ Un componente viene mantenuto soltanto se mostra valore incrementale paired OOS.
 | E-09 | Execution train/paper divergente | Training usa OHLC 1s/last trade; paper usa book L2 osservato e book walking. |
 | E-10 | Research overfitting | Decine di protocolli e periodi OOS già osservati richiedono un ledger globale, non solo nested folds. |
 | E-11 | Mancanza di controlli negativi completi | Non è ancora dimostrato quale componente batta casuale, FULL, equal-weight e regole semplici. |
+| E-12 | Exit bucket spostato di un secondo | `exit_seconds=1` valutava il bucket d'ingresso ma il raffinatore interrogava `entry+1s`, producendo falsi eventi mancanti. |
 
 ## Ordine vincolante degli otto interventi
 
@@ -393,6 +407,8 @@ lo duplica riga per riga e non lo sostituisce.
 - interpretare oracle, MFE o miglior futuro realizzato come segnale disponibile live;
 - calcolare target encoding con la stessa riga che lo riceve;
 - dedurre l'ordine stop/target da OHLC 1s quando sono disponibili eventi ordinati;
+- convertire il numero di bucket in timestamp con `entry + exit_seconds` invece di
+  `entry_bucket + exit_seconds - 1`;
 - dichiarare fill eseguibili usando last/mid senza bid/ask e profondità osservati;
 - confrontare EV in bps quando sizing e obiettivo sono sull'equity;
 - trattare WAIT/FLAT come vincita oppure come valore costante se esistono opportunità esclusive;
