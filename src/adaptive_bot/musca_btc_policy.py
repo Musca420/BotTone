@@ -129,7 +129,7 @@ MINIMUM_SIDE_OOS_TRADES = 100
 MINIMUM_CONTROLLER_SELECTION_TRADES = 30
 EXPERT_CATALOG_ROOT = ROOT / "fold_experts"
 ALPHA_FEATURES = (
-    *base.GATING_CONTEXT,
+    *base.FEATURES,
     "side",
     "horizon_fraction",
     "target_1_bps",
@@ -184,6 +184,7 @@ LABEL_PROTOCOL = {
     "no_trade_seconds": "non-executable; skipped by stop, target, trailing and timeout logic",
     "timeout_execution": "first observed trade bucket at or after the plan horizon",
     "action_space": "variable expert-supported plans preserving distinct horizon proposals",
+    "state_features": list(base.FEATURES),
     "sides": ["LONG", "SHORT"],
     "prediction_horizon_anchors_seconds": list(PREDICTION_HORIZONS_SECONDS),
     "fixed_action_plans": False,
@@ -1463,6 +1464,36 @@ def _load_parent_actions(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame
     output = pd.concat(pieces, ignore_index=True)
     for name in ("available_at", "entry_timestamp"):
         output[name] = pd.to_datetime(output[name], utc=True)
+    missing_features = [name for name in base.FEATURES if name not in output]
+    matrix_protocols = {
+        str(row[0])
+        for row in duckdb.execute(
+            "SELECT DISTINCT protocol_hash FROM read_parquet(?)", [str(base.MATRIX)]
+        ).fetchall()
+    }
+    if matrix_protocols != {base.PROTOCOL_HASH}:
+        raise ValueError("complete causal state matrix protocol is not frozen")
+    feature_columns = ", ".join(f'"{name}"' for name in missing_features)
+    feature_query = (
+        f'SELECT decision_position, available_at, entry_timestamp, {feature_columns} '
+        "FROM read_parquet(?) WHERE entry_timestamp >= ? AND entry_timestamp < ?"
+    )
+    features = duckdb.execute(
+        feature_query,
+        [str(base.MATRIX), start.to_pydatetime(), end.to_pydatetime()],
+    ).df()
+    for name in ("available_at", "entry_timestamp"):
+        features[name] = pd.to_datetime(features[name], utc=True)
+    output = output.merge(
+        features,
+        on=["decision_position", "available_at", "entry_timestamp"],
+        how="left",
+        validate="many_to_one",
+    )
+    if output.loc[:, base.FEATURES].isna().any().any() or not np.isfinite(
+        output.loc[:, base.FEATURES].to_numpy(float)
+    ).all():
+        raise ValueError("parent actions could not be joined to the complete causal state")
     if not output["available_at"].le(output["entry_timestamp"]).all():
         raise ValueError("parent actions violate feature availability")
     return output.sort_values(["entry_timestamp", "side", "horizon_seconds"]).reset_index(drop=True)
@@ -1550,7 +1581,7 @@ def compose_parameterized_plans(
             for mask, position in zip(bitmask, positions, strict=True)
         ]
 
-        output = representatives.loc[active, [*keys, *base.GATING_CONTEXT]].copy()
+        output = representatives.loc[active, [*keys, *base.FEATURES]].copy()
         output["side"] = output["side"].astype(int)
         output["horizon_seconds"] = int(horizon)
         output["horizon_fraction"] = float(horizon) / MAXIMUM_HORIZON_SECONDS

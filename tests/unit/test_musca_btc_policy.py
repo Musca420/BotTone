@@ -77,7 +77,7 @@ def _inherited_expert_rows() -> pd.DataFrame:
                 "predicted_favorable_q75_bps": 12.0 + 8.0 * horizon_number,
                 "predicted_adverse_q75_bps": 6.0 + 4.0 * horizon_number,
             }
-            row.update({name: 0.0 for name in policy.base.GATING_CONTEXT})
+            row.update({name: 0.0 for name in policy.base.FEATURES})
             row["volatility_percentile"] = 0.5
             for expert_horizon in policy.PREDICTION_HORIZONS_SECONDS:
                 for view_number, view in enumerate(policy.base.VIEWS, start=1):
@@ -791,6 +791,12 @@ def test_parameterized_plan_exposes_partial_exit_and_trailing_actions() -> None:
     assert reduction["reduce_fraction"] == pytest.approx(0.4)
 
 
+def test_value_models_receive_the_complete_causal_market_state() -> None:
+    assert set(policy.base.FEATURES).issubset(policy.ALPHA_FEATURES)
+    plans = policy.compose_parameterized_plans(_inherited_expert_rows(), 8.0)
+    assert set(policy.base.FEATURES).issubset(plans.columns)
+
+
 def test_open_position_does_not_reveal_its_future_pnl_to_risk_state() -> None:
     start = pd.Timestamp("2026-01-01T10:00:00Z")
     entries = [start, start + pd.Timedelta(minutes=1), start + pd.Timedelta(minutes=3)]
@@ -997,7 +1003,8 @@ def test_fold_expert_application_does_not_read_future_outcome(
         side=1,
         horizon=300,
     )
-    rows = pd.DataFrame({name: [1.0, -1.0] for name in policy.base.GATING_CONTEXT})
+    rows = pd.DataFrame({name: [0.0, 0.0] for name in policy.base.FEATURES})
+    rows[policy.GENERATOR_FEATURES[0]] = [1.0, -1.0]
     rows["side"] = 1
     rows["horizon_seconds"] = 300
     rows["expert_id"] = policy.expert_id(1, 300)

@@ -4,7 +4,7 @@ Aggiornato: 2026-08-12
 Stato: audit E-42--E-53 implementato; verifiche complete richieste prima di un solo preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
-## Guardrail metodologici aggiunti prima del protocollo 29607014
+## Guardrail metodologici aggiunti prima del protocollo 89d814d7
 
 Il documento esterno “Training Safety & Methodology Guardrails” contiene dodici invarianti più un
 future-mutation test. Sono vincolanti e non autorizzano l'abbassamento di costi o gate.
@@ -33,10 +33,10 @@ future-mutation test. Sono vincolanti e non autorizzano l'abbassamento di costi 
   al timestamp corrente;
 - [x] `_predict_array` sklearn CPU è identico e XGBoost CPU/CUDA differisce al massimo `1e-6`.
 
-Verifiche dopo questi guardrail: Ruff verde, mypy verde, `git diff --check` verde, 74/74 test Musca,
-11/11 integrazione, 6/6 property e 394/394 unit complessivi, cioè 411/411 senza esclusioni. Il
-protocol hash corrente è `2960701400c6289e63232c45e93e2b833991c10d5e078c73fbc71dd52b1a31e9` e il
-label hash corrente è `7e368172b946f64b0119c797ef81d6456f8b54bb8754fefc38a29267df2cabee`.
+Verifiche dopo questi guardrail: Ruff verde, mypy verde, `git diff --check` verde, 75/75 test Musca,
+11/11 integrazione, 6/6 property e 395/395 unit complessivi, cioè 412/412 senza esclusioni. Il
+protocol hash corrente è `89d814d76b914bc0f5f3110d977b225b49a7e5087625f9cc12d24807a0d54ce8` e il
+label hash corrente è `e0e72584ac759a86ed6092e0b78050e750014309b081ca2ce3530c5933f23b7d`.
 Il cambio del label hash è intenzionale: le matrici precedenti accettavano in alcuni casi un evento
 nello stesso millisecondo della decisione e non sono resumable per questo protocollo.
 
@@ -47,6 +47,15 @@ includendo trade anteriori all'entry. Il protocollo `29607014...` usa l'esatto p
 nel primo bucket, soltanto high/low degli eventi successivi; anche il refinement dell'uscita esclude
 gli eventi precedenti. La verifica reale sul mese 2025-04 ha prodotto 225.489 state-action valide,
 124.739 uscite rifinite event-level e nessun mismatch.
+
+Il preflight successivo `29607014...` ha completato matrice e due fold senza errori tecnici, ma ha
+disabilitato LONG e SHORT in entrambi i fold. L'audit ha localizzato una perdita d'informazione tra
+expert layer e policy layer: gli expert originari usano 57 feature causali, mentre i checkpoint OOF
+ne conservavano soltanto 28 di gating. Le previsioni compresse correlavano appena `0,0176` con
+`net_bps`, pur prevedendo MFE/MAE con correlazione circa `0,59`. Il protocollo `89d814d7...` collega
+ora ogni action OOF alla matrice causale frozen originale tramite decision position e timestamp,
+con hash del protocollo, merge many-to-one, zero missing e controllo finite; tutte le 57 feature
+entrano nel value model/ranker. Non sono stati aggiunti dati, expert, costi o gate.
 
 ## Stato implementazione dopo il blackout
 
