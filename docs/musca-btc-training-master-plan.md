@@ -4,7 +4,7 @@ Aggiornato: 2026-08-12
 Stato: audit E-42--E-53 implementato; verifiche complete richieste prima di un solo preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
-## Guardrail metodologici aggiunti prima del protocollo b5d5bcd2
+## Guardrail metodologici aggiunti prima del protocollo 29607014
 
 Il documento esterno “Training Safety & Methodology Guardrails” contiene dodici invarianti più un
 future-mutation test. Sono vincolanti e non autorizzano l'abbassamento di costi o gate.
@@ -33,12 +33,20 @@ future-mutation test. Sono vincolanti e non autorizzano l'abbassamento di costi 
   al timestamp corrente;
 - [x] `_predict_array` sklearn CPU è identico e XGBoost CPU/CUDA differisce al massimo `1e-6`.
 
-Verifiche dopo questi guardrail: Ruff verde, mypy verde, `git diff --check` verde, 73/73 test Musca,
-11/11 integrazione, 6/6 property e 393/393 unit complessivi, cioè 410/410 senza esclusioni. Il
-protocol hash corrente è `b5d5bcd2258667b911e716c850d899fa5f3f5d25b1ad77131be6cbb7772f004f` e il
-label hash corrente è `5819b6a30015352c99724fb42c84b06f3ef5b9806dc07955677c78697b95eed5`.
+Verifiche dopo questi guardrail: Ruff verde, mypy verde, `git diff --check` verde, 74/74 test Musca,
+11/11 integrazione, 6/6 property e 394/394 unit complessivi, cioè 411/411 senza esclusioni. Il
+protocol hash corrente è `2960701400c6289e63232c45e93e2b833991c10d5e078c73fbc71dd52b1a31e9` e il
+label hash corrente è `7e368172b946f64b0119c797ef81d6456f8b54bb8754fefc38a29267df2cabee`.
 Il cambio del label hash è intenzionale: le matrici precedenti accettavano in alcuni casi un evento
 nello stesso millisecondo della decisione e non sono resumable per questo protocollo.
+
+Il primo preflight `b5d5bcd2...` è terminato dopo 68,6 secondi con
+`coarse stop exit has no matching ordered aggregate trade`. La causa non era un dato mancante: dopo
+l'entry event-level il simulatore conservava come riferimento l'open e l'intero high/low del secondo,
+includendo trade anteriori all'entry. Il protocollo `29607014...` usa l'esatto prezzo d'ingresso e,
+nel primo bucket, soltanto high/low degli eventi successivi; anche il refinement dell'uscita esclude
+gli eventi precedenti. La verifica reale sul mese 2025-04 ha prodotto 225.489 state-action valide,
+124.739 uscite rifinite event-level e nessun mismatch.
 
 ## Stato implementazione dopo il blackout
 

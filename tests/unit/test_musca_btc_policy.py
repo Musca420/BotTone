@@ -266,17 +266,19 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     plans["stop_bps"] = 20.0
     plans["trailing_bps"] = 10.0
     monkeypatch.setattr(policy, "_load_second_window", lambda month: source)
-    monkeypatch.setattr(
-        policy,
-        "_raw_events_for_seconds",
-        lambda seconds: {
-            second: [
-                (second * 1_000 + offset, offset, price)
-                for offset, price in enumerate([100.0, 99.0, 101.0, 98.0, 102.0])
+    def ordered_events(seconds: set[int]) -> dict[int, list[tuple[int, int, float]]]:
+        origin = int(pd.Timestamp("2026-01-01T00:00:00Z").timestamp())
+        result: dict[int, list[tuple[int, int, float]]] = {}
+        for second in seconds:
+            row = source.iloc[second - origin]
+            prices = [row["open"], row["low"], row["high"], row["close"]]
+            result[second] = [
+                (second * 1_000 + offset, offset, float(price))
+                for offset, price in enumerate(prices)
             ]
-            for second in seconds
-        },
-    )
+        return result
+
+    monkeypatch.setattr(policy, "_raw_events_for_seconds", ordered_events)
     monkeypatch.setattr(
         policy,
         "_funding_for_actions",
@@ -287,7 +289,7 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     assert labelled["actual_entry_timestamp"].eq(
         pd.Timestamp("2026-01-01T00:00:01.001Z")
     ).all()
-    assert labelled["entry_price"].eq(99.0).all()
+    assert labelled["entry_price"].eq(99.9).all()
     assert np.isfinite(labelled["log_utility"]).all()
     assert labelled["execution_quality"].eq("TRADE_PATH_PROXY_NO_HISTORICAL_L2").all()
 
@@ -384,6 +386,8 @@ def test_entry_uses_first_ordered_event_after_decision(
     assert refined.loc[0, "actual_entry_timestamp"] == bucket + pd.Timedelta(milliseconds=15)
     assert refined.loc[0, "entry_price"] == pytest.approx(100.1)
     assert refined.loc[0, "entry_event_id"] == 3
+    assert refined.loc[0, "entry_bucket_high"] == pytest.approx(100.1)
+    assert refined.loc[0, "entry_bucket_low"] == pytest.approx(100.1)
     assert refined.loc[0, "entry_delay_seconds"] == pytest.approx(0.005)
 
 
@@ -515,6 +519,37 @@ def test_same_second_target_and_stop_uses_stop_event_and_stop_management() -> No
     assert result["gross_bps"][0] == pytest.approx(-10.0)
 
 
+def test_exact_entry_path_excludes_prices_before_the_entry_event() -> None:
+    timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+    source = pd.DataFrame(
+        {
+            "timestamp": [timestamp, timestamp + pd.Timedelta(seconds=1)],
+            "open": [100.0, 100.0],
+            "high": [101.0, 100.0],
+            "low": [98.0, 100.0],
+            "close": [100.0, 100.0],
+            "observed_trade": [True, True],
+        }
+    )
+    result = policy.simulate_management(
+        source,
+        np.asarray([0]),
+        1,
+        np.asarray([1]),
+        np.asarray([20.0]),
+        np.asarray([30.0]),
+        np.asarray([10.0]),
+        np.asarray([10.0]),
+        np.asarray([0.5]),
+        backend="cpu",
+        entry_prices=np.asarray([100.0]),
+        entry_bucket_highs=np.asarray([100.02]),
+        entry_bucket_lows=np.asarray([99.98]),
+    )
+    assert result["management_code"][0] == policy.OUTCOME_TIMEOUT
+    assert result["time_to_stop_seconds"][0] == -1
+
+
 def test_trailing_stop_tightens_after_first_target() -> None:
     source = _source(
         [
@@ -637,6 +672,9 @@ def test_gpu_does_not_fall_back_to_cpu_for_no_trade_paths(
         np.asarray([50.0]),
         np.asarray([50.0]),
         np.asarray([0.5]),
+        np.asarray([100.0]),
+        np.asarray([100.0]),
+        np.asarray([100.0]),
     )
     assert result["management_code"][0] == policy.OUTCOME_TIMEOUT
     assert result["gross_bps"][0] == pytest.approx(100.0)

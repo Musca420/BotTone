@@ -193,7 +193,10 @@ LABEL_PROTOCOL = {
     ),
     "management": "dynamic horizon/TP1/TP2/partial exit/initial stop/non-widening trailing",
     "same_second": "target/stop conflicts are excluded fail-closed",
-    "entry": "first observed aggregate trade strictly after decision",
+    "entry": (
+        "first observed aggregate trade strictly after decision; the entry bucket path starts at "
+        "that event and excludes all earlier trades"
+    ),
     "terminal_return_prefilter": False,
     "economic_target": "log1p(risk-sized portfolio return after Binance 1x costs and funding)",
     "historical_start": HISTORICAL_START.isoformat(),
@@ -992,6 +995,8 @@ def _refine_entry_events(
     actual_timestamp_ms = np.empty(len(output), dtype=np.int64)
     actual_price = np.empty(len(output), dtype=float)
     actual_event_id = np.empty(len(output), dtype=np.int64)
+    entry_bucket_high = np.empty(len(output), dtype=float)
+    entry_bucket_low = np.empty(len(output), dtype=float)
     observed_positions = np.flatnonzero(_observed_mask(source))
     while True:
         bucket_timestamp = pd.to_datetime(source.loc[positions, "timestamp"], utc=True)
@@ -1011,6 +1016,9 @@ def _refine_entry_events(
             actual_timestamp_ms[row] = timestamp_ms
             actual_event_id[row] = event_id
             actual_price[row] = price
+            post_entry_prices = [event[2] for event in eligible]
+            entry_bucket_high[row] = max(post_entry_prices)
+            entry_bucket_low[row] = min(post_entry_prices)
         if not missing:
             break
         next_locations = np.searchsorted(
@@ -1026,6 +1034,8 @@ def _refine_entry_events(
     output["actual_entry_timestamp"] = actual_timestamp
     output["entry_price"] = actual_price
     output["entry_event_id"] = actual_event_id
+    output["entry_bucket_high"] = entry_bucket_high
+    output["entry_bucket_low"] = entry_bucket_low
     output["entry_delay_seconds"] = (_datetime_ns(actual_timestamp) - requested_ns) / 1_000_000_000
     return output
 
@@ -1061,9 +1071,22 @@ def refine_stop_fills_with_ordered_events(rows: pd.DataFrame) -> pd.DataFrame:
     fraction = output["first_exit_fraction"].to_numpy(float)
     initial_stop = output["stop_bps"].to_numpy(float)
     target_time = output["time_to_target_seconds"].to_numpy(int)
+    entry_timestamp_ms = (
+        _datetime_ns(pd.to_datetime(output["actual_entry_timestamp"], utc=True)) // 1_000_000
+    )
+    entry_event_id = (
+        output["entry_event_id"].to_numpy(np.int64)
+        if "entry_event_id" in output
+        else np.full(len(output), -1, dtype=np.int64)
+    )
     for row in np.flatnonzero(refinable):
         code = management[row]
         events = events_by_second[int(exit_second[row])]
+        if int(exit_second[row]) == int(entry_timestamp_ms[row] // 1_000):
+            entry_key = (int(entry_timestamp_ms[row]), int(entry_event_id[row]))
+            events = [event for event in events if (int(event[0]), int(event[1])) >= entry_key]
+        if not events:
+            raise ValueError("exit bucket contains no ordered event at or after entry")
         event_returns = (
             side[row]
             * (np.asarray([event[2] for event in events], dtype=float) / entry[row] - 1)
@@ -1668,6 +1691,9 @@ def _simulate_cpu(
     stop: np.ndarray,
     trailing: np.ndarray,
     first_exit_fraction: np.ndarray,
+    entry_prices: np.ndarray,
+    entry_bucket_highs: np.ndarray,
+    entry_bucket_lows: np.ndarray,
 ) -> dict[str, np.ndarray]:
     opens = source["open"].to_numpy(float)
     highs = source["high"].to_numpy(float)
@@ -1692,7 +1718,7 @@ def _simulate_cpu(
         row_horizon = int(horizons[row])
         filled_fraction = float(first_exit_fraction[row])
         remaining_fraction = 1.0 - filled_fraction
-        entry = opens[position]
+        entry = float(entry_prices[row])
         stop_level = -float(stop[row])
         peak = 0.0
         half = 0.0
@@ -1710,16 +1736,19 @@ def _simulate_cpu(
             if not observed[index]:
                 continue
             elapsed = offset + 1
-            open_return = side * (opens[index] / entry - 1) * 10_000
+            current_open = entry if offset == 0 else opens[index]
+            current_high = entry_bucket_highs[row] if offset == 0 else highs[index]
+            current_low = entry_bucket_lows[row] if offset == 0 else lows[index]
+            open_return = side * (current_open / entry - 1) * 10_000
             favorable = (
-                (highs[index] / entry - 1) * 10_000
+                (current_high / entry - 1) * 10_000
                 if side > 0
-                else (1 - lows[index] / entry) * 10_000
+                else (1 - current_low / entry) * 10_000
             )
             adverse = (
-                (1 - lows[index] / entry) * 10_000
+                (1 - current_low / entry) * 10_000
                 if side > 0
-                else (highs[index] / entry - 1) * 10_000
+                else (current_high / entry - 1) * 10_000
             )
             maximum = max(maximum, favorable)
             adverse_maximum = max(adverse_maximum, adverse)
@@ -1811,7 +1840,8 @@ def _gpu_kernel() -> Any:
             const double* opens, const double* highs, const double* lows, const double* closes,
             const long long* positions, const int* horizons, const double* target1,
             const double* target2, const double* stops, const double* trails,
-            const double* first_exit_fraction, const int side,
+            const double* first_exit_fraction, const double* entry_prices,
+            const double* entry_bucket_highs, const double* entry_bucket_lows, const int side,
             const long long source_size, const long long count, double* gross, int* exit_seconds,
             signed char* management, int* first_target, int* first_stop, double* mfe, double* mae) {
           long long row = (long long)blockDim.x * blockIdx.x + threadIdx.x;
@@ -1820,7 +1850,7 @@ def _gpu_kernel() -> Any:
           int horizon = horizons[row];
           double filled_fraction = first_exit_fraction[row];
           double remaining_fraction = 1.0 - filled_fraction;
-          double entry = opens[position];
+          double entry = entry_prices[row];
           double stop_level = -stops[row], peak = 0.0, half = 0.0;
           double maximum = -1.0e300, adverse_maximum = -1.0e300, result = 0.0;
           int first_filled = 0, done = 0, result_seconds = horizon, result_code = 2;
@@ -1829,11 +1859,14 @@ def _gpu_kernel() -> Any:
             long long index = position + offset;
             if (index >= source_size) break;
             int elapsed = offset + 1;
-            double open_return = side * (opens[index] / entry - 1.0) * 10000.0;
-            double favorable = side > 0 ? (highs[index] / entry - 1.0) * 10000.0
-                                         : (1.0 - lows[index] / entry) * 10000.0;
-            double adverse = side > 0 ? (1.0 - lows[index] / entry) * 10000.0
-                                      : (highs[index] / entry - 1.0) * 10000.0;
+            double current_open = offset == 0 ? entry : opens[index];
+            double current_high = offset == 0 ? entry_bucket_highs[row] : highs[index];
+            double current_low = offset == 0 ? entry_bucket_lows[row] : lows[index];
+            double open_return = side * (current_open / entry - 1.0) * 10000.0;
+            double favorable = side > 0 ? (current_high / entry - 1.0) * 10000.0
+                                         : (1.0 - current_low / entry) * 10000.0;
+            double adverse = side > 0 ? (1.0 - current_low / entry) * 10000.0
+                                      : (current_high / entry - 1.0) * 10000.0;
             maximum = fmax(maximum, favorable);
             adverse_maximum = fmax(adverse_maximum, adverse);
             if (target_time < 0 && favorable >= target1[row] - 1.0e-9) target_time = elapsed;
@@ -1890,6 +1923,9 @@ def _simulate_gpu(
     stop: np.ndarray,
     trailing: np.ndarray,
     first_exit_fraction: np.ndarray,
+    entry_prices: np.ndarray,
+    entry_bucket_highs: np.ndarray,
+    entry_bucket_lows: np.ndarray,
 ) -> dict[str, np.ndarray]:
     import cupy as cp
 
@@ -1912,7 +1948,16 @@ def _simulate_gpu(
     timeout_positions = _timeout_positions(observed, positions, horizons)
     gpu_parameters = [
         cp.asarray(values, dtype=cp.float64)
-        for values in (target_1, target_2, stop, trailing, first_exit_fraction)
+        for values in (
+            target_1,
+            target_2,
+            stop,
+            trailing,
+            first_exit_fraction,
+            entry_prices,
+            entry_bucket_highs,
+            entry_bucket_lows,
+        )
     ]
     gross = cp.empty(count, dtype=cp.float64)
     exit_seconds = cp.empty(count, dtype=cp.int32)
@@ -1952,7 +1997,7 @@ def _simulate_gpu(
     if len(timeout_rows):
         if np.any(timeout_positions[timeout_rows] < 0):
             raise ValueError("no observable Binance trade at or after plan timeout")
-        entries = source["open"].to_numpy(float)[positions[timeout_rows]]
+        entries = np.asarray(entry_prices, dtype=float)[timeout_rows]
         terminal_prices = source["open"].to_numpy(float)[timeout_positions[timeout_rows]]
         terminal = side * (terminal_prices / entries - 1.0) * 10_000.0
         filled = target_time[timeout_rows] >= 0
@@ -1992,6 +2037,9 @@ def simulate_management(
     first_exit_fraction: np.ndarray | None = None,
     *,
     backend: str = "auto",
+    entry_prices: np.ndarray | None = None,
+    entry_bucket_highs: np.ndarray | None = None,
+    entry_bucket_lows: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     if backend not in {"auto", "cpu", "cuda"}:
         raise ValueError(f"unknown path backend: {backend}")
@@ -2014,6 +2062,24 @@ def simulate_management(
         raise ValueError("first exit fraction must be strictly between zero and one")
     if np.any(np.asarray(positions) + horizons > len(source)):
         raise ValueError("incomplete path for requested horizon")
+    positions_array = np.asarray(positions, dtype=np.int64)
+    exact_entries = (
+        source["open"].to_numpy(float)[positions_array]
+        if entry_prices is None
+        else np.asarray(entry_prices, dtype=float)
+    )
+    first_highs = (
+        source["high"].to_numpy(float)[positions_array]
+        if entry_bucket_highs is None
+        else np.asarray(entry_bucket_highs, dtype=float)
+    )
+    first_lows = (
+        source["low"].to_numpy(float)[positions_array]
+        if entry_bucket_lows is None
+        else np.asarray(entry_bucket_lows, dtype=float)
+    )
+    if any(len(values) != count for values in (exact_entries, first_highs, first_lows)):
+        raise ValueError("exact entry path values must match position count")
     if backend != "cpu":
         try:
             return _simulate_gpu(
@@ -2026,6 +2092,9 @@ def simulate_management(
                 stop,
                 trailing,
                 fractions,
+                exact_entries,
+                first_highs,
+                first_lows,
             )
         except (ImportError, RuntimeError):
             if backend == "cuda":
@@ -2040,6 +2109,9 @@ def simulate_management(
         stop,
         trailing,
         fractions,
+        exact_entries,
+        first_highs,
+        first_lows,
     )
 
 
@@ -2090,6 +2162,9 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
             group["stop_bps"].to_numpy(float),
             group["trailing_bps"].to_numpy(float),
             group["first_exit_fraction"].to_numpy(float),
+            entry_prices=group["entry_price"].to_numpy(float),
+            entry_bucket_highs=group["entry_bucket_high"].to_numpy(float),
+            entry_bucket_lows=group["entry_bucket_low"].to_numpy(float),
         )
         labelled = group.copy()
         for name, values in result.items():
@@ -2272,6 +2347,9 @@ def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
                 side_rows["stop_bps"].to_numpy(float),
                 side_rows["trailing_bps"].to_numpy(float),
                 side_rows["first_exit_fraction"].to_numpy(float),
+                entry_prices=side_rows["entry_price"].to_numpy(float),
+                entry_bucket_highs=side_rows["entry_bucket_high"].to_numpy(float),
+                entry_bucket_lows=side_rows["entry_bucket_low"].to_numpy(float),
             )
             labelled = side_rows.copy()
             for column, values in result.items():

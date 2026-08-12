@@ -1,9 +1,9 @@
 # Musca BTC Binance — handoff completo del contesto
 
 > Aggiornamento successivo: i guardrail metodologici richiesti dopo questo handoff sono stati
-> implementati nel protocollo `b5d5bcd2...`, incluso contratto frozen preflight/full, entry
+> implementati nel protocollo `29607014...`, incluso contratto frozen preflight/full, entry
 > event-level strettamente successiva, negative-controls gate e future-mutation test. Il nuovo label
-> hash è `5819b6a3...`; non riusare la matrice `21581366...`. La checklist e i risultati aggiornati
+> hash è `7e368172...`; non riusare le matrici precedenti. La checklist e i risultati aggiornati
 > sono in `docs/musca-btc-training-master-plan.md`.
 
 Aggiornato: 2026-08-12, dopo l'audit metodologico E-42--E-53
