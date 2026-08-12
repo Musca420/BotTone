@@ -84,6 +84,21 @@ MODEL_SEEDS = (20260831, 20260901, 20260902)
 VALUE_HEADS = ("decomposed", "direct")
 POLICY_RANKERS = ("ridge", "xgboost_ranker_cuda", "xgboost_value_cuda")
 THRESHOLDS_BPS = (0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0)
+REQUIRED_NEGATIVE_CONTROLS = (
+    "random_prediction",
+    "temporally_shifted_prediction",
+    "label_permutation",
+    "full_only",
+    "best_active_fold_expert",
+    "equal_weight_experts",
+    "managed_expert_mean_no_gate",
+    "train_median_constant_plan",
+    "long_only",
+    "short_only",
+    "simple_momentum",
+    "simple_mean_reversion",
+    "always_wait",
+)
 MINIMUM_FIT_WEEKS = 16
 WINDOW_WEEKS = 4
 RISK_PER_TRADE = 0.01
@@ -178,7 +193,7 @@ LABEL_PROTOCOL = {
     ),
     "management": "dynamic horizon/TP1/TP2/partial exit/initial stop/non-widening trailing",
     "same_second": "target/stop conflicts are excluded fail-closed",
-    "entry": "first observed aggregate trade after decision",
+    "entry": "first observed aggregate trade strictly after decision",
     "terminal_return_prefilter": False,
     "economic_target": "log1p(risk-sized portfolio return after Binance 1x costs and funding)",
     "historical_start": HISTORICAL_START.isoformat(),
@@ -388,6 +403,12 @@ PROTOCOL = {
             "simple mean reversion",
             "always WAIT",
         ],
+        "methodology_guardrails": {
+            "frozen_run_contract": "commit, code, labels, data, fees, splits, seeds and risk",
+            "strict_entry_after_decision": True,
+            "future_mutation_invariance_tested": True,
+            "negative_controls_are_promotion_gates": True,
+        },
     },
     "gates": {
         "minimum_oos_trades": MINIMUM_OOS_TRADES,
@@ -607,6 +628,74 @@ def _git_commit() -> str | None:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def frozen_run_contract(
+    fee: FeeContract,
+    source_manifest: dict[str, Any],
+    label_partitions: dict[str, Any],
+    matrix: pd.DataFrame,
+) -> dict[str, Any]:
+    commit = _git_commit()
+    if not commit:
+        raise RuntimeError("training requires a frozen Git commit")
+    folds = [
+        {name: value.isoformat() for name, value in fold.items()} for fold in _folds(matrix)
+    ]
+    payload = {
+        "protocol_hash": PROTOCOL_HASH,
+        "label_protocol_hash": LABEL_PROTOCOL_HASH,
+        "git_commit": commit,
+        "policy_code_sha256": _sha256(Path(__file__).resolve()),
+        "config_sha256": _sha256(CONFIG.resolve()),
+        "features": {
+            "alpha": list(ALPHA_FEATURES),
+            "fold_expert": list(FOLD_EXPERT_FEATURES),
+            "model": list(MODEL_FEATURES),
+            "generator": list(GENERATOR_FEATURES),
+        },
+        "cost_model": asdict(fee) | {"round_trip_bps": fee.round_trip_bps},
+        "splits": folds,
+        "seeds": list(MODEL_SEEDS),
+        "authorized_thresholds_bps": [0.0],
+        "diagnostic_thresholds_bps": list(THRESHOLDS_BPS),
+        "action_space": PROTOCOL["state_action"],
+        "gates": PROTOCOL["gates"],
+        "risk_engine": {
+            "risk_per_trade": RISK_PER_TRADE,
+            "maximum_leverage": MAXIMUM_LEVERAGE,
+            "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
+            "maximum_drawdown": MAXIMUM_DRAWDOWN,
+            "maximum_positions": 1,
+        },
+        "data": {
+            "source_manifest": source_manifest,
+            "label_partitions": label_partitions,
+            "state_action_rows": len(matrix),
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    return {"hash": hashlib.sha256(encoded).hexdigest(), "payload": payload}
+
+
+def assert_same_frozen_run_contract(
+    expected: dict[str, Any], observed: dict[str, Any]
+) -> None:
+    if not expected or expected.get("hash") != observed.get("hash"):
+        raise RuntimeError("preflight and full training frozen contracts differ")
+
+
+def assert_frozen_static_contract(expected: dict[str, Any]) -> None:
+    payload = expected.get("payload", {}) if isinstance(expected, dict) else {}
+    observed = {
+        "protocol_hash": PROTOCOL_HASH,
+        "label_protocol_hash": LABEL_PROTOCOL_HASH,
+        "git_commit": _git_commit(),
+        "policy_code_sha256": _sha256(Path(__file__).resolve()),
+        "config_sha256": _sha256(CONFIG.resolve()),
+    }
+    if any(payload.get(name) != value for name, value in observed.items()):
+        raise RuntimeError("preflight static training contract changed")
 
 
 def build_research_registry() -> dict[str, Any]:
@@ -898,24 +987,41 @@ def _refine_entry_events(
     positions: np.ndarray,
 ) -> pd.DataFrame:
     output = actions.copy()
-    bucket_timestamp = pd.to_datetime(source.loc[positions, "timestamp"], utc=True)
-    bucket_seconds = _datetime_ns(bucket_timestamp) // 1_000_000_000
-    events = _raw_events_for_seconds(set(bucket_seconds.tolist()))
+    positions = np.asarray(positions, dtype=np.int64).copy()
     requested_ns = _datetime_ns(output["entry_timestamp"])
     actual_timestamp_ms = np.empty(len(output), dtype=np.int64)
     actual_price = np.empty(len(output), dtype=float)
     actual_event_id = np.empty(len(output), dtype=np.int64)
-    for row, second in enumerate(bucket_seconds):
-        candidates = events[int(second)]
-        requested_ms = math.ceil(requested_ns[row] / 1_000_000)
-        eligible = [event for event in candidates if event[0] >= requested_ms]
-        if not eligible:
-            raise ValueError("entry bucket does not contain an aggregate trade after decision")
-        timestamp_ms, event_id, price = eligible[0]
-        actual_timestamp_ms[row] = timestamp_ms
-        actual_event_id[row] = event_id
-        actual_price[row] = price
+    observed_positions = np.flatnonzero(_observed_mask(source))
+    while True:
+        bucket_timestamp = pd.to_datetime(source.loc[positions, "timestamp"], utc=True)
+        bucket_seconds = _datetime_ns(bucket_timestamp) // 1_000_000_000
+        events = _raw_events_for_seconds(set(bucket_seconds.tolist()))
+        missing: list[int] = []
+        for row, second in enumerate(bucket_seconds):
+            eligible = [
+                event
+                for event in events[int(second)]
+                if event[0] * 1_000_000 > requested_ns[row]
+            ]
+            if not eligible:
+                missing.append(row)
+                continue
+            timestamp_ms, event_id, price = eligible[0]
+            actual_timestamp_ms[row] = timestamp_ms
+            actual_event_id[row] = event_id
+            actual_price[row] = price
+        if not missing:
+            break
+        next_locations = np.searchsorted(
+            observed_positions, positions[np.asarray(missing, dtype=np.int64)], side="right"
+        )
+        if np.any(next_locations >= len(observed_positions)):
+            raise ValueError("no ordered aggregate trade strictly after decision")
+        positions[np.asarray(missing, dtype=np.int64)] = observed_positions[next_locations]
     actual_timestamp = pd.to_datetime(actual_timestamp_ms, unit="ms", utc=True)
+    bucket_timestamp = pd.to_datetime(source.loc[positions, "timestamp"], utc=True)
+    output["_source_position"] = positions
     output["entry_bucket_timestamp"] = bucket_timestamp.to_numpy()
     output["actual_entry_timestamp"] = actual_timestamp
     output["entry_price"] = actual_price
@@ -1967,6 +2073,7 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
     source = _load_second_window(month)
     positions, _ = _first_observed_positions(source, actions["entry_timestamp"])
     actions = _refine_entry_events(actions, source, positions)
+    positions = actions.pop("_source_position").to_numpy(np.int64)
     pieces: list[pd.DataFrame] = []
     groups = list(actions.groupby("side", sort=True))
     for number, (side_value, group) in enumerate(groups, start=1):
@@ -2027,8 +2134,16 @@ def _label_partition(month: str, fee: FeeContract) -> pd.DataFrame:
     output["log_utility"] = np.log1p(output["sized_portfolio_return"].to_numpy(float))
     output["label_protocol_hash"] = LABEL_PROTOCOL_HASH
     output["protocol_hash"] = PROTOCOL_HASH
-    if not output["available_at"].le(output["actual_entry_timestamp"]).all():
-        raise ValueError("canonical label entered before features were available")
+    available = pd.to_datetime(output["available_at"], utc=True)
+    decision = pd.to_datetime(output["entry_timestamp"], utc=True)
+    entry = pd.to_datetime(output["actual_entry_timestamp"], utc=True)
+    exit_at = pd.to_datetime(output["exit_timestamp"], utc=True)
+    if not available.le(decision).all():
+        raise ValueError("canonical label decision preceded feature availability")
+    if not decision.lt(entry).all():
+        raise ValueError("canonical label entry was not strictly after decision")
+    if not entry.le(exit_at).all():
+        raise ValueError("canonical label exit preceded entry")
     return output.sort_values(["actual_entry_timestamp", "side"]).reset_index(drop=True)
 
 
@@ -2144,7 +2259,6 @@ def label_exact_plans(rows: pd.DataFrame, fee: FeeContract) -> pd.DataFrame:
         source = _load_second_window(str(month))
         positions, _ = _first_observed_positions(source, month_rows["actual_entry_timestamp"])
         month_rows = _refine_entry_events(month_rows, source, positions)
-        month_rows["_source_position"] = positions
         side_pieces: list[pd.DataFrame] = []
         for side, side_rows in month_rows.groupby("side", sort=True):
             local_positions = side_rows["_source_position"].to_numpy(np.int64)
@@ -2323,6 +2437,35 @@ def plan_efficiency_audit(rows: pd.DataFrame, fee: FeeContract) -> dict[str, Any
     }
 
 
+def assert_causal_state_actions(rows: pd.DataFrame) -> None:
+    required = {
+        "available_at",
+        "entry_timestamp",
+        "actual_entry_timestamp",
+        "exit_timestamp",
+        "side",
+        "plan_id",
+        "label_protocol_hash",
+    }
+    missing = required.difference(rows.columns)
+    if missing:
+        raise ValueError(f"canonical state-actions missing causal fields: {sorted(missing)}")
+    available = pd.to_datetime(rows["available_at"], utc=True)
+    decision = pd.to_datetime(rows["entry_timestamp"], utc=True)
+    entry = pd.to_datetime(rows["actual_entry_timestamp"], utc=True)
+    exit_at = pd.to_datetime(rows["exit_timestamp"], utc=True)
+    if not available.le(decision).all():
+        raise ValueError("future feature availability detected")
+    if not decision.lt(entry).all():
+        raise ValueError("entry must be strictly after decision")
+    if not entry.le(exit_at).all():
+        raise ValueError("exit must not precede entry")
+    if not rows["label_protocol_hash"].eq(LABEL_PROTOCOL_HASH).all():
+        raise ValueError("state-action label protocol is not frozen")
+    if rows.duplicated(["actual_entry_timestamp", "side", "plan_id"]).any():
+        raise ValueError("duplicate canonical state-action")
+
+
 def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame, dict[str, Any]]:
     LABEL_ROOT.mkdir(parents=True, exist_ok=True)
     pieces: list[pd.DataFrame] = []
@@ -2384,6 +2527,7 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
             temporary = path.with_suffix(f".parquet.{os.getpid()}.tmp")
             rows.to_parquet(temporary, index=False)
             _atomic_replace(temporary, path)
+        assert_causal_state_actions(rows)
         pieces.append(rows)
         manifest[month] = {"rows": len(rows), "path": str(path), "sha256": _sha256(path)}
         _status(
@@ -2397,6 +2541,7 @@ def build_state_actions(fee: FeeContract, *, resume: bool) -> tuple[pd.DataFrame
         )
     matrix = pd.concat(pieces, ignore_index=True)
     matrix = matrix.loc[matrix["data_valid"].astype(bool)].reset_index(drop=True)
+    assert_causal_state_actions(matrix)
     return matrix, manifest
 
 
@@ -4434,15 +4579,15 @@ def negative_control_metrics(
     constant_plan: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Evaluate causal policy controls without using them for model selection."""
-    result: dict[str, Any] = {
-        "always_wait": policy_metrics(
+    always_wait = policy_metrics(
             scored.iloc[:0],
             start,
             end,
             daily_bootstrap=False,
             weekly_bootstrap=False,
         )
-    }
+    always_wait["daily_returns"] = _daily_returns(scored.iloc[:0], start, end).tolist()
+    result: dict[str, Any] = {"always_wait": always_wait}
 
     def evaluate(
         name: str,
@@ -4455,13 +4600,15 @@ def negative_control_metrics(
         if "p_target" not in control:
             control["p_target"] = 0.5
         trades, _ = sequential_replay(control, 0.0, fee.round_trip_bps, record_decisions=False)
-        result[name] = policy_metrics(
+        metrics = policy_metrics(
             trades,
             start,
             end,
             daily_bootstrap=False,
             weekly_bootstrap=False,
         )
+        metrics["daily_returns"] = _daily_returns(trades, start, end).tolist()
+        result[name] = metrics
 
     generator = np.random.default_rng(20261101)
     evaluate(
@@ -5250,6 +5397,9 @@ def walk_forward(
             daily_bootstrap=False,
             weekly_bootstrap=False,
         )
+        negative_controls["label_permutation"]["daily_returns"] = _daily_returns(
+            permuted_trades, fold["test_start"], fold["test_end"]
+        ).tolist()
         counterfactual_test_frontiers = diagnostic_side_frontiers(
             scored_test,
             fee,
@@ -5356,6 +5506,9 @@ def walk_forward(
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
                 "test_metrics": metrics,
+                "test_daily_returns": _daily_returns(
+                    trades, fold["test_start"], fold["test_end"]
+                ).tolist(),
                 "negative_controls": negative_controls,
                 "continuation_value_audit": continuation_audit_metrics,
                 "economic_calibration": economic_calibration_buckets(scored_test),
@@ -5887,11 +6040,56 @@ def _controller_audit_uses_zero_margin(side_audit: dict[str, Any]) -> bool:
     )
 
 
+def negative_control_promotion_audit(folds: list[dict[str, Any]]) -> dict[str, Any]:
+    complete = bool(folds) and all(
+        set(REQUIRED_NEGATIVE_CONTROLS).issubset(item.get("negative_controls", {}))
+        for item in folds
+    )
+    if not complete:
+        return {
+            "complete": False,
+            "incremental_value": False,
+            "required": list(REQUIRED_NEGATIVE_CONTROLS),
+            "comparisons": {},
+        }
+    learned = np.concatenate(
+        [np.asarray(item.get("test_daily_returns", []), dtype=float) for item in folds]
+    )
+    comparisons: dict[str, Any] = {}
+    for name in REQUIRED_NEGATIVE_CONTROLS:
+        control = np.concatenate(
+            [
+                np.asarray(item["negative_controls"][name].get("daily_returns", []), dtype=float)
+                for item in folds
+            ]
+        )
+        same_days = len(learned) > 0 and len(control) == len(learned)
+        difference = learned - control if same_days else np.asarray([], dtype=float)
+        comparisons[name] = {
+            "same_days": same_days,
+            "learned_log_growth": float(learned.sum()) if len(learned) else None,
+            "control_log_growth": float(control.sum()) if len(control) else None,
+            "paired_positive_days": float(np.mean(difference > 0)) if len(difference) else None,
+            "incremental": bool(
+                len(difference)
+                and float(difference.sum()) > 0
+                and float(np.mean(difference > 0)) > 0.5
+            ),
+        }
+    return {
+        "complete": True,
+        "incremental_value": all(item["incremental"] for item in comparisons.values()),
+        "required": list(REQUIRED_NEGATIVE_CONTROLS),
+        "comparisons": comparisons,
+    }
+
+
 def preflight_gates(
     metrics: dict[str, Any], folds: list[dict[str, Any]], total_fold_count: int
 ) -> dict[str, bool]:
     required_trades = math.ceil(MINIMUM_OOS_TRADES * len(folds) / max(total_fold_count, 1))
     fold_expectancy = [item["test_metrics"].get("expectancy_bps") for item in folds]
+    control_audit = negative_control_promotion_audit(folds)
     return {
         "folds_complete": len(folds) == 2,
         "minimum_proportional_trades": int(metrics.get("trades", 0)) >= required_trades,
@@ -5962,6 +6160,8 @@ def preflight_gates(
             and not bool(item.get("plan_efficiency_audit", {}).get("execution_authorized", True))
             for item in folds
         ),
+        "negative_controls_complete": bool(control_audit["complete"]),
+        "incremental_vs_negative_controls": bool(control_audit["incremental_value"]),
     }
 
 
@@ -6035,6 +6235,7 @@ def preflight(*, resume: bool = False) -> dict[str, Any]:
     source_manifest = ensure_one_second_sources()
     execution_contract = build_execution_contract(source_manifest, fee)
     matrix, partitions = build_state_actions(fee, resume=resume)
+    frozen_contract = frozen_run_contract(fee, source_manifest, partitions, matrix)
     if pd.to_datetime(matrix["actual_entry_timestamp"], utc=True).ge(FUTURE_HOLDOUT_START).any():
         raise ValueError("sealed future holdout was read")
     all_folds = _folds(matrix)
@@ -6043,6 +6244,7 @@ def preflight(*, resume: bool = False) -> dict[str, Any]:
     audit_end = max(pd.Timestamp(item["test_end"]) for item in folds)
     metrics = policy_metrics(trades, audit_start, audit_end)
     gates = preflight_gates(metrics, folds, len(all_folds))
+    gates["training_contract_frozen"] = bool(frozen_contract.get("hash"))
     verdict = "PREFLIGHT_PASSED" if all(gates.values()) else "PREFLIGHT_FAILED"
     PREFLIGHT_TRADES.parent.mkdir(parents=True, exist_ok=True)
     temporary = PREFLIGHT_TRADES.with_suffix(".parquet.tmp")
@@ -6066,10 +6268,12 @@ def preflight(*, resume: bool = False) -> dict[str, Any]:
             "future_holdout_rows_read": 0,
         },
         "execution": execution_contract,
+        "frozen_run_contract": frozen_contract,
         "registry": registry,
         "folds": folds,
         "metrics": metrics,
         "gates": gates,
+        "negative_control_promotion_audit": negative_control_promotion_audit(folds),
         "failure_analysis": preflight_failure_analysis(folds, gates),
         "verdict": verdict,
     }
@@ -6099,6 +6303,9 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         raise RuntimeError(
             "full training is forbidden until musca-btc-policy-train --preflight-only passes"
         )
+    assert_frozen_static_contract(
+        cast(dict[str, Any], preflight_report.get("frozen_run_contract", {}))
+    )
     frozen_hash_before = _sha256(AUTO_MOE_REPORT)
     _status("registry", "registering all prior protocols and experts", 0.5, gpu=_gpu_info())
     registry = build_research_registry()
@@ -6113,6 +6320,11 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     source_manifest = ensure_one_second_sources()
     execution_contract = build_execution_contract(source_manifest, fee)
     matrix, partitions = build_state_actions(fee, resume=resume)
+    current_contract = frozen_run_contract(fee, source_manifest, partitions, matrix)
+    assert_same_frozen_run_contract(
+        cast(dict[str, Any], preflight_report.get("frozen_run_contract", {})),
+        current_contract,
+    )
     if pd.to_datetime(matrix["actual_entry_timestamp"], utc=True).ge(FUTURE_HOLDOUT_START).any():
         raise ValueError("sealed future holdout was read")
     economics = _economic_action_set(matrix)
@@ -6137,34 +6349,13 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     audit_end = max((pd.Timestamp(item["test_end"]) for item in folds), default=HISTORICAL_END)
     metrics = policy_metrics(trades, audit_start, audit_end)
     sides = _side_metrics(trades, audit_start, audit_end)
-    verdict = _verdict(economics, folds, metrics, sides)
-    forward_bundle: dict[str, Any] | None = None
-    if folds and verdict == "RESEARCH_PAPER_READY":
-        _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
-        forward_bundle = fit_forward_bundle(matrix, fee, folds, resume=resume)
-        if verdict == "RESEARCH_PAPER_READY" and not any(
-            value != "DISABLED" for value in forward_bundle["entry_controllers"].values()
-        ):
-            verdict = "NO_CALIBRATED_POLICY"
     daily = _daily_returns(trades, audit_start, audit_end)
     generated_expert_candidates = sum(
         int(item.get("fold_experts", {}).get("candidates_evaluated", 0)) for item in folds
     )
-    if forward_bundle is not None:
-        generated_expert_candidates += int(forward_bundle["fold_experts"]["candidates_evaluated"])
     generated_experts_eligible = sum(
         int(item.get("fold_experts", {}).get("candidates_eligible", 0)) for item in folds
     )
-    if forward_bundle is not None:
-        generated_experts_eligible += int(forward_bundle["fold_experts"]["candidates_eligible"])
-    registry["registered_fold_local_expert_candidates"] = generated_expert_candidates
-    registry["registered_fold_local_experts_eligible_after_management"] = generated_experts_eligible
-    registry["total_registered_expert_attempts"] = (
-        int(registry["registered_auto_moe_experts"]) + generated_expert_candidates
-    )
-    ledger = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
-    registry["experiment_count"] = len(ledger.get("experiments", []))
-    _atomic_json(REGISTRY, registry)
     multiple_comparison = {
         "global_protocols": int(registry["protocol_count_observed"]),
         "global_experts": int(registry["registered_auto_moe_experts"])
@@ -6182,8 +6373,29 @@ def train(*, resume: bool = False) -> dict[str, Any]:
         ),
     }
     statistical_gates = multiple_comparison_gates(multiple_comparison)
-    if verdict == "RESEARCH_PAPER_READY" and not all(statistical_gates.values()):
-        verdict = "NO_STABLE_OOS_POLICY"
+    verdict = _verdict(economics, folds, metrics, sides, statistical_gates)
+    forward_bundle: dict[str, Any] | None = None
+    if folds and verdict == "RESEARCH_PAPER_READY":
+        _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
+        forward_bundle = fit_forward_bundle(matrix, fee, folds, resume=resume)
+        if not any(
+            value != "DISABLED" for value in forward_bundle["entry_controllers"].values()
+        ):
+            verdict = "NO_CALIBRATED_POLICY"
+        generated_expert_candidates += int(
+            forward_bundle["fold_experts"]["candidates_evaluated"]
+        )
+        generated_experts_eligible += int(
+            forward_bundle["fold_experts"]["candidates_eligible"]
+        )
+    registry["registered_fold_local_expert_candidates"] = generated_expert_candidates
+    registry["registered_fold_local_experts_eligible_after_management"] = generated_experts_eligible
+    registry["total_registered_expert_attempts"] = (
+        int(registry["registered_auto_moe_experts"]) + generated_expert_candidates
+    )
+    ledger = json.loads(EXPERIMENT_LEDGER.read_text(encoding="utf-8"))
+    registry["experiment_count"] = len(ledger.get("experiments", []))
+    _atomic_json(REGISTRY, registry)
     gates = policy_gates(metrics) | statistical_gates
     stage_reports = write_stage_reports(folds, metrics, gates)
     append_experiment_result(verdict, metrics)

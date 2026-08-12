@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,11 @@ import pytest
 from adaptive_bot import cli
 from adaptive_bot import musca_btc_auto_moe as frozen
 from adaptive_bot import musca_btc_policy as policy
+
+
+@pytest.fixture(autouse=True)
+def _isolate_policy_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(policy, "STATUS", tmp_path / "musca_btc_policy.status.json")
 
 
 def _source(values: list[tuple[float, float, float, float]]) -> pd.DataFrame:
@@ -278,7 +284,10 @@ def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
     )
     labelled = policy.label_local_plan_variants(plans, policy.FeeContract(2.0, 4.0, 0.0, "test"))
     assert labelled["actual_entry_timestamp"].nunique() == 1
-    assert labelled["entry_price"].eq(100.0).all()
+    assert labelled["actual_entry_timestamp"].eq(
+        pd.Timestamp("2026-01-01T00:00:01.001Z")
+    ).all()
+    assert labelled["entry_price"].eq(99.0).all()
     assert np.isfinite(labelled["log_utility"]).all()
     assert labelled["execution_quality"].eq("TRADE_PATH_PROXY_NO_HISTORICAL_L2").all()
 
@@ -358,7 +367,7 @@ def test_entry_uses_first_ordered_event_after_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bucket = pd.Timestamp("2026-01-01T00:00:05Z")
-    source = pd.DataFrame({"timestamp": [bucket]})
+    source = pd.DataFrame({"timestamp": [bucket], "observed_trade": [True]})
     actions = pd.DataFrame({"entry_timestamp": [bucket + pd.Timedelta(milliseconds=10)]})
     monkeypatch.setattr(
         policy,
@@ -366,15 +375,65 @@ def test_entry_uses_first_ordered_event_after_decision(
         lambda seconds: {
             int(bucket.timestamp()): [
                 (int(bucket.timestamp() * 1_000) + 5, 1, 99.9),
-                (int(bucket.timestamp() * 1_000) + 15, 2, 100.1),
+                (int(bucket.timestamp() * 1_000) + 10, 2, 100.0),
+                (int(bucket.timestamp() * 1_000) + 15, 3, 100.1),
             ]
         },
     )
     refined = policy._refine_entry_events(actions, source, np.asarray([0]))
     assert refined.loc[0, "actual_entry_timestamp"] == bucket + pd.Timedelta(milliseconds=15)
     assert refined.loc[0, "entry_price"] == pytest.approx(100.1)
-    assert refined.loc[0, "entry_event_id"] == 2
+    assert refined.loc[0, "entry_event_id"] == 3
     assert refined.loc[0, "entry_delay_seconds"] == pytest.approx(0.005)
+
+
+def test_entry_advances_to_next_observed_bucket_when_decision_is_last_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bucket = pd.Timestamp("2026-01-01T00:00:05Z")
+    source = pd.DataFrame(
+        {
+            "timestamp": [bucket, bucket + pd.Timedelta(seconds=1)],
+            "observed_trade": [True, True],
+        }
+    )
+    decision = bucket + pd.Timedelta(milliseconds=10)
+    actions = pd.DataFrame({"entry_timestamp": [decision]})
+    monkeypatch.setattr(
+        policy,
+        "_raw_events_for_seconds",
+        lambda seconds: {
+            second: [
+                (
+                    second * 1_000 + (10 if second == int(bucket.timestamp()) else 2),
+                    second,
+                    100.0,
+                )
+            ]
+            for second in seconds
+        },
+    )
+    refined = policy._refine_entry_events(actions, source, np.asarray([0]))
+    expected = bucket + pd.Timedelta(seconds=1, milliseconds=2)
+    assert refined.loc[0, "actual_entry_timestamp"] == expected
+    assert refined.loc[0, "_source_position"] == 1
+
+
+def test_causal_state_action_contract_rejects_entry_at_decision_time() -> None:
+    timestamp = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows = pd.DataFrame(
+        {
+            "available_at": [timestamp],
+            "entry_timestamp": [timestamp],
+            "actual_entry_timestamp": [timestamp],
+            "exit_timestamp": [timestamp + pd.Timedelta(seconds=1)],
+            "side": [1],
+            "plan_id": ["equal-time"],
+            "label_protocol_hash": [policy.LABEL_PROTOCOL_HASH],
+        }
+    )
+    with pytest.raises(ValueError, match="strictly after decision"):
+        policy.assert_causal_state_actions(rows)
 
 
 def test_constant_plan_uses_only_reference_medians() -> None:
@@ -790,6 +849,14 @@ def test_flat_fold_is_not_mislabeled_as_calibration_failure() -> None:
         policy._verdict(economics, folds, metrics, sides, failed_statistics)
         == "NO_STABLE_OOS_POLICY"
     )
+
+
+def test_statistical_gates_are_evaluated_before_forward_bundle_fit() -> None:
+    source = inspect.getsource(policy.train)
+    gates = source.index("statistical_gates = multiple_comparison_gates")
+    verdict = source.index("verdict = _verdict", gates)
+    bundle = source.index("forward_bundle = fit_forward_bundle", verdict)
+    assert gates < verdict < bundle
 
 
 def test_decision_cost_contains_no_invented_non_fee_reserve(
@@ -1726,6 +1793,11 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
             "oracle_is_diagnostic_only": True,
             "execution_authorized": False,
         },
+        "test_daily_returns": [0.01, 0.01, 0.01],
+        "negative_controls": {
+            name: {"daily_returns": [0.0, 0.0, 0.0]}
+            for name in policy.REQUIRED_NEGATIVE_CONTROLS
+        },
     }
     gates = policy.preflight_gates(metrics, [fold, fold], 10)
     assert all(gates.values())
@@ -1786,6 +1858,169 @@ def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:
             assert np.allclose(cpu[name], gpu[name], atol=policy.GPU_CPU_TOLERANCE_BPS)
         else:
             assert np.array_equal(cpu[name], gpu[name])
+
+
+def test_predict_array_preserves_cpu_predictions_and_matches_cuda() -> None:
+    if not policy._gpu_info().get("available"):
+        pytest.skip("CUDA unavailable")
+    values = np.asarray(
+        [[0.0, 1.0], [1.0, 0.0], [1.0, 1.0], [2.0, 1.0], [3.0, 2.0], [4.0, 3.0]],
+        dtype=np.float32,
+    )
+    target = np.asarray([0.0, 1.0, 1.5, 2.5, 4.0, 5.5], dtype=np.float32)
+
+    cpu_model = policy._regressor("ridge", 7)
+    cpu_model.fit(values, target)
+    assert np.array_equal(
+        policy._predict_array(cpu_model, "predict", values), cpu_model.predict(values)
+    )
+
+    gpu_model = policy.XGBRegressor(
+        n_estimators=16,
+        max_depth=2,
+        learning_rate=0.2,
+        tree_method="hist",
+        device="cuda",
+        objective="reg:squarederror",
+        random_state=7,
+        n_jobs=1,
+    )
+    gpu_model.fit(values, target, verbose=False)
+    gpu_model.set_params(device="cpu")
+    cpu_prediction = gpu_model.predict(values)
+    gpu_model.set_params(device="cuda")
+    cuda_prediction = policy._predict_array(gpu_model, "predict", values)
+    assert np.allclose(
+        cpu_prediction,
+        cuda_prediction,
+        atol=policy.GPU_CPU_TOLERANCE_BPS,
+        rtol=1e-6,
+    )
+
+
+def test_frozen_run_contract_detects_code_data_fee_and_split_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(policy, "_git_commit", lambda: "frozen-commit")
+    monkeypatch.setattr(policy, "_sha256", lambda path: f"sha:{policy.Path(path).name}")
+    matrix = pd.DataFrame(
+        {
+            "actual_entry_timestamp": pd.to_datetime(
+                ["2025-04-01T00:00:00Z", "2026-07-01T00:00:00Z"], utc=True
+            )
+        }
+    )
+    fee = policy.FeeContract(2.0, 4.0, 0.0, "test")
+    baseline = policy.frozen_run_contract(
+        fee,
+        {"months": {"2025-04": {"sha256": "source-a"}}},
+        {"2025-04": {"sha256": "labels-a", "rows": 2}},
+        matrix,
+    )
+    repeated = policy.frozen_run_contract(
+        fee,
+        {"months": {"2025-04": {"sha256": "source-a"}}},
+        {"2025-04": {"sha256": "labels-a", "rows": 2}},
+        matrix,
+    )
+    policy.assert_same_frozen_run_contract(baseline, repeated)
+    policy.assert_frozen_static_contract(baseline)
+    monkeypatch.setattr(policy, "_git_commit", lambda: "changed-commit")
+    with pytest.raises(RuntimeError, match="static training contract changed"):
+        policy.assert_frozen_static_contract(baseline)
+    monkeypatch.setattr(policy, "_git_commit", lambda: "frozen-commit")
+    changed = policy.frozen_run_contract(
+        policy.FeeContract(2.0, 5.0, 0.0, "test"),
+        {"months": {"2025-04": {"sha256": "source-a"}}},
+        {"2025-04": {"sha256": "labels-b", "rows": 2}},
+        matrix,
+    )
+    with pytest.raises(RuntimeError, match="frozen contracts differ"):
+        policy.assert_same_frozen_run_contract(baseline, changed)
+
+
+def test_negative_controls_are_complete_and_paired_promotion_gates() -> None:
+    controls = {
+        name: {"daily_returns": [0.0, 0.0, 0.0]} for name in policy.REQUIRED_NEGATIVE_CONTROLS
+    }
+    fold = {"test_daily_returns": [0.01, 0.01, 0.01], "negative_controls": controls}
+    audit = policy.negative_control_promotion_audit([fold])
+    assert audit["complete"] is True
+    assert audit["incremental_value"] is True
+    missing = {**fold, "negative_controls": {}}
+    assert policy.negative_control_promotion_audit([missing])["complete"] is False
+    controls["equal_weight_experts"] = {"daily_returns": [0.02, 0.02, 0.02]}
+    assert policy.negative_control_promotion_audit([fold])["incremental_value"] is False
+
+
+def test_future_mutation_does_not_change_current_plan_action_or_risk_decision() -> None:
+    current = _inherited_expert_rows()
+    future = current.copy()
+    future["available_at"] += pd.Timedelta(minutes=1)
+    future["entry_timestamp"] += pd.Timedelta(minutes=1)
+    original = pd.concat([current, future], ignore_index=True)
+    mutated = original.copy()
+    future_rows = mutated["entry_timestamp"].gt(current["entry_timestamp"].max())
+    mutated.loc[future_rows, list(policy.base.EXPERT_COLUMNS)] = 1_000_000.0
+    original_plan = policy.compose_parameterized_plans(original, 8.0)
+    mutated_plan = policy.compose_parameterized_plans(mutated, 8.0)
+    plan_columns = [
+        "side",
+        "horizon_seconds",
+        "target_1_bps",
+        "target_2_bps",
+        "stop_bps",
+        "trailing_bps",
+        "first_exit_fraction",
+        "plan_id",
+    ]
+    current_timestamp = current["entry_timestamp"].iloc[0]
+    pd.testing.assert_frame_equal(
+        original_plan.loc[original_plan["entry_timestamp"].eq(current_timestamp), plan_columns]
+        .sort_values(plan_columns[:2])
+        .reset_index(drop=True),
+        mutated_plan.loc[mutated_plan["entry_timestamp"].eq(current_timestamp), plan_columns]
+        .sort_values(plan_columns[:2])
+        .reset_index(drop=True),
+    )
+
+    entry = pd.Timestamp("2026-01-01T00:00:00Z")
+    candidates = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [entry, entry + pd.Timedelta(minutes=1)],
+            "exit_timestamp": [entry + pd.Timedelta(seconds=10), entry + pd.Timedelta(minutes=2)],
+            "calibrated_ev_bps": [10.0, 10.0],
+            "expected_log_utility": [0.001, 0.001],
+            "p_target": [0.6, 0.6],
+            "expert_id": ["current", "future"],
+            "side": [1, -1],
+            "stop_bps": [50.0, 50.0],
+            "net_bps": [10.0, 10.0],
+            "funding_bps": [0.0, 0.0],
+            "stress_1_5x_bps": [6.0, 6.0],
+            "stress_2x_bps": [2.0, 2.0],
+            "time_to_target_seconds": [5, 5],
+            "exit_seconds": [10, 60],
+            "outcome": ["TARGET", "TARGET"],
+        }
+    )
+    _, original_decisions = policy.sequential_replay(candidates, 0.0, 8.0)
+    mutated_candidates = candidates.copy()
+    mutated_candidates.loc[1, ["expected_log_utility", "net_bps", "side"]] = [-1.0, -500.0, 1]
+    _, mutated_decisions = policy.sequential_replay(mutated_candidates, 0.0, 8.0)
+    decision_fields = [
+        "timestamp",
+        "action",
+        "reason",
+        "daily_pnl_fraction",
+        "risk_remaining_fraction",
+        "position_side",
+    ]
+    pd.testing.assert_series_equal(
+        original_decisions.loc[0, decision_fields],
+        mutated_decisions.loc[0, decision_fields],
+        check_names=False,
+    )
 
 
 def test_cli_exposes_only_the_single_policy_training_flow() -> None:

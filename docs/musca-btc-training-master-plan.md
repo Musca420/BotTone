@@ -4,6 +4,42 @@ Aggiornato: 2026-08-12
 Stato: audit E-42--E-53 implementato; verifiche complete richieste prima di un solo preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
+## Guardrail metodologici aggiunti prima del protocollo b5d5bcd2
+
+Il documento esterno “Training Safety & Methodology Guardrails” contiene dodici invarianti più un
+future-mutation test. Sono vincolanti e non autorizzano l'abbassamento di costi o gate.
+
+- [x] contratto congelato con commit, hash codice/config, protocol/label hash, feature, costi, split,
+  seed, action-space, gate, dati e Risk Engine;
+- [x] il full run confronta due volte il contratto del preflight: prima del caricamento e dopo la
+  ricostruzione di manifest/matrice; ogni differenza vieta il resume;
+- [x] invariante hard `available_at <= decision_time < actual_entry_timestamp <= exit_timestamp`;
+- [x] entry sul primo `aggTrade` event-level strettamente successivo alla decisione; se nello stesso
+  bucket non esiste, si avanza al primo bucket realmente osservato successivo;
+- [x] first-passage, no-trade bucket e conflitti non ordinabili restano fail-closed event-level;
+- [x] FIT, CALIBRATION, MODEL AUDIT, POLICY SELECTION e OUTER TEST restano DataFrame separati;
+- [x] winner-only calibration past-only, separata LONG/SHORT e day-balanced;
+- [x] ranker relativo e modello di valore assoluto restano distinti;
+- [x] WAIT usa continuation fitted temporale e non un massimo futuro realizzato;
+- [x] soltanto margine `0.0` può autorizzare; le altre soglie sono diagnostiche;
+- [x] local-plan oracle resta diagnostico e nessuna variante non supportata può essere eseguita;
+- [x] tutti i tredici negative controls sono obbligatori e la policy deve batterli in log-growth
+  paired e nella maggioranza dei giorni indipendenti;
+- [x] selezione challenger usa metriche dell'argmax eseguito, non soltanto MAE/RMSE;
+- [x] preflight e full walk-forward chiamano la stessa `walk_forward` e lo stesso resolver;
+- [x] SPA, Reality Check, PBO e DSR vengono calcolati prima del verdetto; il forward bundle non
+  viene fittato quando i gate statistici non autorizzano la policy;
+- [x] future-mutation test: modificare dati successivi non cambia piano, azione o decisione rischio
+  al timestamp corrente;
+- [x] `_predict_array` sklearn CPU è identico e XGBoost CPU/CUDA differisce al massimo `1e-6`.
+
+Verifiche dopo questi guardrail: Ruff verde, mypy verde, `git diff --check` verde, 73/73 test Musca,
+11/11 integrazione, 6/6 property e 393/393 unit complessivi, cioè 410/410 senza esclusioni. Il
+protocol hash corrente è `b5d5bcd2258667b911e716c850d899fa5f3f5d25b1ad77131be6cbb7772f004f` e il
+label hash corrente è `5819b6a30015352c99724fb42c84b06f3ef5b9806dc07955677c78697b95eed5`.
+Il cambio del label hash è intenzionale: le matrici precedenti accettavano in alcuni casi un evento
+nello stesso millisecondo della decisione e non sono resumable per questo protocollo.
+
 ## Stato implementazione dopo il blackout
 
 Protocollo challenger corrente: `e38fe7973531d57fa887b8336ab73662ca649d54cb37647879d91e45fa1678a6`.
