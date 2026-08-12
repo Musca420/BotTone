@@ -317,6 +317,10 @@ PROTOCOL = {
             "semi-Markov challenger; continuation is used only after positive past-only policy "
             "selection evidence and cannot make a negative immediate action enter"
         ),
+        "entry_selection": (
+            "controller and preregistered EV margin are selected jointly on the same past-only "
+            "window with at least 30 executed trades and positive net log-equity"
+        ),
         "continuation_target": (
             "actual immediate utility plus a temporally split double-estimator value at the next "
             "free state; action selection and evaluation use different past-only regressors, "
@@ -347,8 +351,8 @@ PROTOCOL = {
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
         "frequency": (
-            "coherent immediate utility positive; paired Q advantage is an optional challenger "
-            "selected on the prior policy window; threshold frontier is diagnostic only"
+            "maximum sustainable frequency among preregistered EV margins; controller and margin "
+            "are selected jointly on the prior policy window, never after disabling the side"
         ),
         "negative_controls": [
             "random prediction",
@@ -4445,7 +4449,8 @@ def policy_gates(
         )
         > 0,
         "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
-        "drawdown_8pct": float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN,
+        "drawdown_8pct": metrics.get("maximum_drawdown") is not None
+        and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
         "majority_active_days_positive": float(metrics.get("positive_active_days") or 0) > 0.5,
         "risk_respected": int(metrics.get("risk_violations", 1)) == 0,
     }
@@ -4460,18 +4465,31 @@ def selection_gates(metrics: dict[str, Any]) -> dict[str, bool]:
         "expectancy_positive": float(economic_expectancy or 0) > 0,
         "daily_lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -1) > 0,
         "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
-        "drawdown_8pct": float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN,
+        "drawdown_8pct": metrics.get("maximum_drawdown") is not None
+        and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
         "majority_active_days_positive": float(metrics.get("positive_active_days") or 0) > 0.5,
         "risk_respected": int(metrics.get("risk_violations", 1)) == 0,
     }
 
 
 def _choose_frequency_threshold(
-    scored: pd.DataFrame, fee: FeeContract, start: pd.Timestamp, end: pd.Timestamp
+    scored: pd.DataFrame,
+    fee: FeeContract,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    value_column: str = "expected_log_utility",
+    minimum_trades: int = 0,
 ) -> tuple[float, list[dict[str, Any]]]:
     frontier: list[dict[str, Any]] = []
     for threshold in THRESHOLDS_BPS:
-        trades, _ = sequential_replay(scored, threshold, fee.round_trip_bps, record_decisions=False)
+        trades, _ = sequential_replay(
+            scored,
+            threshold,
+            fee.round_trip_bps,
+            record_decisions=False,
+            value_column=value_column,
+        )
         metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
         returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
         net_log_equity: float | None = (
@@ -4479,14 +4497,21 @@ def _choose_frequency_threshold(
         )
         risk_approved = (
             int(metrics.get("risk_violations", 1)) == 0
-            and float(metrics.get("maximum_drawdown") or 1) <= MAXIMUM_DRAWDOWN
+            and metrics.get("maximum_drawdown") is not None
+            and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN
         )
-        eligible = risk_approved and net_log_equity is not None and net_log_equity > 0
+        eligible = (
+            risk_approved
+            and len(trades) >= minimum_trades
+            and net_log_equity is not None
+            and net_log_equity > 0
+        )
         frontier.append(
             {
                 "threshold_bps": threshold,
                 "metrics": metrics,
                 "selection_utility": net_log_equity,
+                "minimum_trades": minimum_trades,
                 "risk_approved": risk_approved,
                 "eligible": eligible,
                 "final_statistical_gates_applied": False,
@@ -4498,8 +4523,8 @@ def _choose_frequency_threshold(
     selected = max(
         sustainable,
         key=lambda item: (
-            float(item["selection_utility"]),
             float(item["metrics"]["trades_per_day"]),
+            float(item["selection_utility"]),
         ),
     )
     return float(selected["threshold_bps"]), frontier
@@ -4519,34 +4544,28 @@ def select_entry_controller(
     }
     audit: dict[str, Any] = {}
     for name, value_column in candidates.items():
-        trades, _ = sequential_replay(
+        threshold, frontier = _choose_frequency_threshold(
             scored,
-            0.0,
-            fee.round_trip_bps,
-            record_decisions=False,
+            fee,
+            start,
+            end,
             value_column=value_column,
+            minimum_trades=MINIMUM_CONTROLLER_SELECTION_TRADES,
         )
-        metrics = policy_metrics(trades, start, end, weekly_bootstrap=False)
-        returns = trades.get("portfolio_return", pd.Series(dtype=float)).to_numpy(float)
-        selection_utility = (
-            float(np.log1p(returns).sum()) if len(returns) and np.all(returns > -1) else None
+        selected_frontier = next(
+            (item for item in frontier if item["threshold_bps"] == threshold),
+            frontier[0],
         )
         enough_continuation_blocks = (
             name != "CONTINUATION" or continuation_blocks >= MINIMUM_CONTINUATION_CROSSFIT_BLOCKS
         )
-        eligible = (
-            enough_continuation_blocks
-            and len(trades) >= MINIMUM_CONTROLLER_SELECTION_TRADES
-            and selection_utility is not None
-            and selection_utility > 0
-            and int(metrics.get("risk_violations", 1)) == 0
-            and metrics.get("maximum_drawdown") is not None
-            and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN
-        )
+        eligible = enough_continuation_blocks and math.isfinite(threshold)
         audit[name] = {
             "value_column": value_column,
-            "metrics": metrics,
-            "selection_utility": selection_utility,
+            "metrics": selected_frontier["metrics"],
+            "selection_utility": selected_frontier["selection_utility"],
+            "selected_threshold_bps": threshold if math.isfinite(threshold) else None,
+            "frequency_pnl_frontier": frontier,
             "minimum_trades": MINIMUM_CONTROLLER_SELECTION_TRADES,
             "continuation_crossfit_blocks": continuation_blocks,
             "minimum_continuation_crossfit_blocks": MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
@@ -4963,19 +4982,22 @@ def walk_forward(
             )
             controllers[side] = controller
             controller_audit[side_name] = audit
-        scored_selection = apply_entry_controllers(scored_selection, controllers)
-        scored_test = apply_entry_controllers(scored_test, controllers)
-        thresholds: dict[int, float] = {1: float("inf"), -1: float("inf")}
+        thresholds: dict[int, float] = {}
         frontiers: dict[str, list[dict[str, Any]]] = {}
         for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-            threshold, side_frontier = _choose_frequency_threshold(
-                scored_selection.loc[scored_selection["side"].eq(side)],
-                fee,
-                fold["selection_start"],
-                fold["test_start"],
+            selected_controller = controllers[side]
+            controller_name = selected_controller if selected_controller != "DISABLED" else "MYOPIC"
+            selected_threshold = controller_audit[side_name][controller_name][
+                "selected_threshold_bps"
+            ]
+            thresholds[side] = (
+                float(selected_threshold) if selected_threshold is not None else float("inf")
             )
-            thresholds[side] = threshold
-            frontiers[side_name] = side_frontier
+            frontiers[side_name] = controller_audit[side_name][controller_name][
+                "frequency_pnl_frontier"
+            ]
+        scored_selection = apply_entry_controllers(scored_selection, controllers)
+        scored_test = apply_entry_controllers(scored_test, controllers)
         _status(
             "policy_replay",
             f"fold {number}/{len(folds)} LONG={controllers[1]}; SHORT={controllers[-1]}",

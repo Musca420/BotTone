@@ -6,7 +6,7 @@ Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `72a6e5669c77783ff6fe0f8358589f6b171b4eed156cd79b07c945431455f394`.
+Protocollo challenger corrente: `2cbcb61cc120d2860781af55cf44d96577857eb8cb2616d63480265b24c66a20`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -328,6 +328,26 @@ L'audit ha localizzato cinque incongruenze nuove:
   alcun risultato economico. Il tie-break usa ora soltanto score globale ed `expert_id`
   deterministico, identici in audit, calibrazione e replay.
 
+Il preflight corretto `72a6e5669c77783ff6fe0f8358589f6b171b4eed156cd79b07c945431455f394`
+ha completato due fold senza crash ma ha prodotto zero trade. Il ranker globale Ridge ha selezionato
+azioni con EV medio -10,5511 e -3,7936 bps nelle due finestre di audit. Il challenger LambdaMART era
+migliore nel primo fold (+2,1220 bps) ma ancora negativo in utility e peggiorava nel secondo
+(-5,4970 bps), quindi non era promuovibile. Esistevano code OOS diagnostiche positive, ma il
+controller veniva valutato solo a margine zero: LONG continuation aveva 7 trade a +57,3146 bps nel
+primo selection period e LONG myopic 23 trade a +6,0561 bps nel secondo, entrambi sotto il minimo
+invariato di 30.
+
+L'audit del flusso ha localizzato altri due errori, senza usare il test per scegliere una soglia:
+
+- **E-40 - controller bocciato prima della frontiera.** `select_entry_controller()` valutava soltanto
+  la soglia zero; se negativa, impostava `DISABLED`. Solo dopo `_choose_frequency_threshold()`
+  provava i sette margini preregistrati su righe già disabilitate, ottenendo sempre zero trade. Il
+  nuovo flusso sceglie congiuntamente controller e margine sulla stessa selection antecedente,
+  mantenendo minimo 30 trade, costi 1x, rischio e outer test intoccati.
+- **E-41 - drawdown zero interpretato come mancante.** Tre gate usavano
+  `maximum_drawdown or 1`; il valore valido `0.0` diventava quindi 100% e veniva respinto. I gate
+  distinguono ora esplicitamente `None` da zero, senza modificare il limite dell'8%.
+
 Il protocollo successivo tratta correttamente il dataset come full-feedback policy learning. Un
 Ridge globale sull'utility è il champion; un `XGBRanker` CUDA `rank:pairwise`, raggruppato per
 `actual_entry_timestamp`, è il solo challenger. Il challenger deve migliorare sul model-audit
@@ -340,8 +360,8 @@ negativi vengono eseguiti prima di disabilitare i controller.
 
 Questa scelta segue la formulazione full-feedback come cost-sensitive learning e il ranking per
 gruppi documentato da XGBoost; non introduce PPO/SAC, nuove librerie o feedback inventato. Il nuovo
-protocollo, dopo la correzione E-39, è
-`72a6e5669c77783ff6fe0f8358589f6b171b4eed156cd79b07c945431455f394`;
+protocollo, dopo le correzioni E-39–E-41, è
+`2cbcb61cc120d2860781af55cf44d96577857eb8cb2616d63480265b24c66a20`;
 l'hash dei label resta `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli

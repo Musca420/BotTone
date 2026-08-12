@@ -1234,6 +1234,47 @@ def test_controller_falls_back_to_positive_myopic_policy_when_continuation_is_un
     assert audit["CONTINUATION"]["eligible"] is False
 
 
+def test_controller_and_threshold_are_selected_jointly() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    count = policy.MINIMUM_CONTROLLER_SELECTION_TRADES
+    entries = pd.date_range(start, periods=2 * count, freq="2min")
+    rows = pd.DataFrame(
+        {
+            "actual_entry_timestamp": entries,
+            "exit_timestamp": entries + pd.Timedelta(minutes=1),
+            "calibrated_ev_bps": np.r_[np.full(count, 0.5), np.full(count, 20.0)],
+            "immediate_expected_log_utility": np.r_[
+                np.full(count, 0.00005),
+                np.full(count, 0.002),
+            ],
+            "action_advantage_log_utility": -1.0,
+            "expected_log_utility": -1.0,
+            "p_target": 0.6,
+            "expert_id": "joint-controller-threshold",
+            "side": 1,
+            "stop_bps": 92.0,
+            "net_bps": np.r_[np.full(count, -30.0), np.full(count, 10.0)],
+            "funding_bps": 0.0,
+            "stress_1_5x_bps": np.r_[np.full(count, -34.0), np.full(count, 6.0)],
+            "stress_2x_bps": np.r_[np.full(count, -38.0), np.full(count, 2.0)],
+            "time_to_target_seconds": np.r_[np.full(count, -1), np.full(count, 30)],
+            "exit_seconds": 60,
+            "outcome": np.r_[np.full(count, "STOP"), np.full(count, "TARGET")],
+        }
+    )
+    selected, audit = policy.select_entry_controller(
+        rows,
+        policy.FeeContract(2.0, 4.0, 0.0, "test"),
+        start,
+        start + pd.Timedelta(days=28),
+        policy.MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
+    )
+    assert selected == "MYOPIC"
+    assert audit["MYOPIC"]["selected_threshold_bps"] == 1.0
+    assert audit["MYOPIC"]["metrics"]["trades"] == count
+    assert audit["MYOPIC"]["selection_utility"] > 0
+
+
 def test_continuation_cannot_rescue_negative_immediate_utility() -> None:
     class Constant:
         def __init__(self, value: float) -> None:
