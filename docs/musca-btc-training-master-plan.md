@@ -1,12 +1,12 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-12
-Stato: punti 1, 2 e 5 verificati; policy layer globale preregistrato, nuovo preflight necessario
+Stato: audit E-42--E-49 implementato; verifiche locali verdi, suite globale e preflight necessari
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
 
-Protocollo challenger corrente: `2cbcb61cc120d2860781af55cf44d96577857eb8cb2616d63480265b24c66a20`.
+Protocollo challenger corrente: `e38fe7973531d57fa887b8336ab73662ca649d54cb37647879d91e45fa1678a6`.
 Il vecchio run non è stato ripreso. Le caselle restano non spuntate finché il nuovo walk-forward non
 produce anche gli artefatti OOS; il codice già completato è elencato qui per evitare di ripeterlo.
 
@@ -348,20 +348,67 @@ L'audit del flusso ha localizzato altri due errori, senza usare il test per sceg
   `maximum_drawdown or 1`; il valore valido `0.0` diventava quindi 100% e veniva respinto. I gate
   distinguono ora esplicitamente `None` da zero, senza modificare il limite dell'8%.
 
-Il protocollo successivo tratta correttamente il dataset come full-feedback policy learning. Un
-Ridge globale sull'utility è il champion; un `XGBRanker` CUDA `rank:pairwise`, raggruppato per
-`actual_entry_timestamp`, è il solo challenger. Il challenger deve migliorare sul model-audit
-antecedente EV selezionata, utility selezionata, regret in bps e utility, frazione best-action e
-maggioranza dei giorni paired. Il modello scelto ordina insieme lato e piano. Lo stesso identico
-score usato nell'argmax viene poi calibrato su EV e utility nella finestra winner-only successiva.
+## Audit strutturale definitivo prima del nuovo preflight
+
+Il protocollo `2cbcb61c...` ha confermato che le code LONG potevano essere economicamente positive
+nella selection, ma il replay produceva zero trade. Non era prova di assenza di opportunita: il
+flusso cancellava informazioni necessarie prima della decisione. Sono registrati e vietati questi
+errori aggiuntivi:
+
+- **E-42 - vincitore globale eliminava il lato alternativo.** Un solo piano LONG/SHORT veniva
+  conservato per timestamp prima dei gate per lato. Se vinceva SHORT e SHORT veniva disabilitato,
+  il miglior LONG era gia perso. Ora resta un vincitore calibrato per ciascun lato fino al replay.
+- **E-43 - ranker relativo senza valore assoluto.** LambdaMART ordinava anche azioni tutte negative.
+  Ridge resta champion assoluto; sono challenger separati LambdaMART per il ranking entro lato e
+  XGBoost CUDA direct-log-utility per il valore assoluto. Nessuno viene promosso senza migliorare
+  congiuntamente decisioni, regret, utility e maggioranza dei giorni sul model-audit antecedente.
+- **E-44 - query e audit diversi dall'azione eseguita.** Il ranker era addestrato e valutato sul
+  vincitore globale, mentre la policy deve conservare un piano per lato. Le query sono ora
+  `(actual_entry_timestamp, side)` con relevance non negativa; audit e selezione usano gli stessi
+  gruppi. Il confronto LONG/SHORT avviene dopo calibrazione e gate.
+- **E-45 - calibrazione LONG/SHORT mescolata.** Un solo isotonic combinava distribuzioni diverse e
+  pesava migliaia di minuti correlati come osservazioni indipendenti. Ora ogni lato ha calibratori
+  winner-only distinti e ogni giornata UTC contribuisce con peso uguale.
+- **E-46 - minimo trade applicato dopo la perdita del fallback.** Il supporto minimo di 30 trade
+  viene verificato sulla selection per ciascun lato prima che il lato opposto possa essere
+  disabilitato. Nessun lato bocciato cancella l'altro.
+- **E-47 - outer frontier falsificata da `DISABLED`.** La frontiera diagnostica veniva calcolata dopo
+  aver posto utility=-1, quindi mostrava zero per costruzione. Ora e calcolata prima dei controller,
+  marcata diagnostic-only e non entra nella selezione.
+- **E-48 - walk-forward e bundle congelato divergenti.** Il forward bundle conservava ancora una
+  calibrazione globale e ricalcolava la soglia dopo il controller. Entrambi chiamano ora gli stessi
+  helper per calibrazione per lato, controller e soglia.
+- **E-49 - profit factor infinito respinto o serializzato illegalmente.** Una sequenza senza perdite
+  ha PF matematicamente infinito. Il report conserva `profit_factor=None` piu un flag booleano
+  `profit_factor_is_infinite`; il gate lo accetta senza scrivere `Infinity` in JSON.
+
+Contratti obbligatori coperti dai test prima del lancio:
+
+- [x] un candidato LONG valido sopravvive quando il vincitore globale SHORT e disabilitato;
+- [x] un solo vincitore per lato e timestamp viene conservato;
+- [x] relevance LambdaMART non negativa e query per timestamp/lato;
+- [x] calibrazione separata, past-only e day-balanced;
+- [x] frontiera outer disponibile prima di `DISABLED`;
+- [x] stesso resolver di controller/soglie in walk-forward e forward bundle;
+- [x] PF infinito rappresentato con JSON rigoroso;
+- [x] Ruff, mypy e suite completa sul protocollo finale (60 Musca, 397 globali);
+- [ ] nuovo preflight avviato soltanto dopo tutte le verifiche precedenti.
+
+Il protocollo successivo tratta correttamente il dataset come full-feedback policy learning. Ridge
+direct-utility è il champion; `XGBRanker` CUDA `rank:pairwise` e XGBoost CUDA direct-log-utility sono
+challenger. LambdaMART usa query `actual_entry_timestamp + side` e relevance non negativa. Un
+challenger deve migliorare sul model-audit antecedente EV selezionata, utility selezionata, regret
+in bps e utility e maggioranza dei giorni paired. La frazione exact-best resta diagnostica. Il
+modello scelto ordina i piani entro lato; lo stesso score dell'argmax viene calibrato separatamente
+per LONG e SHORT nella finestra winner-only successiva. Solo i lati abilitati competono nel replay.
 Probability head, costi, label, rischio e gate finali restano invariati. La calibrazione per riga usa
 ora lo stesso peso per timestamp del fit; la soglia scelta viene realmente applicata; i controlli
 negativi vengono eseguiti prima di disabilitare i controller.
 
 Questa scelta segue la formulazione full-feedback come cost-sensitive learning e il ranking per
 gruppi documentato da XGBoost; non introduce PPO/SAC, nuove librerie o feedback inventato. Il nuovo
-protocollo, dopo le correzioni E-39–E-41, è
-`2cbcb61cc120d2860781af55cf44d96577857eb8cb2616d63480265b24c66a20`;
+protocollo, dopo le correzioni E-39–E-49, è
+`e38fe7973531d57fa887b8336ab73662ca649d54cb37647879d91e45fa1678a6`;
 l'hash dei label resta `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli

@@ -83,7 +83,7 @@ OUTCOME_TIMEOUT = 2
 OUTCOME_NAMES = ("TARGET", "STOP", "TIMEOUT")
 MODEL_SEEDS = (20260831, 20260901, 20260902)
 VALUE_HEADS = ("decomposed", "direct")
-POLICY_RANKERS = ("ridge", "xgboost_ranker_cuda")
+POLICY_RANKERS = ("ridge", "xgboost_ranker_cuda", "xgboost_value_cuda")
 THRESHOLDS_BPS = (0.0, 1.0, 2.0, 4.0, 8.0, 12.0, 20.0)
 MINIMUM_FIT_WEEKS = 16
 WINDOW_WEEKS = 4
@@ -256,16 +256,24 @@ PROTOCOL = {
     },
     "policy_ranker": {
         "feedback": "full counterfactual reward vector for every state-action group",
-        "group": "actual_entry_timestamp",
+        "group": "actual_entry_timestamp plus side",
         "champion": "global Ridge direct log-utility score",
-        "challenger": "XGBoost CUDA LambdaMART pairwise ranker",
+        "challengers": [
+            "XGBoost CUDA LambdaMART pairwise ranker",
+            "XGBoost CUDA absolute log-utility regressor",
+        ],
         "selection": (
             "past-only paired state-action regret, selected EV, selected utility and daily "
-            "improvement; side and plan are ranked jointly"
+            "improvement; plans are ranked within each side, then calibrated eligible side "
+            "winners compete in replay"
         ),
         "winner_calibration": (
-            "the same score used for argmax is mapped to realized EV and log utility on a "
-            "strictly later winner-only window"
+            "the same score used for argmax is mapped separately for LONG and SHORT to realized "
+            "EV and log utility on a strictly later winner-only window"
+        ),
+        "side_fallback": (
+            "one calibrated winner is retained per side until side eligibility is known; a "
+            "disabled global winner cannot erase the eligible opposite side"
         ),
         "tie_break": "expert_id ascending; no probability-head input",
     },
@@ -3128,15 +3136,11 @@ def head_metrics(rows: pd.DataFrame, value_head: str) -> dict[str, float]:
     utility = rows["log_utility"].to_numpy(float)
     predicted_utility = rows[f"{value_head}_log_utility"].to_numpy(float)
     return {
-        "brier": _multiclass_brier(
-            rows["event_class"].to_numpy(int), probability, weights
-        ),
+        "brier": _multiclass_brier(rows["event_class"].to_numpy(int), probability, weights),
         "ev_calibration_error_bps": _calibration_error(actual, predicted, weights),
         "ev_mae_bps": float(mean_absolute_error(actual, predicted, sample_weight=weights)),
         "decision_regret_bps": _decision_regret(rows, f"{value_head}_ev_bps", "net_bps"),
-        "utility_calibration_error": _calibration_error(
-            utility, predicted_utility, weights
-        ),
+        "utility_calibration_error": _calibration_error(utility, predicted_utility, weights),
         "utility_mae": float(
             mean_absolute_error(utility, predicted_utility, sample_weight=weights)
         ),
@@ -3188,14 +3192,27 @@ def fit_policy_ranker(kind: str, rows: pd.DataFrame) -> dict[str, Any]:
             _timestamp_weights(rows),
         )
         return {"kind": kind, "model": model}
+    if kind == "xgboost_value_cuda":
+        model = _fit_regressor(
+            "xgboost",
+            _regressor("xgboost", MODEL_SEEDS[0] + 72),
+            _x(rows),
+            rows["log_utility"].to_numpy(float),
+            _timestamp_weights(rows),
+        )
+        return {"kind": kind, "model": model}
     if kind != "xgboost_ranker_cuda":
         raise ValueError(f"unknown policy ranker: {kind}")
     ordered = rows.sort_values(
         ["actual_entry_timestamp", "side", "plan_id"], kind="stable"
     ).reset_index(drop=True)
-    qid = pd.factorize(
-        pd.to_datetime(ordered["actual_entry_timestamp"], utc=True), sort=False
-    )[0].astype(np.int32)
+    group = pd.MultiIndex.from_arrays(
+        [
+            pd.to_datetime(ordered["actual_entry_timestamp"], utc=True),
+            ordered["side"].to_numpy(int),
+        ]
+    )
+    qid = pd.factorize(group, sort=False)[0].astype(np.int32)
     model = XGBRanker(
         objective="rank:pairwise",
         tree_method="hist",
@@ -3214,7 +3231,12 @@ def fit_policy_ranker(kind: str, rows: pd.DataFrame) -> dict[str, Any]:
     )
     model.fit(
         _x(ordered),
-        ordered["log_utility"].to_numpy(float),
+        (
+            ordered.groupby(["actual_entry_timestamp", "side"], sort=False)["log_utility"]
+            .rank(method="dense", ascending=True)
+            .sub(1.0)
+            .to_numpy(float)
+        ),
         qid=qid,
     )
     return {"kind": kind, "model": model}
@@ -3222,15 +3244,16 @@ def fit_policy_ranker(kind: str, rows: pd.DataFrame) -> dict[str, Any]:
 
 def score_policy_ranker(rows: pd.DataFrame, ranker: dict[str, Any]) -> pd.DataFrame:
     output = rows.copy()
-    output["policy_selection_score"] = np.asarray(
-        ranker["model"].predict(_x(output)), dtype=float
-    )
+    output["policy_selection_score"] = np.asarray(ranker["model"].predict(_x(output)), dtype=float)
     output["policy_ranker"] = str(ranker["kind"])
     return output
 
 
 def _selected_action_positions(
-    rows: pd.DataFrame, value_column: str = "expected_log_utility"
+    rows: pd.DataFrame,
+    value_column: str = "expected_log_utility",
+    *,
+    separate_sides: bool = False,
 ) -> np.ndarray:
     """Return one deterministic predicted winner per state, without reading its outcome."""
     if rows.empty:
@@ -3243,30 +3266,42 @@ def _selected_action_positions(
             "expert_id": rows["expert_id"].astype(str).to_numpy(),
         }
     )
+    if separate_sides:
+        ranking["side"] = rows["side"].to_numpy(int)
+    groups = ["timestamp", "side"] if separate_sides else ["timestamp"]
     return (
         ranking.sort_values(
             ["timestamp", "value", "expert_id"],
             ascending=[True, False, True],
             kind="stable",
         )
-        .drop_duplicates("timestamp", keep="first")["position"]
+        .drop_duplicates(groups, keep="first")["position"]
         .to_numpy(np.int64)
     )
 
 
-def policy_ranking_metrics(rows: pd.DataFrame, score_column: str) -> dict[str, Any]:
-    positions = _selected_action_positions(rows, score_column)
+def policy_ranking_metrics(
+    rows: pd.DataFrame, score_column: str, *, separate_sides: bool = False
+) -> dict[str, Any]:
+    positions = _selected_action_positions(rows, score_column, separate_sides=separate_sides)
     selected = rows.iloc[positions]
-    grouped_net = rows.groupby("actual_entry_timestamp", sort=False)["net_bps"].max()
-    grouped_utility = rows.groupby("actual_entry_timestamp", sort=False)["log_utility"].max()
+    group_columns = ["actual_entry_timestamp"] + (["side"] if separate_sides else [])
+    oracle = (
+        rows.groupby(group_columns, sort=False)
+        .agg(oracle_net=("net_bps", "max"), oracle_utility=("log_utility", "max"))
+        .reset_index()
+    )
+    selected = selected.merge(oracle, on=group_columns, how="left", validate="many_to_one")
     timestamp = pd.to_datetime(selected["actual_entry_timestamp"], utc=True)
-    oracle_net = np.maximum(timestamp.map(grouped_net).to_numpy(float), 0.0)
-    oracle_utility = np.maximum(timestamp.map(grouped_utility).to_numpy(float), 0.0)
+    oracle_net = np.maximum(selected["oracle_net"].to_numpy(float), 0.0)
+    oracle_utility = np.maximum(selected["oracle_utility"].to_numpy(float), 0.0)
     realized_net = selected["net_bps"].to_numpy(float)
     realized_utility = selected["log_utility"].to_numpy(float)
-    by_day = pd.DataFrame(
-        {"day": timestamp.dt.floor("D"), "utility": realized_utility}
-    ).groupby("day", sort=True)["utility"].mean()
+    by_day = (
+        pd.DataFrame({"day": timestamp.dt.floor("D"), "utility": realized_utility})
+        .groupby("day", sort=True)["utility"]
+        .mean()
+    )
     return {
         "states": len(selected),
         "selected_ev_bps": float(realized_net.mean()),
@@ -3281,40 +3316,49 @@ def policy_ranking_metrics(rows: pd.DataFrame, score_column: str) -> dict[str, A
     }
 
 
-def select_policy_ranker(
-    fit: pd.DataFrame, audit: pd.DataFrame
-) -> tuple[str, dict[str, Any]]:
-    """Keep Ridge unless the GPU ranker improves paired policy decisions past-only."""
-    kinds = ["ridge"] + (["xgboost_ranker_cuda"] if _xgb_available() else [])
+def select_policy_ranker(fit: pd.DataFrame, audit: pd.DataFrame) -> tuple[str, dict[str, Any]]:
+    """Keep Ridge unless a GPU challenger improves paired economic decisions past-only."""
+    kinds = ["ridge"] + (list(POLICY_RANKERS[1:]) if _xgb_available() else [])
     metrics: dict[str, Any] = {}
     selected_utility: dict[str, pd.Series] = {}
     for kind in kinds:
         model = fit_policy_ranker(kind, fit)
         scored = score_policy_ranker(audit, model)
-        positions = _selected_action_positions(scored, "policy_selection_score")
+        positions = _selected_action_positions(
+            scored, "policy_selection_score", separate_sides=True
+        )
         selected = scored.iloc[positions]
-        metrics[kind] = policy_ranking_metrics(scored, "policy_selection_score")
+        metrics[kind] = policy_ranking_metrics(
+            scored, "policy_selection_score", separate_sides=True
+        )
         selected_utility[kind] = pd.Series(
             selected["log_utility"].to_numpy(float),
-            index=pd.to_datetime(selected["actual_entry_timestamp"], utc=True),
+            index=pd.MultiIndex.from_arrays(
+                [
+                    pd.to_datetime(selected["actual_entry_timestamp"], utc=True),
+                    selected["side"].to_numpy(int),
+                ],
+                names=["timestamp", "side"],
+            ),
         )
         del model, scored, selected
         gc.collect()
     selected_kind = "ridge"
-    paired_audit: dict[str, Any] = {"available": False}
-    if "xgboost_ranker_cuda" in metrics:
+    challenger_audits: dict[str, Any] = {}
+    for challenger_kind in kinds[1:]:
         paired = pd.concat(
             {
                 "ridge": selected_utility["ridge"],
-                "xgboost_ranker_cuda": selected_utility["xgboost_ranker_cuda"],
+                challenger_kind: selected_utility[challenger_kind],
             },
             axis=1,
             join="inner",
         ).dropna()
-        difference = paired["xgboost_ranker_cuda"] - paired["ridge"]
-        daily = difference.groupby(pd.DatetimeIndex(difference.index).floor("D")).mean()
+        difference = paired[challenger_kind] - paired["ridge"]
+        timestamp = pd.DatetimeIndex(difference.index.get_level_values("timestamp"))
+        daily = difference.groupby(timestamp.floor("D")).mean()
         baseline = metrics["ridge"]
-        challenger = metrics["xgboost_ranker_cuda"]
+        challenger = metrics[challenger_kind]
         improves = {
             "selected_ev": challenger["selected_ev_bps"] > baseline["selected_ev_bps"],
             "selected_utility": (
@@ -3322,27 +3366,36 @@ def select_policy_ranker(
             ),
             "net_regret": challenger["decision_regret_bps"] < baseline["decision_regret_bps"],
             "utility_regret": (
-                challenger["decision_regret_log_utility"]
-                < baseline["decision_regret_log_utility"]
-            ),
-            "best_action_fraction": (
-                challenger["selected_best_realized_action_fraction"]
-                >= baseline["selected_best_realized_action_fraction"]
+                challenger["decision_regret_log_utility"] < baseline["decision_regret_log_utility"]
             ),
             "majority_days_improved": float(daily.gt(0).mean()) > 0.5,
         }
-        paired_audit = {
+        challenger_audits[challenger_kind] = {
             "available": True,
             "states": len(paired),
             "mean_log_utility_improvement": float(difference.mean()),
             "positive_days_fraction": float(daily.gt(0).mean()),
             "criteria": improves,
+            "diagnostic_best_action_fraction": challenger["selected_best_realized_action_fraction"],
         }
-        if all(improves.values()):
-            selected_kind = "xgboost_ranker_cuda"
+        if all(improves.values()) and (
+            selected_kind == "ridge"
+            or challenger["selected_log_utility"] > metrics[selected_kind]["selected_log_utility"]
+        ):
+            selected_kind = challenger_kind
+    representative = (
+        challenger_audits[selected_kind]
+        if selected_kind != "ridge"
+        else max(
+            challenger_audits.values(),
+            key=lambda item: float(item["mean_log_utility_improvement"]),
+            default={"available": False},
+        )
+    )
     return selected_kind, {
         "candidates": metrics,
-        "paired_challenger_audit": paired_audit,
+        "paired_challenger_audit": representative,
+        "paired_challenger_audits": challenger_audits,
         "selected": selected_kind,
         "audit_period_only": True,
         "outer_test_read_for_selection": False,
@@ -3362,9 +3415,15 @@ def fit_post_selection_calibration(
     raw_utility = selected["expected_log_utility"].to_numpy(float)
     realized_ev = selected["net_bps"].to_numpy(float)
     realized_utility = selected["log_utility"].to_numpy(float)
-    ev_model = IsotonicRegression(out_of_bounds="clip").fit(selection_score, realized_ev)
+    day = pd.to_datetime(selected["actual_entry_timestamp"], utc=True).dt.floor("D")
+    day_counts = day.map(day.value_counts()).to_numpy(float)
+    weights = 1.0 / day_counts
+    weights *= len(weights) / weights.sum()
+    ev_model = IsotonicRegression(out_of_bounds="clip").fit(
+        selection_score, realized_ev, sample_weight=weights
+    )
     utility_model = IsotonicRegression(out_of_bounds="clip").fit(
-        selection_score, realized_utility
+        selection_score, realized_utility, sample_weight=weights
     )
     calibrated_ev = np.asarray(ev_model.predict(selection_score), dtype=float)
     calibrated_utility = np.asarray(utility_model.predict(selection_score), dtype=float)
@@ -3375,6 +3434,8 @@ def fit_post_selection_calibration(
         "strictly_past_only": True,
         "rows": len(rows),
         "selected_states": len(selected),
+        "independent_days": int(day.nunique()),
+        "day_balanced": True,
         "start": timestamp.min().isoformat(),
         "end": timestamp.max().isoformat(),
         "selection_score_column": selection_score_column,
@@ -3382,11 +3443,15 @@ def fit_post_selection_calibration(
         "preselection_predicted_ev_bps": float(np.mean(raw_ev)),
         "realized_selected_ev_bps": float(np.mean(realized_ev)),
         "winner_optimism_bps": float(np.mean(raw_ev - realized_ev)),
-        "preselection_calibration_error_bps": _calibration_error(realized_ev, raw_ev),
-        "postselection_calibration_error_bps": _calibration_error(realized_ev, calibrated_ev),
-        "preselection_utility_calibration_error": _calibration_error(realized_utility, raw_utility),
+        "preselection_calibration_error_bps": _calibration_error(realized_ev, raw_ev, weights),
+        "postselection_calibration_error_bps": _calibration_error(
+            realized_ev, calibrated_ev, weights
+        ),
+        "preselection_utility_calibration_error": _calibration_error(
+            realized_utility, raw_utility, weights
+        ),
         "postselection_utility_calibration_error": _calibration_error(
-            realized_utility, calibrated_utility
+            realized_utility, calibrated_utility, weights
         ),
         "selected_best_realized_action_fraction": float(np.mean(realized_ev >= oracle - 1e-12)),
     }
@@ -3398,14 +3463,43 @@ def fit_post_selection_calibration(
     }
 
 
+def fit_side_post_selection_calibrations(
+    rows: pd.DataFrame, selection_score_column: str = "expected_log_utility"
+) -> dict[int, dict[str, Any]]:
+    """Calibrate the best supported action independently for each side."""
+    return {
+        side: fit_post_selection_calibration(
+            rows.loc[rows["side"].eq(side)], selection_score_column
+        )
+        for side in (1, -1)
+    }
+
+
+def apply_side_post_selection_calibrations(
+    rows: pd.DataFrame, calibrations: dict[int, dict[str, Any]]
+) -> pd.DataFrame:
+    """Retain one calibrated candidate per side so a disabled side cannot erase the other."""
+    return (
+        pd.concat(
+            [
+                apply_post_selection_calibration(
+                    rows.loc[rows["side"].eq(side)], calibrations[side]
+                )
+                for side in (1, -1)
+            ],
+            ignore_index=True,
+        )
+        .sort_values(["actual_entry_timestamp", "side"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
 def apply_post_selection_calibration(
     rows: pd.DataFrame, calibration: dict[str, Any]
 ) -> pd.DataFrame:
     """Expose only the causally selected winner and correct its post-selection optimism."""
     output = rows.copy()
-    selection_score_column = str(
-        calibration.get("selection_score_column", "expected_log_utility")
-    )
+    selection_score_column = str(calibration.get("selection_score_column", "expected_log_utility"))
     positions = _selected_action_positions(output, selection_score_column)
     output["preselection_calibrated_ev_bps"] = output["calibrated_ev_bps"]
     output["preselection_expected_log_utility"] = output["expected_log_utility"]
@@ -4161,6 +4255,9 @@ def policy_metrics(
             "equity_expectancy": None,
             "mean_log_growth": None,
             "profit_factor": None,
+            "profit_factor_is_infinite": False,
+            "notional_profit_factor": None,
+            "notional_profit_factor_is_infinite": False,
             "maximum_drawdown": None,
             "positive_active_days": 0.0,
             "daily_lcb_95": None,
@@ -4191,7 +4288,9 @@ def policy_metrics(
         "mean_log_growth": float(log_growth.mean()),
         "total_log_growth": float(log_growth.sum()),
         "profit_factor": gains / losses if losses else None,
+        "profit_factor_is_infinite": bool(gains > 0 and losses == 0),
         "notional_profit_factor": notional_gains / notional_losses if notional_losses else None,
+        "notional_profit_factor_is_infinite": bool(notional_gains > 0 and notional_losses == 0),
         "win_rate": float((net > 0).mean()),
         "maximum_drawdown": float((1 - equity / peak).max(initial=0.0)),
         "positive_active_days": float(active.gt(0).mean()) if len(active) else 0.0,
@@ -4448,7 +4547,8 @@ def policy_gates(
             float(metrics.get("weekly_lcb_95") or -1),
         )
         > 0,
-        "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
+        "profit_factor_1_15": bool(metrics.get("profit_factor_is_infinite"))
+        or float(metrics.get("profit_factor") or 0) >= 1.15,
         "drawdown_8pct": metrics.get("maximum_drawdown") is not None
         and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
         "majority_active_days_positive": float(metrics.get("positive_active_days") or 0) > 0.5,
@@ -4464,7 +4564,8 @@ def selection_gates(metrics: dict[str, Any]) -> dict[str, bool]:
     return {
         "expectancy_positive": float(economic_expectancy or 0) > 0,
         "daily_lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -1) > 0,
-        "profit_factor_1_15": float(metrics.get("profit_factor") or 0) >= 1.15,
+        "profit_factor_1_15": bool(metrics.get("profit_factor_is_infinite"))
+        or float(metrics.get("profit_factor") or 0) >= 1.15,
         "drawdown_8pct": metrics.get("maximum_drawdown") is not None
         and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
         "majority_active_days_positive": float(metrics.get("positive_active_days") or 0) > 0.5,
@@ -4581,6 +4682,67 @@ def select_entry_controller(
     audit["selection_period_only"] = True
     audit["outer_test_read_for_selection"] = False
     return selected, audit
+
+
+def resolve_side_controllers(
+    scored: pd.DataFrame,
+    fee: FeeContract,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    continuation_blocks: int,
+) -> tuple[
+    dict[int, str],
+    dict[str, Any],
+    dict[int, float],
+    dict[str, list[dict[str, Any]]],
+]:
+    """Select each side independently and preserve its own threshold contract."""
+    controllers: dict[int, str] = {}
+    audits: dict[str, Any] = {}
+    thresholds: dict[int, float] = {}
+    frontiers: dict[str, list[dict[str, Any]]] = {}
+    for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+        controller, audit = select_entry_controller(
+            scored.loc[scored["side"].eq(side)],
+            fee,
+            start,
+            end,
+            continuation_blocks,
+        )
+        controllers[side] = controller
+        audits[side_name] = audit
+        controller_name = controller if controller != "DISABLED" else "MYOPIC"
+        selected_threshold = audit[controller_name]["selected_threshold_bps"]
+        thresholds[side] = (
+            float(selected_threshold) if selected_threshold is not None else float("inf")
+        )
+        frontiers[side_name] = audit[controller_name]["frequency_pnl_frontier"]
+    return controllers, audits, thresholds, frontiers
+
+
+def diagnostic_side_frontiers(
+    scored: pd.DataFrame,
+    fee: FeeContract,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Measure outer-test opportunity tails before any side is disabled."""
+    result: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for side, side_name in ((1, "LONG"), (-1, "SHORT")):
+        result[side_name] = {}
+        for controller_name, value_column in (
+            ("MYOPIC", "immediate_expected_log_utility"),
+            ("CONTINUATION", "action_advantage_log_utility"),
+        ):
+            _, frontier = _choose_frequency_threshold(
+                scored.loc[scored["side"].eq(side)],
+                fee,
+                start,
+                end,
+                value_column=value_column,
+            )
+            result[side_name][controller_name] = frontier
+    return result
 
 
 def apply_entry_controllers(
@@ -4919,17 +5081,17 @@ def walk_forward(
         )
         del policy_ranker
         gc.collect()
-        post_selection_calibration = fit_post_selection_calibration(
+        post_selection_calibrations = fit_side_post_selection_calibrations(
             scored_winner_calibration,
             "policy_selection_score",
         )
-        scored_selection = apply_post_selection_calibration(
+        scored_selection = apply_side_post_selection_calibrations(
             scored_selection,
-            post_selection_calibration,
+            post_selection_calibrations,
         )
-        scored_test = apply_post_selection_calibration(
+        scored_test = apply_side_post_selection_calibrations(
             scored_test,
-            post_selection_calibration,
+            post_selection_calibrations,
         )
         del scored_winner_calibration
         gc.collect()
@@ -4970,32 +5132,19 @@ def walk_forward(
             daily_bootstrap=False,
             weekly_bootstrap=False,
         )
-        controllers: dict[int, str] = {}
-        controller_audit: dict[str, Any] = {}
-        for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-            controller, audit = select_entry_controller(
-                scored_selection.loc[scored_selection["side"].eq(side)],
-                fee,
-                fold["selection_start"],
-                fold["test_start"],
-                continuation_blocks,
-            )
-            controllers[side] = controller
-            controller_audit[side_name] = audit
-        thresholds: dict[int, float] = {}
-        frontiers: dict[str, list[dict[str, Any]]] = {}
-        for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-            selected_controller = controllers[side]
-            controller_name = selected_controller if selected_controller != "DISABLED" else "MYOPIC"
-            selected_threshold = controller_audit[side_name][controller_name][
-                "selected_threshold_bps"
-            ]
-            thresholds[side] = (
-                float(selected_threshold) if selected_threshold is not None else float("inf")
-            )
-            frontiers[side_name] = controller_audit[side_name][controller_name][
-                "frequency_pnl_frontier"
-            ]
+        counterfactual_test_frontiers = diagnostic_side_frontiers(
+            scored_test,
+            fee,
+            fold["test_start"],
+            fold["test_end"],
+        )
+        controllers, controller_audit, thresholds, frontiers = resolve_side_controllers(
+            scored_selection,
+            fee,
+            fold["selection_start"],
+            fold["test_start"],
+            continuation_blocks,
+        )
         scored_selection = apply_entry_controllers(scored_selection, controllers)
         scored_test = apply_entry_controllers(scored_test, controllers)
         _status(
@@ -5076,8 +5225,16 @@ def walk_forward(
                     "SHORT": thresholds[-1] if math.isfinite(thresholds[-1]) else None,
                 },
                 "entry_controller_selection": controller_audit,
-                "post_selection_calibration": post_selection_calibration["audit"],
+                "post_selection_calibration": {
+                    "LONG": post_selection_calibrations[1]["audit"],
+                    "SHORT": post_selection_calibrations[-1]["audit"],
+                },
                 "frequency_pnl_frontiers": frontiers,
+                "counterfactual_test_frontiers": {
+                    "diagnostic_only": True,
+                    "outer_test_read_for_selection": False,
+                    "sides": counterfactual_test_frontiers,
+                },
                 "test_frequency_pnl_frontier": test_frontier,
                 "test_daily_returns_by_threshold": test_daily,
                 "test_metrics": metrics,
@@ -5284,14 +5441,10 @@ def fit_forward_bundle(
     controller_audit: dict[str, Any] = {}
     scored_winner_calibration_pieces: list[pd.DataFrame] = []
     scored_selection_pieces: list[pd.DataFrame] = []
-    observed_policy_rankers = [
-        str(item.get("policy_ranker_champion", "ridge")) for item in folds
-    ]
-    policy_ranker_champion = (
-        "xgboost_ranker_cuda"
-        if observed_policy_rankers.count("xgboost_ranker_cuda")
-        > observed_policy_rankers.count("ridge")
-        else "ridge"
+    observed_policy_rankers = [str(item.get("policy_ranker_champion", "ridge")) for item in folds]
+    policy_ranker_champion = max(
+        POLICY_RANKERS,
+        key=lambda kind: observed_policy_rankers.count(kind),
     )
     policy_ranker = fit_policy_ranker(policy_ranker_champion, fit)
     continuation_model = fit_continuation_models(fit)
@@ -5337,13 +5490,13 @@ def fit_forward_bundle(
     scored_selection = score_policy_ranker(
         pd.concat(scored_selection_pieces, ignore_index=True), policy_ranker
     )
-    post_selection_calibration = fit_post_selection_calibration(
+    post_selection_calibrations = fit_side_post_selection_calibrations(
         scored_winner_calibration,
         "policy_selection_score",
     )
-    scored_selection = apply_post_selection_calibration(
+    scored_selection = apply_side_post_selection_calibrations(
         scored_selection,
-        post_selection_calibration,
+        post_selection_calibrations,
     )
     scored_selection = score_continuation(
         scored_selection,
@@ -5351,23 +5504,13 @@ def fit_forward_bundle(
         continuation_calibration,
         copy=False,
     )
-    for side, side_name in ((1, "LONG"), (-1, "SHORT")):
-        side_selection = scored_selection.loc[scored_selection["side"].eq(side)]
-        controller, audit = select_entry_controller(
-            side_selection,
-            fee,
-            selection_start,
-            end,
-            continuation_blocks,
-        )
-        controllers[side] = controller
-        controller_audit[side_name] = audit
-        side_selection = apply_entry_controllers(side_selection, {side: controller})
-        threshold, frontier = _choose_frequency_threshold(
-            side_selection, fee, selection_start, end
-        )
-        thresholds[side] = threshold
-        frontiers[side_name] = frontier
+    controllers, controller_audit, thresholds, frontiers = resolve_side_controllers(
+        scored_selection,
+        fee,
+        selection_start,
+        end,
+        continuation_blocks,
+    )
     return {
         "champions": champions,
         "value_champions": value_champions,
@@ -5375,8 +5518,11 @@ def fit_forward_bundle(
         "policy_ranker": policy_ranker,
         "heads": heads,
         "calibrations": calibrations,
-        "post_selection_calibration": post_selection_calibration,
-        "post_selection_calibration_audit": post_selection_calibration["audit"],
+        "post_selection_calibration": post_selection_calibrations,
+        "post_selection_calibration_audit": {
+            "LONG": post_selection_calibrations[1]["audit"],
+            "SHORT": post_selection_calibrations[-1]["audit"],
+        },
         "continuation_models": continuation_model,
         "continuation_calibration": continuation_calibration,
         "entry_controllers": {
@@ -5589,7 +5735,8 @@ def preflight_gates(
         "minimum_proportional_trades": int(metrics.get("trades", 0)) >= required_trades,
         "expectancy_positive": float(metrics.get("expectancy_bps") or -math.inf) > 0,
         "lower_confidence_bound_positive": float(metrics.get("daily_lcb_95") or -math.inf) > 0,
-        "profit_factor_1_15": float(metrics.get("profit_factor") or -math.inf) >= 1.15,
+        "profit_factor_1_15": bool(metrics.get("profit_factor_is_infinite"))
+        or float(metrics.get("profit_factor") or -math.inf) >= 1.15,
         "drawdown_8pct": metrics.get("maximum_drawdown") is not None
         and float(metrics["maximum_drawdown"]) <= MAXIMUM_DRAWDOWN,
         "majority_active_days_positive": float(metrics.get("positive_active_days") or 0.0) > 0.5,
@@ -5619,17 +5766,20 @@ def preflight_gates(
             for item in folds
         ),
         "post_selection_calibration_past_only": all(
-            bool(item.get("post_selection_calibration", {}).get("strictly_past_only"))
-            and pd.Timestamp(item["post_selection_calibration"]["end"])
-            < pd.Timestamp(item["selection_start"])
+            set(item.get("post_selection_calibration", {})) == {"LONG", "SHORT"}
+            and all(
+                bool(side_audit.get("strictly_past_only"))
+                and bool(side_audit.get("day_balanced"))
+                and int(side_audit.get("independent_days", 0)) > 0
+                and pd.Timestamp(side_audit["end"]) < pd.Timestamp(item["selection_start"])
+                for side_audit in item["post_selection_calibration"].values()
+            )
             for item in folds
         ),
         "policy_ranker_selection_past_only": all(
             bool(item.get("policy_ranker_selection", {}).get("audit_period_only"))
             and not bool(
-                item.get("policy_ranker_selection", {}).get(
-                    "outer_test_read_for_selection", True
-                )
+                item.get("policy_ranker_selection", {}).get("outer_test_read_for_selection", True)
             )
             for item in folds
         ),
@@ -5639,6 +5789,65 @@ def preflight_gates(
             > 0
             for item in folds
         ),
+    }
+
+
+def preflight_failure_analysis(
+    folds: list[dict[str, Any]], gates: dict[str, bool]
+) -> dict[str, Any]:
+    """Explain a rejection without using outer-test diagnostics for model selection."""
+    side_rows: list[dict[str, Any]] = []
+    for fold in folds:
+        diagnostics = fold.get("counterfactual_test_frontiers", {}).get("sides", {})
+        controllers = fold.get("entry_controller_selection", {})
+        for side_name in ("LONG", "SHORT"):
+            candidates = [
+                item for frontier in diagnostics.get(side_name, {}).values() for item in frontier
+            ]
+            trade_candidates = [
+                item for item in candidates if int(item.get("metrics", {}).get("trades", 0)) > 0
+            ]
+            best = max(
+                trade_candidates,
+                key=lambda item: float(item.get("metrics", {}).get("mean_log_growth") or -math.inf),
+                default=None,
+            )
+            selected_controller = str(controllers.get(side_name, {}).get("selected", "MISSING"))
+            side_rows.append(
+                {
+                    "fold": int(fold["fold"]),
+                    "side": side_name,
+                    "selected_controller": selected_controller,
+                    "controller_disabled": selected_controller == "DISABLED",
+                    "outer_test_frontier_available_before_disable": bool(candidates),
+                    "outer_test_best_diagnostic": (
+                        None
+                        if best is None
+                        else {
+                            "threshold_bps": best["threshold_bps"],
+                            "metrics": best["metrics"],
+                        }
+                    ),
+                }
+            )
+    if all(row["controller_disabled"] for row in side_rows):
+        primary = "NO_SIDE_MET_SELECTION_SUPPORT"
+    elif not any(
+        int(row.get("outer_test_best_diagnostic", {}).get("metrics", {}).get("trades", 0))
+        for row in side_rows
+        if row.get("outer_test_best_diagnostic") is not None
+    ):
+        primary = "NO_OOS_ACTIONS_AFTER_CALIBRATION"
+    elif not all(gates.values()):
+        primary = "OOS_ECONOMIC_OR_STABILITY_GATE_FAILED"
+    else:
+        primary = "NONE"
+    return {
+        "diagnostic_only": True,
+        "outer_test_read_for_selection": False,
+        "primary_cause": primary,
+        "failed_gates": sorted(name for name, passed in gates.items() if not passed),
+        "side_fold_diagnostics": side_rows,
     }
 
 
@@ -5688,6 +5897,7 @@ def preflight(*, resume: bool = False) -> dict[str, Any]:
         "folds": folds,
         "metrics": metrics,
         "gates": gates,
+        "failure_analysis": preflight_failure_analysis(folds, gates),
         "verdict": verdict,
     }
     _atomic_json(PREFLIGHT_REPORT, report)
@@ -5889,9 +6099,7 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             "expert_library": (
                 None if forward_bundle is None else forward_bundle["expert_library"]
             ),
-            "policy_ranker": (
-                None if forward_bundle is None else forward_bundle["policy_ranker"]
-            ),
+            "policy_ranker": (None if forward_bundle is None else forward_bundle["policy_ranker"]),
             "thresholds_bps": (
                 None if forward_bundle is None else forward_bundle["thresholds_bps"]
             ),

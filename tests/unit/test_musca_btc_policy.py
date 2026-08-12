@@ -1105,6 +1105,114 @@ def test_winner_only_calibration_corrects_selection_optimism_without_using_oracl
     assert scored.loc[~scored["post_selection_candidate"], "expected_log_utility"].eq(-1).all()
     assert calibration["audit"]["winner_optimism_bps"] > 20
     assert calibration["audit"]["selected_best_realized_action_fraction"] == 0
+    assert calibration["audit"]["day_balanced"] is True
+    assert calibration["audit"]["independent_days"] == 1
+
+
+def test_side_winner_survives_when_opposite_global_winner_is_disabled() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    rows: list[dict[str, object]] = []
+    for number, timestamp in enumerate(pd.date_range(start, periods=120, freq="2min")):
+        common = {
+            "actual_entry_timestamp": timestamp,
+            "exit_timestamp": timestamp + pd.Timedelta(minutes=1),
+            "sized_leverage": 1.0,
+            "expected_holding_seconds": 60.0,
+            "stop_bps": 50.0,
+            "funding_bps": 0.0,
+            "stress_1_5x_bps": 6.0,
+            "stress_2x_bps": 2.0,
+            "time_to_target_seconds": 30,
+            "exit_seconds": 60,
+            "outcome": "TARGET",
+            "p_target": 0.6,
+        }
+        rows.extend(
+            [
+                common
+                | {
+                    "side": 1,
+                    "policy_selection_score": 2.0,
+                    "expected_log_utility": 0.001,
+                    "calibrated_ev_bps": 10.0,
+                    "net_bps": 10.0,
+                    "log_utility": 0.001,
+                    "expert_id": f"long-{number}",
+                },
+                common
+                | {
+                    "side": 1,
+                    "policy_selection_score": 1.0,
+                    "expected_log_utility": -0.001,
+                    "calibrated_ev_bps": -10.0,
+                    "net_bps": -10.0,
+                    "log_utility": -0.001,
+                    "expert_id": f"long-loser-{number}",
+                },
+                common
+                | {
+                    "side": -1,
+                    "policy_selection_score": 3.0,
+                    "expected_log_utility": -0.002,
+                    "calibrated_ev_bps": -20.0,
+                    "net_bps": -20.0,
+                    "log_utility": -0.002,
+                    "expert_id": f"short-global-{number}",
+                },
+                common
+                | {
+                    "side": -1,
+                    "policy_selection_score": 0.0,
+                    "expected_log_utility": -0.003,
+                    "calibrated_ev_bps": -30.0,
+                    "net_bps": -30.0,
+                    "log_utility": -0.003,
+                    "expert_id": f"short-loser-{number}",
+                },
+            ]
+        )
+    frame = pd.DataFrame(rows)
+    calibrations = policy.fit_side_post_selection_calibrations(frame, "policy_selection_score")
+    scored = policy.apply_side_post_selection_calibrations(frame, calibrations)
+    selected = scored.loc[scored["post_selection_candidate"]]
+    assert len(selected) == 240
+    assert selected.groupby("actual_entry_timestamp")["side"].nunique().eq(2).all()
+    scored["immediate_expected_log_utility"] = scored["expected_log_utility"]
+    scored["action_advantage_log_utility"] = scored["expected_log_utility"]
+    scored = policy.apply_entry_controllers(scored, {1: "MYOPIC", -1: "DISABLED"})
+    trades, _ = policy.sequential_replay(scored, {1: 0.0, -1: float("inf")}, 8.0)
+    assert len(trades) == 120
+    assert trades["side"].eq(1).all()
+    assert trades["entry_action"].eq("ENTER_LONG").all()
+
+
+def test_lambdamart_uses_nonnegative_within_state_relevance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, np.ndarray] = {}
+
+    class FakeRanker:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def fit(self, values: np.ndarray, target: np.ndarray, *, qid: np.ndarray) -> Any:
+            captured["target"] = target
+            captured["qid"] = qid
+            return self
+
+    monkeypatch.setattr(policy, "XGBRanker", FakeRanker)
+    timestamps = pd.to_datetime(["2026-01-01T00:00:00Z"] * 3 + ["2026-01-01T00:01:00Z"] * 3)
+    frame = pd.DataFrame({name: np.zeros(6) for name in policy.MODEL_FEATURES})
+    frame["actual_entry_timestamp"] = timestamps
+    frame["side"] = 1
+    frame["plan_id"] = ["a", "b", "c", "a", "b", "c"]
+    frame["log_utility"] = [-0.2, 0.3, 0.1, 0.5, -0.1, 0.0]
+    policy.fit_policy_ranker("xgboost_ranker_cuda", frame)
+    target = captured["target"]
+    assert target.min() == 0
+    assert np.array_equal(np.sort(target[:3]), np.asarray([0.0, 1.0, 2.0]))
+    assert np.array_equal(np.sort(target[3:]), np.asarray([0.0, 1.0, 2.0]))
+    assert np.array_equal(captured["qid"], np.asarray([0, 0, 0, 1, 1, 1]))
 
 
 def test_winner_calibration_uses_the_same_global_score_as_action_selection() -> None:
@@ -1140,9 +1248,7 @@ def test_winner_calibration_uses_the_same_global_score_as_action_selection() -> 
             ]
         )
     frame = pd.DataFrame(rows)
-    calibration = policy.fit_post_selection_calibration(
-        frame, "policy_selection_score"
-    )
+    calibration = policy.fit_post_selection_calibration(frame, "policy_selection_score")
     scored = policy.apply_post_selection_calibration(frame, calibration)
     selected = scored.loc[scored["post_selection_candidate"]]
     assert selected["expert_id"].str.startswith("global-winner").all()
@@ -1168,7 +1274,7 @@ def test_global_policy_ranker_challenger_is_selected_only_on_paired_improvement(
                 },
                 {
                     "actual_entry_timestamp": timestamp,
-                    "side": -1,
+                    "side": 1,
                     "plan_id": "ranker-choice",
                     "expert_id": "ranker-choice",
                     "net_bps": 10.0,
@@ -1273,6 +1379,64 @@ def test_controller_and_threshold_are_selected_jointly() -> None:
     assert audit["MYOPIC"]["selected_threshold_bps"] == 1.0
     assert audit["MYOPIC"]["metrics"]["trades"] == count
     assert audit["MYOPIC"]["selection_utility"] > 0
+
+
+def test_outer_test_frontier_is_measured_before_side_disable() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    entries = pd.date_range(start, periods=30, freq="2min")
+    pieces = []
+    for side in (1, -1):
+        pieces.append(
+            pd.DataFrame(
+                {
+                    "actual_entry_timestamp": entries,
+                    "exit_timestamp": entries + pd.Timedelta(minutes=1),
+                    "calibrated_ev_bps": 10.0,
+                    "immediate_expected_log_utility": 0.001,
+                    "action_advantage_log_utility": 0.001,
+                    "expected_log_utility": 0.001,
+                    "p_target": 0.6,
+                    "expert_id": f"diagnostic-{side}",
+                    "side": side,
+                    "stop_bps": 50.0,
+                    "net_bps": 10.0,
+                    "funding_bps": 0.0,
+                    "stress_1_5x_bps": 6.0,
+                    "stress_2x_bps": 2.0,
+                    "time_to_target_seconds": 30,
+                    "exit_seconds": 60,
+                    "outcome": "TARGET",
+                }
+            )
+        )
+    scored = pd.concat(pieces, ignore_index=True)
+    fee = policy.FeeContract(2.0, 4.0, 0.0, "test")
+    frontiers = policy.diagnostic_side_frontiers(scored, fee, start, start + pd.Timedelta(days=1))
+    policy.apply_entry_controllers(scored, {1: "DISABLED", -1: "DISABLED"})
+    assert frontiers["LONG"]["MYOPIC"][0]["metrics"]["trades"] == 30
+    assert frontiers["SHORT"]["CONTINUATION"][0]["metrics"]["trades"] == 30
+
+
+def test_all_winning_policy_has_infinite_profit_factor_without_non_json_float() -> None:
+    start = pd.Timestamp("2026-01-01T00:00:00Z")
+    trades = pd.DataFrame(
+        {
+            "exit_timestamp": pd.date_range(start, periods=30, freq="1D"),
+            "portfolio_return": 0.001,
+            "net_bps": 10.0,
+            "stress_1_5x_bps": 6.0,
+            "stress_2x_bps": 2.0,
+            "side": 1,
+            "risk_violation": False,
+        }
+    )
+    metrics = policy.policy_metrics(
+        trades, start, start + pd.Timedelta(days=31), weekly_bootstrap=False
+    )
+    assert metrics["profit_factor"] is None
+    assert metrics["profit_factor_is_infinite"] is True
+    assert policy.policy_gates(metrics, minimum_trades=30)["profit_factor_1_15"] is True
+    policy.json.dumps(metrics, allow_nan=False)
 
 
 def test_continuation_cannot_rescue_negative_immediate_utility() -> None:
@@ -1451,8 +1615,13 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
             },
         },
         "post_selection_calibration": {
-            "strictly_past_only": True,
-            "end": "2026-01-31T23:59:00+00:00",
+            side: {
+                "strictly_past_only": True,
+                "day_balanced": True,
+                "independent_days": 14,
+                "end": "2026-01-31T23:59:00+00:00",
+            }
+            for side in ("LONG", "SHORT")
         },
         "policy_ranker_selection": {
             "audit_period_only": True,
