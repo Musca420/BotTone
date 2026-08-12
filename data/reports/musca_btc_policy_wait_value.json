@@ -1,0 +1,69 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "entry_rule": "MIN(PAIRED_Q_ADVANTAGE, IMMEDIATE_EXPECTED_LOG_UTILITY)_GREATER_THAN_ZERO",
+  "folds": [
+    {
+      "enter_mae": 0.0598587264215754,
+      "wait_mae": 0.05959011949087384,
+      "advantage_sign_accuracy": 0.9514592019058964,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.03179387141193065,
+      "wait_mae": 0.030824285298165156,
+      "advantage_sign_accuracy": 0.955939413181089,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.17565854730671543,
+      "wait_mae": 0.17671155864126148,
+      "advantage_sign_accuracy": 0.9437440406822757,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.11698870464967649,
+      "wait_mae": 0.1169573310915731,
+      "advantage_sign_accuracy": 0.8825645074728357,
+      "dominance_violation_fraction": 0.06310675519614262
+    },
+    {
+      "enter_mae": 0.06366845603143174,
+      "wait_mae": 0.06317935112533542,
+      "advantage_sign_accuracy": 0.941352153989228,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.04920311066444786,
+      "wait_mae": 0.04750235436072257,
+      "advantage_sign_accuracy": 0.9552205916021795,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.1623356233758052,
+      "wait_mae": 0.16282120405749897,
+      "advantage_sign_accuracy": 0.9421778270086085,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.11058602385047923,
+      "wait_mae": 0.1044126897235696,
+      "advantage_sign_accuracy": 0.9376688970914586,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.0676502266712107,
+      "wait_mae": 0.06688680121104729,
+      "advantage_sign_accuracy": 0.9422590027117025,
+      "dominance_violation_fraction": 0.0
+    },
+    {
+      "enter_mae": 0.0799291847715501,
+      "wait_mae": 0.07981064454737917,
+      "advantage_sign_accuracy": 0.9463885440133032,
+      "dominance_violation_fraction": 0.0
+    }
+  ],
+  "wait_is_constant_zero": false
+}

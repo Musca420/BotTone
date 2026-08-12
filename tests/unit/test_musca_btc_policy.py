@@ -144,6 +144,46 @@ def test_fold_generator_representation_is_plan_aware() -> None:
     assert policy.GENERATOR_FEATURES != policy.base.GATING_CONTEXT
 
 
+def test_xgboost_uses_mean_loss_for_value_and_robust_loss_only_for_auxiliaries() -> None:
+    mean_model = policy._regressor("xgboost", 1)
+    robust_model = policy._regressor("xgboost", 1, robust=True)
+    assert mean_model.get_params()["objective"] == "reg:squarederror"  # type: ignore[attr-defined]
+    assert robust_model.get_params()["objective"] == "reg:pseudohubererror"  # type: ignore[attr-defined]
+
+
+def test_day_balanced_weights_equalize_days_states_and_actions() -> None:
+    first = pd.Timestamp("2026-01-01T00:00:00Z")
+    second = pd.Timestamp("2026-01-02T00:00:00Z")
+    frame = pd.DataFrame(
+        {
+            "actual_entry_timestamp": [first, first, second, second + pd.Timedelta(minutes=1)],
+            "action": ["a", "b", "a", "a"],
+        }
+    )
+    frame["weight"] = policy._day_balanced_timestamp_weights(frame)
+    frame["day"] = frame["actual_entry_timestamp"].dt.floor("D")
+    by_day = frame.groupby("day")["weight"].sum()
+    by_state = frame.groupby("actual_entry_timestamp")["weight"].sum()
+    assert by_day.iloc[0] == pytest.approx(by_day.iloc[1])
+    assert by_state.loc[first] == pytest.approx(by_day.iloc[0])
+    assert frame.loc[frame["actual_entry_timestamp"].eq(first), "weight"].nunique() == 1
+
+
+def test_monotone_affine_calibration_is_order_preserving_and_handles_constant_scores() -> None:
+    weights = np.ones(4)
+    model = policy._fit_monotone_affine(
+        np.asarray([0.0, 1.0, 2.0, 3.0]),
+        np.asarray([-2.0, -1.0, 1.0, 2.0]),
+        weights,
+    )
+    assert np.all(np.diff(model.predict(np.asarray([-1.0, 0.0, 1.0, 2.0]))) >= 0)
+    constant = policy._fit_monotone_affine(
+        np.ones(4), np.asarray([-2.0, 0.0, 2.0, 4.0]), weights
+    )
+    assert constant.slope == 0.0
+    assert constant.predict(np.asarray([0.0, 10.0])).tolist() == pytest.approx([1.0, 1.0])
+
+
 def test_local_plan_neighborhood_is_bounded_and_preserves_management_constraints() -> None:
     plans = policy.compose_parameterized_plans(_inherited_expert_rows(), round_trip_cost_bps=8.0)
     plans["actual_entry_timestamp"] = plans["entry_timestamp"]
@@ -159,6 +199,41 @@ def test_local_plan_neighborhood_is_bounded_and_preserves_management_constraints
     assert {"PARTIAL_SMALLER", "PARTIAL_LARGER"}.issubset(set(variants["local_variant"]))
     assert variants["first_exit_fraction"].between(0.10, 0.90).all()
     assert variants["plan_id"].is_unique
+
+
+def test_local_oracle_regret_never_authorizes_plan_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamp = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="1min")
+    variants = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "side": 1,
+                    "local_variant": "BASE",
+                    "net_bps": -10.0,
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "actual_entry_timestamp": timestamp,
+                    "side": 1,
+                    "local_variant": "TARGETS_TIGHTER",
+                    "net_bps": 20.0,
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    monkeypatch.setattr(policy, "label_local_plan_variants", lambda rows, fee: variants)
+    audit = policy.plan_efficiency_audit(
+        pd.DataFrame({"actual_entry_timestamp": timestamp}),
+        policy.FeeContract(2.0, 4.0, 0.0, "test"),
+    )
+    assert audit["material"] is True
+    assert audit["oracle_is_diagnostic_only"] is True
+    assert audit["execution_authorized"] is False
 
 
 def test_local_plan_labels_use_the_same_observed_path_for_every_variant(
@@ -706,6 +781,15 @@ def test_flat_fold_is_not_mislabeled_as_calibration_failure() -> None:
     ]
     sides = {"LONG": {"gates": {"stable": True}}}
     assert policy._verdict(economics, folds, metrics, sides) == "RESEARCH_PAPER_READY"
+    failed_statistics = {
+        "spa_or_reality_check": False,
+        "pbo": True,
+        "dsr": True,
+    }
+    assert (
+        policy._verdict(economics, folds, metrics, sides, failed_statistics)
+        == "NO_STABLE_OOS_POLICY"
+    )
 
 
 def test_decision_cost_contains_no_invented_non_fee_reserve(
@@ -1340,7 +1424,7 @@ def test_controller_falls_back_to_positive_myopic_policy_when_continuation_is_un
     assert audit["CONTINUATION"]["eligible"] is False
 
 
-def test_controller_and_threshold_are_selected_jointly() -> None:
+def test_diagnostic_threshold_cannot_rescue_a_negative_zero_margin_controller() -> None:
     start = pd.Timestamp("2026-01-01T00:00:00Z")
     count = policy.MINIMUM_CONTROLLER_SELECTION_TRADES
     entries = pd.date_range(start, periods=2 * count, freq="2min")
@@ -1375,10 +1459,12 @@ def test_controller_and_threshold_are_selected_jointly() -> None:
         start + pd.Timedelta(days=28),
         policy.MINIMUM_CONTINUATION_CROSSFIT_BLOCKS,
     )
-    assert selected == "MYOPIC"
-    assert audit["MYOPIC"]["selected_threshold_bps"] == 1.0
-    assert audit["MYOPIC"]["metrics"]["trades"] == count
-    assert audit["MYOPIC"]["selection_utility"] > 0
+    assert selected == "DISABLED"
+    assert audit["MYOPIC"]["selected_threshold_bps"] is None
+    assert audit["MYOPIC"]["diagnostic_best_threshold_bps"] == 1.0
+    assert audit["MYOPIC"]["metrics"]["trades"] < count
+    assert audit["MYOPIC"]["selection_utility"] < 0
+    assert audit["MYOPIC"]["threshold_selection"].startswith("DIAGNOSTIC_ONLY")
 
 
 def test_outer_test_frontier_is_measured_before_side_disable() -> None:
@@ -1608,10 +1694,16 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
             "LONG": {
                 "selection_period_only": True,
                 "outer_test_read_for_selection": False,
+                "selected": "MYOPIC",
+                "MYOPIC": {
+                    "selected_threshold_bps": 0.0,
+                    "threshold_selection": "DIAGNOSTIC_ONLY_ZERO_ACTION_VALUE_AUTHORIZATION",
+                },
             },
             "SHORT": {
                 "selection_period_only": True,
                 "outer_test_read_for_selection": False,
+                "selected": "DISABLED",
             },
         },
         "post_selection_calibration": {
@@ -1619,6 +1711,7 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
                 "strictly_past_only": True,
                 "day_balanced": True,
                 "independent_days": 14,
+                "value_calibration_method": "MONOTONE_AFFINE_DAY_BALANCED",
                 "end": "2026-01-31T23:59:00+00:00",
             }
             for side in ("LONG", "SHORT")
@@ -1627,13 +1720,41 @@ def test_preflight_requires_proportional_economic_and_causal_gates() -> None:
             "audit_period_only": True,
             "outer_test_read_for_selection": False,
         },
-        "local_plan_variants_enabled": True,
-        "local_plan_training_support": {"fit": {"added_rows": 1}},
+        "local_plan_variants_enabled": False,
+        "local_plan_training_support": {"fit": {"added_rows": 0}},
+        "plan_efficiency_audit": {
+            "oracle_is_diagnostic_only": True,
+            "execution_authorized": False,
+        },
     }
     gates = policy.preflight_gates(metrics, [fold, fold], 10)
     assert all(gates.values())
     inconsistent = [fold, fold | {"economic_calibration": {}}]
     assert not policy.preflight_gates(metrics, inconsistent, 10)["utility_ev_consistent"]
+    missing_controller = [fold, fold | {"entry_controller_selection": {}}]
+    malformed = policy.preflight_gates(metrics, missing_controller, 10)
+    assert not malformed["controller_selection_past_only"]
+    assert not malformed["zero_margin_action_value_authorization"]
+
+
+def test_multiple_comparison_gates_fail_closed_and_require_all_three_tests() -> None:
+    assert not any(policy.multiple_comparison_gates({}).values())
+    results = {
+        "spa_reality_check": {"pvalues": {"consistent": 0.01}},
+        "pbo": 0.10,
+        "deflated_sharpe_probability": 0.99,
+    }
+    assert all(policy.multiple_comparison_gates(results).values())
+    results["pbo"] = 0.21
+    assert not policy.multiple_comparison_gates(results)["pbo_0_20"]
+
+
+def test_deflated_sharpe_probability_is_finite_and_penalizes_more_trials() -> None:
+    daily = pd.Series(np.r_[np.full(80, 0.002), np.full(20, -0.001)])
+    few = policy._deflated_sharpe_probability(daily, 2)
+    many = policy._deflated_sharpe_probability(daily, 10_000)
+    assert few is not None and many is not None
+    assert 0 <= many <= few <= 1
 
 
 def test_gpu_and_cpu_paths_are_equivalent_when_cuda_is_available() -> None:

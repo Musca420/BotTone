@@ -25,7 +25,6 @@ import pandas as pd
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from arch.bootstrap import SPA
-from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import mean_absolute_error
 from sklearn.pipeline import make_pipeline
@@ -252,7 +251,13 @@ PROTOCOL = {
             "row calibration on the first two weeks followed by winner-only calibration on the "
             "next two weeks; both precede policy selection and outer test"
         ),
-        "row_calibration_weighting": "inverse number of actions at the same timestamp",
+        "mean_value_loss": "squared error for conditional mean EV and log utility",
+        "robust_auxiliary_loss": "Pseudo-Huber only for MFE, MAE and event-time auxiliaries",
+        "value_calibration": (
+            "side-specific non-decreasing affine calibration balanced by independent UTC day; "
+            "non-parametric isotonic value calibration is forbidden on two-week windows"
+        ),
+        "row_calibration_weighting": "equal UTC days and equal states within each day",
     },
     "policy_ranker": {
         "feedback": "full counterfactual reward vector for every state-action group",
@@ -295,12 +300,12 @@ PROTOCOL = {
         "plans_per_state": "variable expert-supported LONG/SHORT proposals; not ten templates",
         "objective": "view support, disagreement, horizon-specific path quantiles and Binance cost",
         "local_perturbations": (
-            "one parameter family at a time around each expert-composed plan; enabled only by "
-            "past-only local-regret audit"
+            "one parameter family at a time around each expert-composed plan; oracle local regret "
+            "is diagnostic only and cannot enable a perturbation"
         ),
         "local_training_support": (
-            "deterministic past-only sample with every local parameter family labelled by the "
-            "same execution engine before any local action can enter calibration or test"
+            "disabled until a separately preregistered past-only causal selector demonstrates "
+            "predictability; base expert-composed plans remain the executable action space"
         ),
     },
     "controller": {
@@ -319,15 +324,21 @@ PROTOCOL = {
         "risk_per_trade": RISK_PER_TRADE,
         "maximum_leverage": MAXIMUM_LEVERAGE,
         "maximum_daily_loss": MAXIMUM_DAILY_LOSS,
-        "state_features": list(STATE_FEATURES),
+        "risk_engine_state_features": list(STATE_FEATURES),
+        "learned_entry_state_features": list(MODEL_FEATURES),
+        "account_state_contract": (
+            "path-dependent account state is consumed by the deterministic one-position, "
+            "daily-loss and drawdown Risk Engine; it is not falsely presented as an "
+            "independently labelled supervised feature"
+        ),
         "entry_value": (
             "myopic coherent utility champion versus chronologically cross-fitted double-Q "
             "semi-Markov challenger; continuation is used only after positive past-only policy "
             "selection evidence and cannot make a negative immediate action enter"
         ),
         "entry_selection": (
-            "controller and preregistered EV margin are selected jointly on the same past-only "
-            "window with at least 30 executed trades and positive net log-equity"
+            "authorization is Q(action)>Q(WAIT) with zero extra EV margin, at least 30 executed "
+            "trades and positive net log-equity; nonzero margin curves are diagnostic only"
         ),
         "continuation_target": (
             "actual immediate utility plus a temporally split double-estimator value at the next "
@@ -359,8 +370,8 @@ PROTOCOL = {
         "bootstrap_unit": ["day", "week"],
         "global_trials": "research registry; all previously observed periods are contaminated",
         "frequency": (
-            "maximum sustainable frequency among preregistered EV margins; controller and margin "
-            "are selected jointly on the prior policy window, never after disabling the side"
+            "zero-margin action-value policy is the only authorization rule; preregistered EV "
+            "margin curves are diagnostic and never selected on a four-week window"
         ),
         "negative_controls": [
             "random prediction",
@@ -405,6 +416,17 @@ class Predictor(Protocol):
     def fit(self, values: np.ndarray, target: np.ndarray, **kwargs: Any) -> Predictor: ...
 
     def predict(self, values: np.ndarray) -> np.ndarray: ...
+
+
+@dataclass(frozen=True)
+class MonotoneAffineCalibrator:
+    """Small-sample value calibration that preserves the learned ordering."""
+
+    slope: float
+    intercept: float
+
+    def predict(self, values: np.ndarray) -> np.ndarray:
+        return self.intercept + self.slope * np.asarray(values, dtype=float)
 
 
 @dataclass(frozen=True)
@@ -621,14 +643,22 @@ def build_research_registry() -> dict[str, Any]:
                 "protocol_hash": PROTOCOL_HASH,
                 "git_commit": _git_commit(),
                 "hypothesis": (
-                    "preserving distinct specialist horizon proposals and making the managed "
-                    "critic plan-aware removes the e556 action-space collapse"
+                    "conditional-mean value loss, low-capacity day-balanced calibration, a fixed "
+                    "zero action-value authorization rule and diagnostic-only local-plan oracle "
+                    "remove the measured selection instability without changing costs or gates"
                 ),
                 "changes": [
-                    "variable deduplicated plans proposed by the expert views",
-                    "horizon-specific first-passage quantiles without cross-horizon averaging",
-                    "plan-aware fold-local managed critic",
-                    "versioned state-action labels preserving prior protocol artifacts",
+                    "squared-loss XGBoost heads for conditional mean EV and log utility",
+                    "side-specific monotone affine calibration balanced by UTC day",
+                    (
+                        "oracle local-plan regret retained as diagnostic and removed from "
+                        "authorization"
+                    ),
+                    (
+                        "zero-margin Q(action)>Q(WAIT) controller with threshold curves "
+                        "diagnostic only"
+                    ),
+                    "unchanged canonical labels, Binance 1x costs, gates and sealed holdout",
                 ],
                 "periods_observed": [
                     HISTORICAL_START.isoformat(),
@@ -2287,6 +2317,9 @@ def plan_efficiency_audit(rows: pd.DataFrame, fee: FeeContract) -> dict[str, Any
         "winner_by_variant": winner["local_variant"].value_counts().to_dict(),
         "material": mean_regret > LOCAL_PLAN_REGRET_MATERIAL_BPS,
         "oracle_is_diagnostic_only": True,
+        "causal_selector_evidence": False,
+        "execution_authorized": False,
+        "authorization_reason": "ORACLE_REGRET_CANNOT_AUTHORIZE_A_CAUSAL_ACTION",
     }
 
 
@@ -2402,8 +2435,23 @@ def _generator_x(rows: pd.DataFrame) -> np.ndarray:
     return values
 
 
+def _predict_array(model: Any, method: str, values: np.ndarray) -> np.ndarray:
+    """Keep XGBoost inference on the same CUDA device used for fitting."""
+    input_values: Any = values
+    cupy: Any | None = None
+    if isinstance(model, (XGBClassifier, XGBRanker, XGBRegressor)):
+        import cupy as cp
+
+        cupy = cp
+        input_values = cp.asarray(values)
+    predicted = getattr(model, method)(input_values)
+    if cupy is not None and isinstance(predicted, cupy.ndarray):
+        return np.asarray(cupy.asnumpy(predicted))
+    return np.asarray(predicted)
+
+
 def _leaf_matrix(model: Any, values: np.ndarray) -> np.ndarray:
-    leaves = np.asarray(model.apply(values), dtype=np.int32)
+    leaves = np.asarray(_predict_array(model, "apply", values), dtype=np.int32)
     if leaves.ndim == 1:
         leaves = leaves[:, None]
     if leaves.ndim != 2 or len(leaves) != len(values):
@@ -2651,7 +2699,7 @@ def apply_fold_expert_library(rows: pd.DataFrame, library: dict[str, Any]) -> pd
         columns["managed_expert_stop_rate"][positions] = stop
         columns["managed_expert_log_opportunities"][positions] = log_opportunities
         columns["managed_generator_score_bps"][positions] = np.asarray(
-            model.predict(values), dtype=float
+            _predict_array(model, "predict", values), dtype=float
         )
         best_tree[positions] = winning_tree
         best_leaf[positions] = winning_leaf
@@ -2773,6 +2821,45 @@ def _timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
     return np.asarray(1.0 / count.to_numpy(float), dtype=float)
 
 
+def _day_balanced_timestamp_weights(rows: pd.DataFrame) -> np.ndarray:
+    """Give each UTC day equal mass, then each state and action equal mass within it."""
+    timestamp = pd.to_datetime(rows["actual_entry_timestamp"], utc=True)
+    day = timestamp.dt.floor("D")
+    actions_per_state = rows.groupby("actual_entry_timestamp")[
+        "actual_entry_timestamp"
+    ].transform("size").to_numpy(float)
+    states = pd.DataFrame({"day": day, "timestamp": timestamp}).drop_duplicates()
+    states_per_day = states.groupby("day").size()
+    weights = 1.0 / (actions_per_state * day.map(states_per_day).to_numpy(float))
+    return weights * len(weights) / weights.sum()
+
+
+def _fit_monotone_affine(
+    predicted: np.ndarray,
+    actual: np.ndarray,
+    weights: np.ndarray,
+) -> MonotoneAffineCalibrator:
+    prediction = np.asarray(predicted, dtype=float)
+    outcome = np.asarray(actual, dtype=float)
+    sample_weight = np.asarray(weights, dtype=float)
+    if not len(prediction) or not (
+        np.isfinite(prediction).all()
+        and np.isfinite(outcome).all()
+        and np.isfinite(sample_weight).all()
+        and np.all(sample_weight > 0)
+    ):
+        raise ValueError("invalid affine calibration data")
+    predicted_mean = float(np.average(prediction, weights=sample_weight))
+    actual_mean = float(np.average(outcome, weights=sample_weight))
+    centered = prediction - predicted_mean
+    variance = float(np.average(centered * centered, weights=sample_weight))
+    covariance = float(
+        np.average(centered * (outcome - actual_mean), weights=sample_weight)
+    )
+    slope = max(0.0, covariance / variance) if variance > 1e-15 else 0.0
+    return MonotoneAffineCalibrator(slope=slope, intercept=actual_mean - slope * predicted_mean)
+
+
 def _permute_outcomes(rows: pd.DataFrame, seed: int) -> pd.DataFrame:
     output = rows.copy()
     columns = [
@@ -2790,7 +2877,7 @@ def _permute_outcomes(rows: pd.DataFrame, seed: int) -> pd.DataFrame:
 
 
 def _probabilities(model: Any, values: np.ndarray) -> np.ndarray:
-    raw = np.asarray(model.predict_proba(values), dtype=float)
+    raw = np.asarray(_predict_array(model, "predict_proba", values), dtype=float)
     result = np.zeros((len(values), 3), dtype=float)
     result[:, np.asarray(model.classes_, dtype=int)] = raw
     return result
@@ -2819,13 +2906,13 @@ def _classifier(kind: str, seed: int) -> Any:
     )
 
 
-def _regressor(kind: str, seed: int) -> Predictor:
+def _regressor(kind: str, seed: int, *, robust: bool = False) -> Predictor:
     if kind == "ridge":
         return cast(Predictor, make_pipeline(StandardScaler(), Ridge(alpha=20.0)))
     return cast(
         Predictor,
         XGBRegressor(
-            objective="reg:pseudohubererror",
+            objective="reg:pseudohubererror" if robust else "reg:squarederror",
             tree_method="hist",
             device="cuda",
             n_estimators=280,
@@ -2895,7 +2982,7 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
     for number, target in enumerate(("mfe_bps", "mae_bps"), start=10):
         auxiliaries[target] = _fit_regressor(
             kind,
-            _regressor(kind, MODEL_SEEDS[0] + number),
+            _regressor(kind, MODEL_SEEDS[0] + number, robust=True),
             values,
             fit[target].to_numpy(float),
             weights,
@@ -2903,14 +2990,14 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
     target_rows = outcome == OUTCOME_TARGET
     auxiliaries["time_to_target_seconds"] = _fit_regressor(
         kind,
-        _regressor(kind, MODEL_SEEDS[0] + 20),
+        _regressor(kind, MODEL_SEEDS[0] + 20, robust=True),
         values[target_rows],
         fit.loc[target_rows, "time_to_target_seconds"].to_numpy(float),
         weights[target_rows],
     )
     auxiliaries["exit_seconds"] = _fit_regressor(
         kind,
-        _regressor(kind, MODEL_SEEDS[0] + 21),
+        _regressor(kind, MODEL_SEEDS[0] + 21, robust=True),
         values,
         fit["exit_seconds"].to_numpy(float),
         weights,
@@ -2943,7 +3030,7 @@ def fit_probability_head(kind: str, fit: pd.DataFrame) -> dict[str, Any]:
 
 def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str, Any]:
     values = _x(calibration)
-    weights = _timestamp_weights(calibration)
+    weights = _day_balanced_timestamp_weights(calibration)
     raw_probability = np.clip(_probabilities(head["classifier"], values), 1e-6, 1.0)
     outcome = calibration["event_class"].to_numpy(int)
     probability = LogisticRegression(C=1.0, max_iter=2_000, random_state=20260831).fit(
@@ -2951,11 +3038,17 @@ def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str
     )
     calibrated_probability = _probabilities(probability, np.log(raw_probability))
     conditional_bps = np.column_stack(
-        [np.asarray(head["conditional"][event].predict(values), dtype=float) for event in range(3)]
+        [
+            np.asarray(_predict_array(head["conditional"][event], "predict", values), dtype=float)
+            for event in range(3)
+        ]
     )
     conditional_utility = np.column_stack(
         [
-            np.asarray(head["conditional_utility"][event].predict(values), dtype=float)
+            np.asarray(
+                _predict_array(head["conditional_utility"][event], "predict", values),
+                dtype=float,
+            )
             for event in range(3)
         ]
     )
@@ -2965,29 +3058,38 @@ def fit_calibration(head: dict[str, Any], calibration: pd.DataFrame) -> dict[str
             "log_utility": np.sum(calibrated_probability * conditional_utility, axis=1),
         },
         "direct": {
-            "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
-            "log_utility": np.asarray(head["direct"]["log_utility"].predict(values), dtype=float),
+            "net_bps": np.asarray(
+                _predict_array(head["direct"]["net_bps"], "predict", values), dtype=float
+            ),
+            "log_utility": np.asarray(
+                _predict_array(head["direct"]["log_utility"], "predict", values), dtype=float
+            ),
         },
     }
     value = {
         name: {
-            "net_bps": IsotonicRegression(out_of_bounds="clip").fit(
-                raw["net_bps"], calibration["net_bps"].to_numpy(float), sample_weight=weights
+            "net_bps": _fit_monotone_affine(
+                raw["net_bps"], calibration["net_bps"].to_numpy(float), weights
             ),
-            "log_utility": IsotonicRegression(out_of_bounds="clip").fit(
+            "log_utility": _fit_monotone_affine(
                 raw["log_utility"],
                 calibration["log_utility"].to_numpy(float),
-                sample_weight=weights,
+                weights,
             ),
         }
         for name, raw in raw_values.items()
     }
     residuals: dict[str, list[float]] = {}
     for name in ("mfe_bps", "mae_bps"):
-        predicted = np.asarray(head["aux"][name].predict(values), dtype=float)
+        predicted = np.asarray(_predict_array(head["aux"][name], "predict", values), dtype=float)
         residual = calibration[name].to_numpy(float) - predicted
         residuals[name] = [float(np.quantile(residual, value)) for value in (0.10, 0.50, 0.90)]
-    return {"probability": probability, "value": value, "residual_quantiles": residuals}
+    return {
+        "probability": probability,
+        "value": value,
+        "value_calibration_method": "MONOTONE_AFFINE_DAY_BALANCED",
+        "residual_quantiles": residuals,
+    }
 
 
 def score_actions(
@@ -3002,11 +3104,17 @@ def score_actions(
     raw_probability = np.clip(_probabilities(head["classifier"], values), 1e-6, 1.0)
     probability = _probabilities(calibration["probability"], np.log(raw_probability))
     conditional_bps = np.column_stack(
-        [np.asarray(head["conditional"][event].predict(values), dtype=float) for event in range(3)]
+        [
+            np.asarray(_predict_array(head["conditional"][event], "predict", values), dtype=float)
+            for event in range(3)
+        ]
     )
     conditional_utility = np.column_stack(
         [
-            np.asarray(head["conditional_utility"][event].predict(values), dtype=float)
+            np.asarray(
+                _predict_array(head["conditional_utility"][event], "predict", values),
+                dtype=float,
+            )
             for event in range(3)
         ]
     )
@@ -3016,8 +3124,12 @@ def score_actions(
             "log_utility": np.sum(probability * conditional_utility, axis=1),
         },
         "direct": {
-            "net_bps": np.asarray(head["direct"]["net_bps"].predict(values), dtype=float),
-            "log_utility": np.asarray(head["direct"]["log_utility"].predict(values), dtype=float),
+            "net_bps": np.asarray(
+                _predict_array(head["direct"]["net_bps"], "predict", values), dtype=float
+            ),
+            "log_utility": np.asarray(
+                _predict_array(head["direct"]["log_utility"], "predict", values), dtype=float
+            ),
         },
     }
     output = rows.copy()
@@ -3059,12 +3171,15 @@ def score_actions(
         else np.full(len(output), MAXIMUM_HORIZON_SECONDS, dtype=float)
     )
     output["expected_time_to_target_seconds"] = np.clip(
-        np.asarray(head["aux"]["time_to_target_seconds"].predict(values), dtype=float),
+        np.asarray(
+            _predict_array(head["aux"]["time_to_target_seconds"], "predict", values),
+            dtype=float,
+        ),
         1.0,
         horizon,
     )
     output["expected_holding_seconds"] = np.clip(
-        np.asarray(head["aux"]["exit_seconds"].predict(values), dtype=float),
+        np.asarray(_predict_array(head["aux"]["exit_seconds"], "predict", values), dtype=float),
         1.0,
         horizon,
     )
@@ -3075,7 +3190,7 @@ def score_actions(
         output["expected_log_utility"] * 3_600 / output["expected_holding_seconds"]
     )
     for name in ("mfe_bps", "mae_bps"):
-        center = np.asarray(head["aux"][name].predict(values), dtype=float)
+        center = np.asarray(_predict_array(head["aux"][name], "predict", values), dtype=float)
         for quantile, residual in zip(
             (10, 50, 90), calibration["residual_quantiles"][name], strict=True
         ):
@@ -3244,7 +3359,9 @@ def fit_policy_ranker(kind: str, rows: pd.DataFrame) -> dict[str, Any]:
 
 def score_policy_ranker(rows: pd.DataFrame, ranker: dict[str, Any]) -> pd.DataFrame:
     output = rows.copy()
-    output["policy_selection_score"] = np.asarray(ranker["model"].predict(_x(output)), dtype=float)
+    output["policy_selection_score"] = np.asarray(
+        _predict_array(ranker["model"], "predict", _x(output)), dtype=float
+    )
     output["policy_ranker"] = str(ranker["kind"])
     return output
 
@@ -3416,15 +3533,9 @@ def fit_post_selection_calibration(
     realized_ev = selected["net_bps"].to_numpy(float)
     realized_utility = selected["log_utility"].to_numpy(float)
     day = pd.to_datetime(selected["actual_entry_timestamp"], utc=True).dt.floor("D")
-    day_counts = day.map(day.value_counts()).to_numpy(float)
-    weights = 1.0 / day_counts
-    weights *= len(weights) / weights.sum()
-    ev_model = IsotonicRegression(out_of_bounds="clip").fit(
-        selection_score, realized_ev, sample_weight=weights
-    )
-    utility_model = IsotonicRegression(out_of_bounds="clip").fit(
-        selection_score, realized_utility, sample_weight=weights
-    )
+    weights = _day_balanced_timestamp_weights(selected)
+    ev_model = _fit_monotone_affine(selection_score, realized_ev, weights)
+    utility_model = _fit_monotone_affine(selection_score, realized_utility, weights)
     calibrated_ev = np.asarray(ev_model.predict(selection_score), dtype=float)
     calibrated_utility = np.asarray(utility_model.predict(selection_score), dtype=float)
     timestamp = pd.to_datetime(selected["actual_entry_timestamp"], utc=True)
@@ -3439,6 +3550,9 @@ def fit_post_selection_calibration(
         "start": timestamp.min().isoformat(),
         "end": timestamp.max().isoformat(),
         "selection_score_column": selection_score_column,
+        "value_calibration_method": "MONOTONE_AFFINE_DAY_BALANCED",
+        "ev_calibration_slope": ev_model.slope,
+        "utility_calibration_slope": utility_model.slope,
         "mean_selection_score": float(np.mean(selection_score)),
         "preselection_predicted_ev_bps": float(np.mean(raw_ev)),
         "realized_selected_ev_bps": float(np.mean(realized_ev)),
@@ -3563,8 +3677,8 @@ def _double_state_value(
 ) -> pd.Series:
     """Select with one estimator and evaluate with the other, symmetrically."""
     values = _x(rows)
-    prediction_a = np.asarray(backup[0].predict(values), dtype=float)
-    prediction_b = np.asarray(backup[1].predict(values), dtype=float)
+    prediction_a = np.asarray(_predict_array(backup[0], "predict", values), dtype=float)
+    prediction_b = np.asarray(_predict_array(backup[1], "predict", values), dtype=float)
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(rows["actual_entry_timestamp"], utc=True).to_numpy(),
@@ -3605,7 +3719,9 @@ def continuation_targets(
         if isinstance(backup_model, tuple):
             state_value = _double_state_value(ordered, backup_model)
         else:
-            predicted_immediate = np.asarray(backup_model.predict(_x(ordered)), dtype=float)
+            predicted_immediate = np.asarray(
+                _predict_array(backup_model, "predict", _x(ordered)), dtype=float
+            )
             state_value = (
                 pd.DataFrame(
                     {
@@ -3732,14 +3848,17 @@ def fit_continuation_calibration(models: dict[str, Any], rows: pd.DataFrame) -> 
             - complete["target_q_wait_log_utility"].to_numpy(float)
         ),
     }
-    calibration = {
-        action: IsotonicRegression(out_of_bounds="clip").fit(
-            np.asarray(cast(Predictor, models[action]).predict(values), dtype=float),
+    weights = _day_balanced_timestamp_weights(complete)
+    calibration: dict[str, Any] = {
+        action: _fit_monotone_affine(
+            np.asarray(_predict_array(models[action], "predict", values), dtype=float),
             target[action],
+            weights,
         )
         for action in ("enter", "wait", "advantage")
     }
     calibration["target_source"] = "DOUBLE_TEMPORAL_FITTED_IMMEDIATE_VALUE"
+    calibration["method"] = "MONOTONE_AFFINE_DAY_BALANCED"
     return calibration
 
 
@@ -3753,10 +3872,8 @@ def score_continuation(
     output = rows.copy() if copy else rows
     values = _x(output)
     for action in ("enter", "wait", "advantage"):
-        raw = np.asarray(cast(Predictor, models[action]).predict(values), dtype=float)
-        output[f"q_{action}_log_utility"] = cast(IsotonicRegression, calibration[action]).predict(
-            raw
-        )
+        raw = np.asarray(_predict_array(models[action], "predict", values), dtype=float)
+        output[f"q_{action}_log_utility"] = cast(Predictor, calibration[action]).predict(raw)
     output["q_wait_log_utility"] = output.groupby("actual_entry_timestamp", sort=False)[
         "q_wait_log_utility"
     ].transform("mean")
@@ -4638,14 +4755,14 @@ def select_entry_controller(
     end: pd.Timestamp,
     continuation_blocks: int,
 ) -> tuple[str, dict[str, Any]]:
-    """Promote continuation only when it beats a viable myopic controller past-only."""
+    """Authorize only positive action value at zero extra margin, past-only."""
     candidates = {
         "MYOPIC": "immediate_expected_log_utility",
         "CONTINUATION": "action_advantage_log_utility",
     }
     audit: dict[str, Any] = {}
     for name, value_column in candidates.items():
-        threshold, frontier = _choose_frequency_threshold(
+        diagnostic_threshold, frontier = _choose_frequency_threshold(
             scored,
             fee,
             start,
@@ -4653,19 +4770,20 @@ def select_entry_controller(
             value_column=value_column,
             minimum_trades=MINIMUM_CONTROLLER_SELECTION_TRADES,
         )
-        selected_frontier = next(
-            (item for item in frontier if item["threshold_bps"] == threshold),
-            frontier[0],
-        )
+        zero_margin = next(item for item in frontier if item["threshold_bps"] == 0.0)
         enough_continuation_blocks = (
             name != "CONTINUATION" or continuation_blocks >= MINIMUM_CONTINUATION_CROSSFIT_BLOCKS
         )
-        eligible = enough_continuation_blocks and math.isfinite(threshold)
+        eligible = enough_continuation_blocks and bool(zero_margin["eligible"])
         audit[name] = {
             "value_column": value_column,
-            "metrics": selected_frontier["metrics"],
-            "selection_utility": selected_frontier["selection_utility"],
-            "selected_threshold_bps": threshold if math.isfinite(threshold) else None,
+            "metrics": zero_margin["metrics"],
+            "selection_utility": zero_margin["selection_utility"],
+            "selected_threshold_bps": 0.0 if eligible else None,
+            "diagnostic_best_threshold_bps": (
+                diagnostic_threshold if math.isfinite(diagnostic_threshold) else None
+            ),
+            "threshold_selection": "DIAGNOSTIC_ONLY_ZERO_ACTION_VALUE_AUTHORIZATION",
             "frequency_pnl_frontier": frontier,
             "minimum_trades": MINIMUM_CONTROLLER_SELECTION_TRADES,
             "continuation_crossfit_blocks": continuation_blocks,
@@ -4871,7 +4989,7 @@ def walk_forward(
             resume=resume,
         )
         plan_audit = plan_efficiency_audit(raw_model_audit, fee)
-        local_plan_variants_enabled = bool(plan_audit["material"])
+        local_plan_variants_enabled = bool(plan_audit["execution_authorized"])
         local_plan_training_support = {
             "fit": {"sampled_states": 0, "added_rows": 0},
             "inner_calibration": {"sampled_states": 0, "added_rows": 0},
@@ -5297,7 +5415,7 @@ def _policy_return_matrix(folds: list[dict[str, Any]]) -> np.ndarray:
     return np.column_stack([column[:length] for column in columns])
 
 
-def _spa_reality_check(folds: list[dict[str, Any]]) -> dict[str, float] | None:
+def _spa_reality_check(folds: list[dict[str, Any]]) -> dict[str, Any] | None:
     returns = _policy_return_matrix(folds)
     if len(returns) < 20 or not returns.shape[1]:
         return None
@@ -5310,7 +5428,14 @@ def _spa_reality_check(folds: list[dict[str, Any]]) -> dict[str, float] | None:
         seed=20260831,
     )
     test.compute()
-    return {str(name): float(value) for name, value in test.pvalues.items()}
+    return {
+        "scope": "CURRENT_PROTOCOL_PREREGISTERED_THRESHOLDS_VS_FLAT",
+        "candidate_count": int(returns.shape[1]),
+        "independent_unit": "UTC_DAY",
+        "pvalues": {str(name): float(value) for name, value in test.pvalues.items()},
+        "global_historical_return_matrix_available": False,
+        "global_attempts_accounted_separately_by_dsr": True,
+    }
 
 
 def _deflated_sharpe_probability(daily: pd.Series, trials: int) -> float | None:
@@ -5322,11 +5447,18 @@ def _deflated_sharpe_probability(daily: pd.Series, trials: int) -> float | None:
     scale = float(values.std(ddof=0))
     skewness = float(np.mean(centered**3) / scale**3)
     excess_kurtosis = float(np.mean(centered**4) / scale**4 - 3)
-    benchmark = NormalDist().inv_cdf(1 - 1 / max(trials, 2)) / math.sqrt(len(values))
+    trial_count = max(int(trials), 2)
+    euler_gamma = 0.5772156649015329
+    sharpe_standard_deviation = 1 / math.sqrt(len(values) - 1)
+    benchmark = sharpe_standard_deviation * (
+        (1 - euler_gamma) * NormalDist().inv_cdf(1 - 1 / trial_count)
+        + euler_gamma * NormalDist().inv_cdf(1 - 1 / (trial_count * math.e))
+    )
     standard_error = math.sqrt(
         max(
             1e-12,
-            (1 - skewness * sharpe + (excess_kurtosis + 2) * sharpe**2 / 4) / len(values),
+            (1 - skewness * sharpe + (excess_kurtosis + 2) * sharpe**2 / 4)
+            / (len(values) - 1),
         )
     )
     return float(NormalDist().cdf((sharpe - benchmark) / standard_error))
@@ -5350,8 +5482,6 @@ def _pbo(fold_diagnostics: list[dict[str, Any]]) -> float | None:
     from itertools import combinations
 
     for selected in combinations(range(len(performance)), split):
-        if 0 not in selected:
-            continue
         training = np.asarray(selected, dtype=int)
         testing = np.asarray(
             [index for index in range(len(performance)) if index not in selected], dtype=int
@@ -5360,6 +5490,21 @@ def _pbo(fold_diagnostics: list[dict[str, Any]]) -> float | None:
         ranks = pd.Series(performance[testing].mean(axis=0)).rank(method="average", pct=True)
         outcomes.append(float(ranks.iloc[winner]) <= 0.5)
     return float(np.mean(outcomes)) if outcomes else None
+
+
+def multiple_comparison_gates(results: dict[str, Any]) -> dict[str, bool]:
+    spa = results.get("spa_reality_check")
+    spa_consistent = (
+        spa.get("pvalues", {}).get("consistent") if isinstance(spa, dict) else None
+    )
+    pbo = results.get("pbo")
+    dsr = results.get("deflated_sharpe_probability")
+    return {
+        "spa_reality_check_0_05": spa_consistent is not None
+        and float(spa_consistent) <= 0.05,
+        "pbo_0_20": pbo is not None and float(pbo) <= 0.20,
+        "deflated_sharpe_0_95": dsr is not None and float(dsr) >= 0.95,
+    }
 
 
 def fit_forward_bundle(
@@ -5393,9 +5538,7 @@ def fit_forward_bundle(
     )
     calibration = apply_fold_expert_library(raw_calibration, library)
     selection = apply_fold_expert_library(raw_selection, library)
-    local_plan_variants_enabled = (
-        sum(bool(item.get("local_plan_variants_enabled")) for item in folds) > len(folds) / 2
-    )
+    local_plan_variants_enabled = False
     local_plan_training_support = {"fit": {"sampled_states": 0, "added_rows": 0}}
     if local_plan_variants_enabled:
         augmented_fit, local_plan_training_support["fit"] = augment_local_plan_training_support(
@@ -5606,6 +5749,7 @@ def _verdict(
     folds: list[dict[str, Any]],
     metrics: dict[str, Any],
     sides: dict[str, Any],
+    statistical_gates: dict[str, bool] | None = None,
 ) -> str:
     if (
         not economics["has_positive_unconditional_action"]
@@ -5629,7 +5773,11 @@ def _verdict(
     if not audited or not all(math.isfinite(float(value)) for value in audited):
         return "NO_CALIBRATED_POLICY"
     side_enabled = any(all(result["gates"].values()) for result in sides.values())
-    if not all(policy_gates(metrics).values()) or not side_enabled:
+    if (
+        not all(policy_gates(metrics).values())
+        or not side_enabled
+        or (statistical_gates is not None and not all(statistical_gates.values()))
+    ):
         return "NO_STABLE_OOS_POLICY"
     return "RESEARCH_PAPER_READY"
 
@@ -5725,6 +5873,20 @@ def append_experiment_result(verdict: str, metrics: dict[str, Any]) -> None:
     _atomic_json(EXPERIMENT_LEDGER, {"experiments": experiments})
 
 
+def _controller_audit_uses_zero_margin(side_audit: dict[str, Any]) -> bool:
+    selected = str(side_audit.get("selected", "MISSING"))
+    if selected == "DISABLED":
+        return True
+    selected_audit = side_audit.get(selected)
+    return bool(
+        isinstance(selected_audit, dict)
+        and selected_audit.get("selected_threshold_bps") == 0.0
+        and str(selected_audit.get("threshold_selection", "")).startswith(
+            "DIAGNOSTIC_ONLY_ZERO_ACTION_VALUE"
+        )
+    )
+
+
 def preflight_gates(
     metrics: dict[str, Any], folds: list[dict[str, Any]], total_fold_count: int
 ) -> dict[str, bool]:
@@ -5758,10 +5920,19 @@ def preflight_gates(
             for item in folds
         ),
         "controller_selection_past_only": all(
-            all(
+            set(item.get("entry_controller_selection", {})) == {"LONG", "SHORT"}
+            and all(
                 bool(side_audit.get("selection_period_only"))
                 and not bool(side_audit.get("outer_test_read_for_selection", True))
-                for side_audit in item.get("entry_controller_selection", {}).values()
+                for side_audit in item["entry_controller_selection"].values()
+            )
+            for item in folds
+        ),
+        "zero_margin_action_value_authorization": all(
+            set(item.get("entry_controller_selection", {})) == {"LONG", "SHORT"}
+            and all(
+                _controller_audit_uses_zero_margin(side_audit)
+                for side_audit in item["entry_controller_selection"].values()
             )
             for item in folds
         ),
@@ -5770,7 +5941,9 @@ def preflight_gates(
             and all(
                 bool(side_audit.get("strictly_past_only"))
                 and bool(side_audit.get("day_balanced"))
-                and int(side_audit.get("independent_days", 0)) > 0
+                and int(side_audit.get("independent_days", 0)) >= 10
+                and side_audit.get("value_calibration_method")
+                == "MONOTONE_AFFINE_DAY_BALANCED"
                 and pd.Timestamp(side_audit["end"]) < pd.Timestamp(item["selection_start"])
                 for side_audit in item["post_selection_calibration"].values()
             )
@@ -5783,10 +5956,10 @@ def preflight_gates(
             )
             for item in folds
         ),
-        "local_actions_supported_in_fit": all(
-            not item.get("local_plan_variants_enabled")
-            or int(item.get("local_plan_training_support", {}).get("fit", {}).get("added_rows", 0))
-            > 0
+        "local_plan_oracle_diagnostic_only": all(
+            not bool(item.get("local_plan_variants_enabled"))
+            and bool(item.get("plan_efficiency_audit", {}).get("oracle_is_diagnostic_only"))
+            and not bool(item.get("plan_efficiency_audit", {}).get("execution_authorized", True))
             for item in folds
         ),
     }
@@ -5965,11 +6138,8 @@ def train(*, resume: bool = False) -> dict[str, Any]:
     metrics = policy_metrics(trades, audit_start, audit_end)
     sides = _side_metrics(trades, audit_start, audit_end)
     verdict = _verdict(economics, folds, metrics, sides)
-    gates = policy_gates(metrics)
-    stage_reports = write_stage_reports(folds, metrics, gates)
-    append_experiment_result(verdict, metrics)
     forward_bundle: dict[str, Any] | None = None
-    if folds:
+    if folds and verdict == "RESEARCH_PAPER_READY":
         _status("forward_bundle", "fitting frozen research-paper controller", 82, gpu=_gpu_info())
         forward_bundle = fit_forward_bundle(matrix, fee, folds, resume=resume)
         if verdict == "RESEARCH_PAPER_READY" and not any(
@@ -6011,6 +6181,12 @@ def train(*, resume: bool = False) -> dict[str, Any]:
             + generated_expert_candidates,
         ),
     }
+    statistical_gates = multiple_comparison_gates(multiple_comparison)
+    if verdict == "RESEARCH_PAPER_READY" and not all(statistical_gates.values()):
+        verdict = "NO_STABLE_OOS_POLICY"
+    gates = policy_gates(metrics) | statistical_gates
+    stage_reports = write_stage_reports(folds, metrics, gates)
+    append_experiment_result(verdict, metrics)
     AUDIT_TRADES.parent.mkdir(parents=True, exist_ok=True)
     temporary = AUDIT_TRADES.with_suffix(".parquet.tmp")
     trades.to_parquet(temporary, index=False)

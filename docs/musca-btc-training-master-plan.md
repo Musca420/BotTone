@@ -1,7 +1,7 @@
 # Musca BTC Binance — piano master del training
 
 Aggiornato: 2026-08-12
-Stato: audit E-42--E-49 implementato; verifiche locali verdi, suite globale e preflight necessari
+Stato: audit E-42--E-53 implementato; verifiche complete richieste prima di un solo preflight
 Ambito: solo Binance USD-M `BTCUSDT`, training e replay Musca BTC
 
 ## Stato implementazione dopo il blackout
@@ -15,11 +15,12 @@ produce anche gli artefatti OOS; il codice già completato è elencato qui per e
 - punto 2 implementato: `sized_portfolio_return`, `log_utility`, ranking e contabilità equity;
 - punto 3 implementato per l'ingresso: fitted value semi-Markov causale con
   `Q(ENTER)=utility+V(next_free)` e `Q(WAIT)=V(next_decision)`; nessun oracle entra nel test;
-- punto 4 implementato: perturbazioni locali one-family-at-a-time, audit past-only e abilitazione
-  per fold soltanto quando il regret supera 2 bps; nessuna griglia globale di azioni;
+- punto 4 corretto: le perturbazioni locali one-family-at-a-time restano un oracle diagnostico e
+  non entrano in fit, calibrazione o test senza evidenza causale past-only;
 - punto 5 implementato: testa decomposta e direct-net/direct-utility sulle stesse split, Ridge
   champion e XGBoost CUDA promosso soltanto con miglioramento congiunto;
-- punto 6 implementato: ingresso `Q(action)>Q(WAIT)`; la vecchia curva di soglie è soltanto audit;
+- punto 6 implementato: ingresso `Q(action)>Q(WAIT)` a margine addizionale zero; la curva di
+  soglie non-zero è soltanto audit e non può salvare un controller negativo;
 - controlli P0 implementati: ledger persistente, random/shift/permutation/FULL/best-active-expert/
   equal-weight/no-gate/train-median-constant-plan, LONG/SHORT/momentum/mean-reversion/always-WAIT e
   bucket di calibrazione economica;
@@ -410,6 +411,48 @@ gruppi documentato da XGBoost; non introduce PPO/SAC, nuove librerie o feedback 
 protocollo, dopo le correzioni E-39–E-49, è
 `e38fe7973531d57fa887b8336ab73662ca649d54cb37647879d91e45fa1678a6`;
 l'hash dei label resta `215813660251767695c66181c72e8b24712983a78b47d1ebde39fc658be06e1f`.
+
+## Audit economico definitivo del protocollo e38
+
+Il preflight `e38fe797...` è terminato senza crash e senza trade. Non ha falsificato la matrice:
+la verifica diretta dei 3.609.776 state-action ha trovato zero feature future, zero entry prima
+della decisione, zero exit non positive, zero duplicati `(timestamp, side, plan_id)`, prezzo di
+entry uguale al primo aggregate trade osservato del secondo e identità contabile esatta
+`net = gross + funding - fee`. I 14 conflitti event-level ambigui sono `data_valid=false` e vengono
+esclusi prima del training.
+
+Il fallimento ha invece localizzato quattro errori di policy nuovi e congiunti:
+
+- **E-50 - loss non coerente con il valore atteso.** Tutte le teste XGBoost, inclusi EV netto e
+  log-utility, usavano `reg:pseudohubererror`. La Pseudo-Huber è una loss robusta simile alla L1 e
+  attenua proprio le code di payoff necessarie alla media condizionata. EV e utility usano ora
+  `reg:squarederror`; Pseudo-Huber resta soltanto per MFE, MAE e tempi rumorosi. Ridge resta champion.
+- **E-51 - oracle locale usato come autorizzazione.** Il massimo futuro fra 11 perturbazioni mostrava
+  regret medio 28,15/26,24 bps e abilitava le varianti. Questo non prova che una regola causale sappia
+  scegliere il vincitore; quasi tutti i winner erano perturbazioni e la coda prevista oltre 20 bps
+  realizzava -21,95 bps. L'oracle resta nel report, ma `execution_authorized=false`: il protocollo
+  esegue soltanto i piani base prodotti dagli expert.
+- **E-52 - calibrazione non parametrica su sole giornate.** Isotonic veniva fittata due volte su
+  finestre di due settimane; migliaia di minuti correlati non equivalgono a migliaia di campioni
+  indipendenti. EV, utility e continuation usano ora una mappa affine monotona a due parametri,
+  separata per lato e bilanciata per giorno UTC. Se lo score è anti-correlato, la slope diventa zero
+  e il controller viene respinto invece di creare gradini ottimistici.
+- **E-53 - tuning della soglia contrario al protocollo.** Il controller sceglieva fra sette margini
+  su quattro settimane: fold adiacenti passavano da 20 a 4 bps. Ora l'unica autorizzazione è
+  `Q(action)>Q(WAIT)` con margine addizionale zero e almeno 30 trade; le curve 1--20 bps sono
+  diagnostiche e non possono salvare una policy negativa a zero.
+
+Contratti aggiunti prima del prossimo preflight:
+
+- [x] loss media e loss robusta separate per semantica del target;
+- [x] calibratore affine monotono, costante-safe e day-balanced;
+- [x] oracle locale incapace di autorizzare varianti;
+- [x] controller autorizzato soltanto a margine zero;
+- [x] stato conto dichiarato correttamente: il Risk Engine consuma P&L/rischio/posizione, mentre il
+  supervised entry model non finge label indipendenti per uno stato path-dependent;
+- [x] matrice e contabilità verificate direttamente sui Parquet canonici;
+- [ ] Ruff, mypy, suite Musca e suite globale sul nuovo protocollo;
+- [ ] un solo nuovo preflight, soltanto dopo tutti i punti verdi.
 
 Questo è il documento persistente da rileggere prima di ogni modifica al training. Le caselle degli
 otto interventi si spuntano soltanto dopo implementazione, test e produzione dell'artefatto indicato.

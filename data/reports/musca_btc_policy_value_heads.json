@@ -1,0 +1,2036 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "candidate_metrics": [
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.43702179825314674,
+              "ev_calibration_error_bps": 0.5486639056591933,
+              "ev_mae_bps": 11.629227733911362,
+              "decision_regret_bps": 5.624152244020378,
+              "utility_calibration_error": 0.0001739962261205412,
+              "utility_mae": 0.002867061576963191,
+              "decision_regret_log_utility": 0.0008419285929183703
+            },
+            "direct": {
+              "brier": 0.43702179825314674,
+              "ev_calibration_error_bps": 0.4475934194777218,
+              "ev_mae_bps": 11.484303066278466,
+              "decision_regret_bps": 3.651688910923743,
+              "utility_calibration_error": 0.00015207931603944774,
+              "utility_mae": 0.0028516895238140847,
+              "decision_regret_log_utility": 0.000805253453482028
+            }
+          },
+          "selected_value_head": "direct",
+          "selected_metrics": {
+            "brier": 0.43702179825314674,
+            "ev_calibration_error_bps": 0.4475934194777218,
+            "ev_mae_bps": 11.484303066278466,
+            "decision_regret_bps": 3.651688910923743,
+            "utility_calibration_error": 0.00015207931603944774,
+            "utility_mae": 0.0028516895238140847,
+            "decision_regret_log_utility": 0.000805253453482028
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.43637014909186506,
+              "ev_calibration_error_bps": 0.609357578328854,
+              "ev_mae_bps": 11.526178632196695,
+              "decision_regret_bps": 3.6455434706800682,
+              "utility_calibration_error": 0.00011411054867917682,
+              "utility_mae": 0.002881586701836533,
+              "decision_regret_log_utility": 0.0007934797502920265
+            },
+            "direct": {
+              "brier": 0.43637014909186506,
+              "ev_calibration_error_bps": 0.1254767902733754,
+              "ev_mae_bps": 11.479346741854409,
+              "decision_regret_bps": 3.6430307354926397,
+              "utility_calibration_error": 7.178902392348257e-05,
+              "utility_mae": 0.002886039080442678,
+              "decision_regret_log_utility": 0.0007969029581911437
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.43637014909186506,
+            "ev_calibration_error_bps": 0.609357578328854,
+            "ev_mae_bps": 11.526178632196695,
+            "decision_regret_bps": 3.6455434706800682,
+            "utility_calibration_error": 0.00011411054867917682,
+            "utility_mae": 0.002881586701836533,
+            "decision_regret_log_utility": 0.0007934797502920265
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.44555546944027113,
+              "ev_calibration_error_bps": 1.365677339425639,
+              "ev_mae_bps": 11.166299896875746,
+              "decision_regret_bps": 3.7585380018795482,
+              "utility_calibration_error": 0.00030163904879051777,
+              "utility_mae": 0.003084190061906267,
+              "decision_regret_log_utility": 0.0009458918062615547
+            },
+            "direct": {
+              "brier": 0.44555546944027113,
+              "ev_calibration_error_bps": 0.8045341543003711,
+              "ev_mae_bps": 10.97070837654078,
+              "decision_regret_bps": 3.4511888178738235,
+              "utility_calibration_error": 0.0002222668551936406,
+              "utility_mae": 0.003063126044994423,
+              "decision_regret_log_utility": 0.0010360235947383817
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.44555546944027113,
+            "ev_calibration_error_bps": 1.365677339425639,
+            "ev_mae_bps": 11.166299896875746,
+            "decision_regret_bps": 3.7585380018795482,
+            "utility_calibration_error": 0.00030163904879051777,
+            "utility_mae": 0.003084190061906267,
+            "decision_regret_log_utility": 0.0009458918062615547
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.44693178016839485,
+              "ev_calibration_error_bps": 0.19782220784275964,
+              "ev_mae_bps": 10.917022695568317,
+              "decision_regret_bps": 3.4511888178738235,
+              "utility_calibration_error": 0.0001623112210234379,
+              "utility_mae": 0.003047639966514465,
+              "decision_regret_log_utility": 0.0008707202933165511
+            },
+            "direct": {
+              "brier": 0.44693178016839485,
+              "ev_calibration_error_bps": 0.2244081129915135,
+              "ev_mae_bps": 10.903764394958737,
+              "decision_regret_bps": 3.449482761575818,
+              "utility_calibration_error": 0.00018351513199323894,
+              "utility_mae": 0.0030414406589844467,
+              "decision_regret_log_utility": 0.0008646991722145958
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.44693178016839485,
+            "ev_calibration_error_bps": 0.19782220784275964,
+            "ev_mae_bps": 10.917022695568317,
+            "decision_regret_bps": 3.4511888178738235,
+            "utility_calibration_error": 0.0001623112210234379,
+            "utility_mae": 0.003047639966514465,
+            "decision_regret_log_utility": 0.0008707202933165511
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.43826570559103667,
+              "ev_calibration_error_bps": 1.262969425616611,
+              "ev_mae_bps": 9.943891676450267,
+              "decision_regret_bps": 3.035774620981914,
+              "utility_calibration_error": 0.0002922388825078445,
+              "utility_mae": 0.002803789053232457,
+              "decision_regret_log_utility": 0.0007427912436738247
+            },
+            "direct": {
+              "brier": 0.43826570559103667,
+              "ev_calibration_error_bps": 1.2716718852240279,
+              "ev_mae_bps": 9.961121369475995,
+              "decision_regret_bps": 3.062106138865663,
+              "utility_calibration_error": 0.0003036555618617215,
+              "utility_mae": 0.0028005916130520495,
+              "decision_regret_log_utility": 0.0007430245380665066
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.43826570559103667,
+            "ev_calibration_error_bps": 1.262969425616611,
+            "ev_mae_bps": 9.943891676450267,
+            "decision_regret_bps": 3.035774620981914,
+            "utility_calibration_error": 0.0002922388825078445,
+            "utility_mae": 0.002803789053232457,
+            "decision_regret_log_utility": 0.0007427912436738247
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4377026917062286,
+              "ev_calibration_error_bps": 1.2200770359576498,
+              "ev_mae_bps": 9.994623871690646,
+              "decision_regret_bps": 3.015770538756835,
+              "utility_calibration_error": 0.00023521666529474638,
+              "utility_mae": 0.0027930308699412438,
+              "decision_regret_log_utility": 0.0007397830434361731
+            },
+            "direct": {
+              "brier": 0.4377026917062286,
+              "ev_calibration_error_bps": 1.316440378375728,
+              "ev_mae_bps": 9.95043751830616,
+              "decision_regret_bps": 3.0065911057376944,
+              "utility_calibration_error": 0.00026939179607836367,
+              "utility_mae": 0.0028025206518371,
+              "decision_regret_log_utility": 0.0007382602847122616
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4377026917062286,
+            "ev_calibration_error_bps": 1.2200770359576498,
+            "ev_mae_bps": 9.994623871690646,
+            "decision_regret_bps": 3.015770538756835,
+            "utility_calibration_error": 0.00023521666529474638,
+            "utility_mae": 0.0027930308699412438,
+            "decision_regret_log_utility": 0.0007397830434361731
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4156451381285583,
+              "ev_calibration_error_bps": 0.928009399454527,
+              "ev_mae_bps": 9.979070206481131,
+              "decision_regret_bps": 2.7156506329197048,
+              "utility_calibration_error": 0.00037682594994216986,
+              "utility_mae": 0.002905989722060447,
+              "decision_regret_log_utility": 0.0007224124257845672
+            },
+            "direct": {
+              "brier": 0.4156451381285583,
+              "ev_calibration_error_bps": 0.9427880886835096,
+              "ev_mae_bps": 9.983868748203475,
+              "decision_regret_bps": 2.8056317322152724,
+              "utility_calibration_error": 0.00046367715873537474,
+              "utility_mae": 0.002929860488175903,
+              "decision_regret_log_utility": 0.0007384242968105882
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4156451381285583,
+            "ev_calibration_error_bps": 0.928009399454527,
+            "ev_mae_bps": 9.979070206481131,
+            "decision_regret_bps": 2.7156506329197048,
+            "utility_calibration_error": 0.00037682594994216986,
+            "utility_mae": 0.002905989722060447,
+            "decision_regret_log_utility": 0.0007224124257845672
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4181563613469223,
+              "ev_calibration_error_bps": 0.9820226118713258,
+              "ev_mae_bps": 9.977108336520438,
+              "decision_regret_bps": 2.6903764030455313,
+              "utility_calibration_error": 0.00043500677383841364,
+              "utility_mae": 0.0029159681091954098,
+              "decision_regret_log_utility": 0.00071163823973222
+            },
+            "direct": {
+              "brier": 0.4181563613469223,
+              "ev_calibration_error_bps": 0.9741583869392215,
+              "ev_mae_bps": 9.980748582824297,
+              "decision_regret_bps": 2.6903764030455313,
+              "utility_calibration_error": 0.0004241183023017259,
+              "utility_mae": 0.002918610158387377,
+              "decision_regret_log_utility": 0.0007035969759144065
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4181563613469223,
+            "ev_calibration_error_bps": 0.9820226118713258,
+            "ev_mae_bps": 9.977108336520438,
+            "decision_regret_bps": 2.6903764030455313,
+            "utility_calibration_error": 0.00043500677383841364,
+            "utility_mae": 0.0029159681091954098,
+            "decision_regret_log_utility": 0.00071163823973222
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.512659678175143,
+              "ev_calibration_error_bps": 2.221834334940671,
+              "ev_mae_bps": 16.078104014380653,
+              "decision_regret_bps": 8.05022491178476,
+              "utility_calibration_error": 0.0004444177510221956,
+              "utility_mae": 0.003291389902216534,
+              "decision_regret_log_utility": 0.0014462840061104992
+            },
+            "direct": {
+              "brier": 0.512659678175143,
+              "ev_calibration_error_bps": 1.8356972544365155,
+              "ev_mae_bps": 16.10936444754028,
+              "decision_regret_bps": 6.618481021916597,
+              "utility_calibration_error": 0.0003783708908642426,
+              "utility_mae": 0.0032739568138702682,
+              "decision_regret_log_utility": 0.0012574772389722082
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.512659678175143,
+            "ev_calibration_error_bps": 2.221834334940671,
+            "ev_mae_bps": 16.078104014380653,
+            "decision_regret_bps": 8.05022491178476,
+            "utility_calibration_error": 0.0004444177510221956,
+            "utility_mae": 0.003291389902216534,
+            "decision_regret_log_utility": 0.0014462840061104992
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5064200682292495,
+              "ev_calibration_error_bps": 0.240107967261185,
+              "ev_mae_bps": 15.89347306707865,
+              "decision_regret_bps": 6.340110706370433,
+              "utility_calibration_error": 0.00019032259102880805,
+              "utility_mae": 0.0032735740481866027,
+              "decision_regret_log_utility": 0.001142511588954332
+            },
+            "direct": {
+              "brier": 0.5064200682292495,
+              "ev_calibration_error_bps": 1.7516979225934715,
+              "ev_mae_bps": 15.917043477668036,
+              "decision_regret_bps": 6.399693157688701,
+              "utility_calibration_error": 0.0003042874490113133,
+              "utility_mae": 0.0033055381388275604,
+              "decision_regret_log_utility": 0.0011460012365657334
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5064200682292495,
+            "ev_calibration_error_bps": 0.240107967261185,
+            "ev_mae_bps": 15.89347306707865,
+            "decision_regret_bps": 6.340110706370433,
+            "utility_calibration_error": 0.00019032259102880805,
+            "utility_mae": 0.0032735740481866027,
+            "decision_regret_log_utility": 0.001142511588954332
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5102785444872272,
+              "ev_calibration_error_bps": 0.9450461291523339,
+              "ev_mae_bps": 13.897127792294409,
+              "decision_regret_bps": 5.067651413903404,
+              "utility_calibration_error": 0.0003451308424075949,
+              "utility_mae": 0.0033902472351373357,
+              "decision_regret_log_utility": 0.0011282456061419896
+            },
+            "direct": {
+              "brier": 0.5102785444872272,
+              "ev_calibration_error_bps": 0.753237770542138,
+              "ev_mae_bps": 13.843870516347561,
+              "decision_regret_bps": 4.872533874945465,
+              "utility_calibration_error": 0.0004225589928630043,
+              "utility_mae": 0.0034143955047319084,
+              "decision_regret_log_utility": 0.0011310820632935445
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5102785444872272,
+            "ev_calibration_error_bps": 0.9450461291523339,
+            "ev_mae_bps": 13.897127792294409,
+            "decision_regret_bps": 5.067651413903404,
+            "utility_calibration_error": 0.0003451308424075949,
+            "utility_mae": 0.0033902472351373357,
+            "decision_regret_log_utility": 0.0011282456061419896
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5116115796029376,
+              "ev_calibration_error_bps": 0.5333404107125936,
+              "ev_mae_bps": 13.841445539806724,
+              "decision_regret_bps": 4.872533874945465,
+              "utility_calibration_error": 0.00027452292215296507,
+              "utility_mae": 0.0033658461105536804,
+              "decision_regret_log_utility": 0.0011614523406893668
+            },
+            "direct": {
+              "brier": 0.5116115796029376,
+              "ev_calibration_error_bps": 0.7830165674713487,
+              "ev_mae_bps": 13.792723454604818,
+              "decision_regret_bps": 4.872533874945465,
+              "utility_calibration_error": 0.00021558199819037685,
+              "utility_mae": 0.003351176195316155,
+              "decision_regret_log_utility": 0.0011008492035583263
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5116115796029376,
+            "ev_calibration_error_bps": 0.5333404107125936,
+            "ev_mae_bps": 13.841445539806724,
+            "decision_regret_bps": 4.872533874945465,
+            "utility_calibration_error": 0.00027452292215296507,
+            "utility_mae": 0.0033658461105536804,
+            "decision_regret_log_utility": 0.0011614523406893668
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5295372724359878,
+              "ev_calibration_error_bps": 2.0373573442386395,
+              "ev_mae_bps": 19.6555888466075,
+              "decision_regret_bps": 8.453955532039833,
+              "utility_calibration_error": 0.00020533911650840334,
+              "utility_mae": 0.003558965861499613,
+              "decision_regret_log_utility": 0.0013654902467741842
+            },
+            "direct": {
+              "brier": 0.5295372724359878,
+              "ev_calibration_error_bps": 0.7602798503419852,
+              "ev_mae_bps": 19.8503968716916,
+              "decision_regret_bps": 8.113981483261009,
+              "utility_calibration_error": 0.00014303466033604713,
+              "utility_mae": 0.0035389618396063343,
+              "decision_regret_log_utility": 0.0013269138111754234
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5295372724359878,
+            "ev_calibration_error_bps": 2.0373573442386395,
+            "ev_mae_bps": 19.6555888466075,
+            "decision_regret_bps": 8.453955532039833,
+            "utility_calibration_error": 0.00020533911650840334,
+            "utility_mae": 0.003558965861499613,
+            "decision_regret_log_utility": 0.0013654902467741842
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.525242350772837,
+              "ev_calibration_error_bps": 0.6394577874708596,
+              "ev_mae_bps": 19.51792786786986,
+              "decision_regret_bps": 8.01522300378662,
+              "utility_calibration_error": 0.0002735421314207325,
+              "utility_mae": 0.0035657572502892404,
+              "decision_regret_log_utility": 0.0013198704094547749
+            },
+            "direct": {
+              "brier": 0.525242350772837,
+              "ev_calibration_error_bps": 0.8115170221847475,
+              "ev_mae_bps": 19.491478081232547,
+              "decision_regret_bps": 8.40432565737845,
+              "utility_calibration_error": 0.0002825839233305707,
+              "utility_mae": 0.0035538951986072713,
+              "decision_regret_log_utility": 0.001324613815483424
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.525242350772837,
+            "ev_calibration_error_bps": 0.6394577874708596,
+            "ev_mae_bps": 19.51792786786986,
+            "decision_regret_bps": 8.01522300378662,
+            "utility_calibration_error": 0.0002735421314207325,
+            "utility_mae": 0.0035657572502892404,
+            "decision_regret_log_utility": 0.0013198704094547749
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5374894693727109,
+              "ev_calibration_error_bps": 1.4466157889285474,
+              "ev_mae_bps": 15.768579133205499,
+              "decision_regret_bps": 6.3227003416768754,
+              "utility_calibration_error": 0.00025371951368979525,
+              "utility_mae": 0.003584010739845365,
+              "decision_regret_log_utility": 0.0013263231432846623
+            },
+            "direct": {
+              "brier": 0.5374894693727109,
+              "ev_calibration_error_bps": 1.6130618581433014,
+              "ev_mae_bps": 15.892983345516619,
+              "decision_regret_bps": 8.711209995582488,
+              "utility_calibration_error": 0.00026299165480479016,
+              "utility_mae": 0.003591811925883935,
+              "decision_regret_log_utility": 0.0013263231432846623
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5374894693727109,
+            "ev_calibration_error_bps": 1.4466157889285474,
+            "ev_mae_bps": 15.768579133205499,
+            "decision_regret_bps": 6.3227003416768754,
+            "utility_calibration_error": 0.00025371951368979525,
+            "utility_mae": 0.003584010739845365,
+            "decision_regret_log_utility": 0.0013263231432846623
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5398572706627162,
+              "ev_calibration_error_bps": 0.42813011072699503,
+              "ev_mae_bps": 15.836870500791925,
+              "decision_regret_bps": 6.224413742434129,
+              "utility_calibration_error": 0.00028534203081709704,
+              "utility_mae": 0.0036028637680614686,
+              "decision_regret_log_utility": 0.0013263231432846623
+            },
+            "direct": {
+              "brier": 0.5398572706627162,
+              "ev_calibration_error_bps": 0.9286815816114911,
+              "ev_mae_bps": 15.85435096057584,
+              "decision_regret_bps": 6.2781283313851235,
+              "utility_calibration_error": 0.00032288595445397806,
+              "utility_mae": 0.0036319445431490546,
+              "decision_regret_log_utility": 0.0013289732665826436
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5398572706627162,
+            "ev_calibration_error_bps": 0.42813011072699503,
+            "ev_mae_bps": 15.836870500791925,
+            "decision_regret_bps": 6.224413742434129,
+            "utility_calibration_error": 0.00028534203081709704,
+            "utility_mae": 0.0036028637680614686,
+            "decision_regret_log_utility": 0.0013263231432846623
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5101863127128095,
+              "ev_calibration_error_bps": 2.815318276144204,
+              "ev_mae_bps": 18.31818240656474,
+              "decision_regret_bps": 8.030380937552701,
+              "utility_calibration_error": 0.0004349603090042344,
+              "utility_mae": 0.003454648760908131,
+              "decision_regret_log_utility": 0.0013946633226258668
+            },
+            "direct": {
+              "brier": 0.5101863127128095,
+              "ev_calibration_error_bps": 2.8103730830485087,
+              "ev_mae_bps": 18.237569704001,
+              "decision_regret_bps": 8.053348450624425,
+              "utility_calibration_error": 0.000523617622037692,
+              "utility_mae": 0.0034870506861087707,
+              "decision_regret_log_utility": 0.0013946633226258668
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5101863127128095,
+            "ev_calibration_error_bps": 2.815318276144204,
+            "ev_mae_bps": 18.31818240656474,
+            "decision_regret_bps": 8.030380937552701,
+            "utility_calibration_error": 0.0004349603090042344,
+            "utility_mae": 0.003454648760908131,
+            "decision_regret_log_utility": 0.0013946633226258668
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5008338155808943,
+              "ev_calibration_error_bps": 3.39663233250334,
+              "ev_mae_bps": 18.32440694622593,
+              "decision_regret_bps": 8.053348450624425,
+              "utility_calibration_error": 0.0005446595224566387,
+              "utility_mae": 0.0034610408672194623,
+              "decision_regret_log_utility": 0.001393564696564826
+            },
+            "direct": {
+              "brier": 0.5008338155808943,
+              "ev_calibration_error_bps": 3.695461314173896,
+              "ev_mae_bps": 18.35278965901069,
+              "decision_regret_bps": 8.045183322622254,
+              "utility_calibration_error": 0.00040319572498459804,
+              "utility_mae": 0.003450041380546096,
+              "decision_regret_log_utility": 0.001394300292560012
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5008338155808943,
+            "ev_calibration_error_bps": 3.39663233250334,
+            "ev_mae_bps": 18.32440694622593,
+            "decision_regret_bps": 8.053348450624425,
+            "utility_calibration_error": 0.0005446595224566387,
+            "utility_mae": 0.0034610408672194623,
+            "decision_regret_log_utility": 0.001393564696564826
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.528290875219962,
+              "ev_calibration_error_bps": 1.6397488911981373,
+              "ev_mae_bps": 15.056163002827828,
+              "decision_regret_bps": 5.556938658836345,
+              "utility_calibration_error": 0.00040191082273613346,
+              "utility_mae": 0.0034941597345324858,
+              "decision_regret_log_utility": 0.001222438486038862
+            },
+            "direct": {
+              "brier": 0.528290875219962,
+              "ev_calibration_error_bps": 2.0784209820111776,
+              "ev_mae_bps": 15.10798870024548,
+              "decision_regret_bps": 5.532325219512636,
+              "utility_calibration_error": 0.00039378348583845576,
+              "utility_mae": 0.003502552759676294,
+              "decision_regret_log_utility": 0.0011953617431199179
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.528290875219962,
+            "ev_calibration_error_bps": 1.6397488911981373,
+            "ev_mae_bps": 15.056163002827828,
+            "decision_regret_bps": 5.556938658836345,
+            "utility_calibration_error": 0.00040191082273613346,
+            "utility_mae": 0.0034941597345324858,
+            "decision_regret_log_utility": 0.001222438486038862
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.529910872332853,
+              "ev_calibration_error_bps": 1.7795361200694633,
+              "ev_mae_bps": 15.055854096762276,
+              "decision_regret_bps": 5.313621056147122,
+              "utility_calibration_error": 0.00043404913129331323,
+              "utility_mae": 0.003490612583755463,
+              "decision_regret_log_utility": 0.0012282415566105265
+            },
+            "direct": {
+              "brier": 0.529910872332853,
+              "ev_calibration_error_bps": 1.7924928896586971,
+              "ev_mae_bps": 15.036330044893033,
+              "decision_regret_bps": 5.313621056147122,
+              "utility_calibration_error": 0.0005618433657201648,
+              "utility_mae": 0.003499771049869448,
+              "decision_regret_log_utility": 0.0011829094692687003
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.529910872332853,
+            "ev_calibration_error_bps": 1.7795361200694633,
+            "ev_mae_bps": 15.055854096762276,
+            "decision_regret_bps": 5.313621056147122,
+            "utility_calibration_error": 0.00043404913129331323,
+            "utility_mae": 0.003490612583755463,
+            "decision_regret_log_utility": 0.0012282415566105265
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4457099318734351,
+              "ev_calibration_error_bps": 0.34850287977574385,
+              "ev_mae_bps": 10.467384360330655,
+              "decision_regret_bps": 3.022825039338411,
+              "utility_calibration_error": 0.0003605590256500817,
+              "utility_mae": 0.002784147540080675,
+              "decision_regret_log_utility": 0.0007195954123499767
+            },
+            "direct": {
+              "brier": 0.4457099318734351,
+              "ev_calibration_error_bps": 0.08952542113625227,
+              "ev_mae_bps": 10.4693081023382,
+              "decision_regret_bps": 3.024841738455717,
+              "utility_calibration_error": 0.0003334436267472877,
+              "utility_mae": 0.002785354607801483,
+              "decision_regret_log_utility": 0.0007194339896470507
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4457099318734351,
+            "ev_calibration_error_bps": 0.34850287977574385,
+            "ev_mae_bps": 10.467384360330655,
+            "decision_regret_bps": 3.022825039338411,
+            "utility_calibration_error": 0.0003605590256500817,
+            "utility_mae": 0.002784147540080675,
+            "decision_regret_log_utility": 0.0007195954123499767
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4463982430264668,
+              "ev_calibration_error_bps": 0.586047520553432,
+              "ev_mae_bps": 10.536974198672544,
+              "decision_regret_bps": 3.0258585757387726,
+              "utility_calibration_error": 0.00041209977979553763,
+              "utility_mae": 0.0027879323948636005,
+              "decision_regret_log_utility": 0.0007207250023277888
+            },
+            "direct": {
+              "brier": 0.4463982430264668,
+              "ev_calibration_error_bps": 0.46570368477753404,
+              "ev_mae_bps": 10.493241824622901,
+              "decision_regret_bps": 3.022825039338411,
+              "utility_calibration_error": 0.0003404735460925306,
+              "utility_mae": 0.0027778181661141346,
+              "decision_regret_log_utility": 0.0007196786842140618
+            }
+          },
+          "selected_value_head": "direct",
+          "selected_metrics": {
+            "brier": 0.4463982430264668,
+            "ev_calibration_error_bps": 0.46570368477753404,
+            "ev_mae_bps": 10.493241824622901,
+            "decision_regret_bps": 3.022825039338411,
+            "utility_calibration_error": 0.0003404735460925306,
+            "utility_mae": 0.0027778181661141346,
+            "decision_regret_log_utility": 0.0007196786842140618
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4249946261970108,
+              "ev_calibration_error_bps": 0.5622977762141285,
+              "ev_mae_bps": 10.435357070926235,
+              "decision_regret_bps": 3.0162097465719437,
+              "utility_calibration_error": 0.0002347809627703722,
+              "utility_mae": 0.002859900292367584,
+              "decision_regret_log_utility": 0.0007860609014024401
+            },
+            "direct": {
+              "brier": 0.4249946261970108,
+              "ev_calibration_error_bps": 1.4170469555479779,
+              "ev_mae_bps": 10.704639339485189,
+              "decision_regret_bps": 4.385066451991022,
+              "utility_calibration_error": 0.0002388933197899543,
+              "utility_mae": 0.002878668777350218,
+              "decision_regret_log_utility": 0.0007932411961715432
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4249946261970108,
+            "ev_calibration_error_bps": 0.5622977762141285,
+            "ev_mae_bps": 10.435357070926235,
+            "decision_regret_bps": 3.0162097465719437,
+            "utility_calibration_error": 0.0002347809627703722,
+            "utility_mae": 0.002859900292367584,
+            "decision_regret_log_utility": 0.0007860609014024401
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4236759465097607,
+              "ev_calibration_error_bps": 0.6412045292588098,
+              "ev_mae_bps": 10.432681251211658,
+              "decision_regret_bps": 2.9228330332766306,
+              "utility_calibration_error": 0.0003044814973589105,
+              "utility_mae": 0.0028608456025338157,
+              "decision_regret_log_utility": 0.0007356284031274884
+            },
+            "direct": {
+              "brier": 0.4236759465097607,
+              "ev_calibration_error_bps": 0.28959890466983507,
+              "ev_mae_bps": 10.432646193296511,
+              "decision_regret_bps": 2.9299309475999067,
+              "utility_calibration_error": 0.00023537186866487832,
+              "utility_mae": 0.0028698236067070514,
+              "decision_regret_log_utility": 0.0007306068208617354
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4236759465097607,
+            "ev_calibration_error_bps": 0.6412045292588098,
+            "ev_mae_bps": 10.432681251211658,
+            "decision_regret_bps": 2.9228330332766306,
+            "utility_calibration_error": 0.0003044814973589105,
+            "utility_mae": 0.0028608456025338157,
+            "decision_regret_log_utility": 0.0007356284031274884
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5149814219085853,
+              "ev_calibration_error_bps": 4.190316400634449,
+              "ev_mae_bps": 20.823056910069585,
+              "decision_regret_bps": 10.78301325038028,
+              "utility_calibration_error": 0.0008742266747278229,
+              "utility_mae": 0.0036219028292429484,
+              "decision_regret_log_utility": 0.0015970827110904687
+            },
+            "direct": {
+              "brier": 0.5149814219085853,
+              "ev_calibration_error_bps": 2.0454965689544022,
+              "ev_mae_bps": 20.345984061675622,
+              "decision_regret_bps": 8.848428374517594,
+              "utility_calibration_error": 0.0007033300577664887,
+              "utility_mae": 0.003530789942558244,
+              "decision_regret_log_utility": 0.0015221305275077087
+            }
+          },
+          "selected_value_head": "direct",
+          "selected_metrics": {
+            "brier": 0.5149814219085853,
+            "ev_calibration_error_bps": 2.0454965689544022,
+            "ev_mae_bps": 20.345984061675622,
+            "decision_regret_bps": 8.848428374517594,
+            "utility_calibration_error": 0.0007033300577664887,
+            "utility_mae": 0.003530789942558244,
+            "decision_regret_log_utility": 0.0015221305275077087
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5050579629908352,
+              "ev_calibration_error_bps": 0.844819028804121,
+              "ev_mae_bps": 20.371839454063373,
+              "decision_regret_bps": 8.867193577804207,
+              "utility_calibration_error": 0.0002594566458321702,
+              "utility_mae": 0.003462780399565259,
+              "decision_regret_log_utility": 0.0013173887059417142
+            },
+            "direct": {
+              "brier": 0.5050579629908352,
+              "ev_calibration_error_bps": 1.0869952668131988,
+              "ev_mae_bps": 20.277764324804608,
+              "decision_regret_bps": 8.76892596585175,
+              "utility_calibration_error": 0.0002877155250628284,
+              "utility_mae": 0.0034363807447526846,
+              "decision_regret_log_utility": 0.0013841852635549576
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5050579629908352,
+            "ev_calibration_error_bps": 0.844819028804121,
+            "ev_mae_bps": 20.371839454063373,
+            "decision_regret_bps": 8.867193577804207,
+            "utility_calibration_error": 0.0002594566458321702,
+            "utility_mae": 0.003462780399565259,
+            "decision_regret_log_utility": 0.0013173887059417142
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4991502566359105,
+              "ev_calibration_error_bps": 1.1364123210347588,
+              "ev_mae_bps": 16.736931613808036,
+              "decision_regret_bps": 7.307809729272149,
+              "utility_calibration_error": 0.0003627319757553727,
+              "utility_mae": 0.003391109451010795,
+              "decision_regret_log_utility": 0.0015995861024750914
+            },
+            "direct": {
+              "brier": 0.4991502566359105,
+              "ev_calibration_error_bps": 1.4501700891579667,
+              "ev_mae_bps": 16.761898824347337,
+              "decision_regret_bps": 7.307809729272149,
+              "utility_calibration_error": 0.00033030389453664094,
+              "utility_mae": 0.0033928957123396143,
+              "decision_regret_log_utility": 0.0013507718694000584
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4991502566359105,
+            "ev_calibration_error_bps": 1.1364123210347588,
+            "ev_mae_bps": 16.736931613808036,
+            "decision_regret_bps": 7.307809729272149,
+            "utility_calibration_error": 0.0003627319757553727,
+            "utility_mae": 0.003391109451010795,
+            "decision_regret_log_utility": 0.0015995861024750914
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4935533815129203,
+              "ev_calibration_error_bps": 0.892331968858612,
+              "ev_mae_bps": 16.760486801291748,
+              "decision_regret_bps": 7.307809729272149,
+              "utility_calibration_error": 0.00025427485187778324,
+              "utility_mae": 0.0033687959327212236,
+              "decision_regret_log_utility": 0.0013507718694000584
+            },
+            "direct": {
+              "brier": 0.4935533815129203,
+              "ev_calibration_error_bps": 0.7001930307949937,
+              "ev_mae_bps": 16.726592014523625,
+              "decision_regret_bps": 7.3415930758371735,
+              "utility_calibration_error": 0.00024272950728303262,
+              "utility_mae": 0.0033731122883785174,
+              "decision_regret_log_utility": 0.0013647311255552937
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4935533815129203,
+            "ev_calibration_error_bps": 0.892331968858612,
+            "ev_mae_bps": 16.760486801291748,
+            "decision_regret_bps": 7.307809729272149,
+            "utility_calibration_error": 0.00025427485187778324,
+            "utility_mae": 0.0033687959327212236,
+            "decision_regret_log_utility": 0.0013507718694000584
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5209583483160152,
+              "ev_calibration_error_bps": 1.8044654818325159,
+              "ev_mae_bps": 20.884212845401912,
+              "decision_regret_bps": 8.937209195324604,
+              "utility_calibration_error": 9.647699103268703e-05,
+              "utility_mae": 0.003442203553331118,
+              "decision_regret_log_utility": 0.0013711218024478726
+            },
+            "direct": {
+              "brier": 0.5209583483160152,
+              "ev_calibration_error_bps": 3.7738839444755374,
+              "ev_mae_bps": 20.56415205472225,
+              "decision_regret_bps": 8.808551011911614,
+              "utility_calibration_error": 0.0003374039719815002,
+              "utility_mae": 0.0034298192100930044,
+              "decision_regret_log_utility": 0.0013882041388526552
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5209583483160152,
+            "ev_calibration_error_bps": 1.8044654818325159,
+            "ev_mae_bps": 20.884212845401912,
+            "decision_regret_bps": 8.937209195324604,
+            "utility_calibration_error": 9.647699103268703e-05,
+            "utility_mae": 0.003442203553331118,
+            "decision_regret_log_utility": 0.0013711218024478726
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5188005803629646,
+              "ev_calibration_error_bps": 4.72072361980403,
+              "ev_mae_bps": 20.71195398751714,
+              "decision_regret_bps": 8.808551011911614,
+              "utility_calibration_error": 0.000259427533899642,
+              "utility_mae": 0.003446701024712689,
+              "decision_regret_log_utility": 0.0013629399585642459
+            },
+            "direct": {
+              "brier": 0.5188005803629646,
+              "ev_calibration_error_bps": 2.049477549656882,
+              "ev_mae_bps": 20.424046049370464,
+              "decision_regret_bps": 8.78653163446051,
+              "utility_calibration_error": 0.00030268843079797554,
+              "utility_mae": 0.0034332073650288155,
+              "decision_regret_log_utility": 0.0013871166918743546
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5188005803629646,
+            "ev_calibration_error_bps": 4.72072361980403,
+            "ev_mae_bps": 20.71195398751714,
+            "decision_regret_bps": 8.808551011911614,
+            "utility_calibration_error": 0.000259427533899642,
+            "utility_mae": 0.003446701024712689,
+            "decision_regret_log_utility": 0.0013629399585642459
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5310926516662704,
+              "ev_calibration_error_bps": 1.4428578201673201,
+              "ev_mae_bps": 18.751126794586092,
+              "decision_regret_bps": 8.37932525804113,
+              "utility_calibration_error": 0.0003575889422624486,
+              "utility_mae": 0.0036011477789200906,
+              "decision_regret_log_utility": 0.0015125732469075072
+            },
+            "direct": {
+              "brier": 0.5310926516662704,
+              "ev_calibration_error_bps": 1.76103004730502,
+              "ev_mae_bps": 18.773859434514204,
+              "decision_regret_bps": 8.539738231605506,
+              "utility_calibration_error": 0.00042110961687769803,
+              "utility_mae": 0.003618763377862293,
+              "decision_regret_log_utility": 0.001477434861466549
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5310926516662704,
+            "ev_calibration_error_bps": 1.4428578201673201,
+            "ev_mae_bps": 18.751126794586092,
+            "decision_regret_bps": 8.37932525804113,
+            "utility_calibration_error": 0.0003575889422624486,
+            "utility_mae": 0.0036011477789200906,
+            "decision_regret_log_utility": 0.0015125732469075072
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5301332034690509,
+              "ev_calibration_error_bps": 0.9281966287134695,
+              "ev_mae_bps": 18.66198373389794,
+              "decision_regret_bps": 7.675525936859849,
+              "utility_calibration_error": 0.0003675670211017997,
+              "utility_mae": 0.0035914480390659025,
+              "decision_regret_log_utility": 0.0014710950891995934
+            },
+            "direct": {
+              "brier": 0.5301332034690509,
+              "ev_calibration_error_bps": 1.8848677897695922,
+              "ev_mae_bps": 18.79433339825051,
+              "decision_regret_bps": 7.8119460718094915,
+              "utility_calibration_error": 0.00012364272178891082,
+              "utility_mae": 0.0035810287660253794,
+              "decision_regret_log_utility": 0.001483974063158279
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5301332034690509,
+            "ev_calibration_error_bps": 0.9281966287134695,
+            "ev_mae_bps": 18.66198373389794,
+            "decision_regret_bps": 7.675525936859849,
+            "utility_calibration_error": 0.0003675670211017997,
+            "utility_mae": 0.0035914480390659025,
+            "decision_regret_log_utility": 0.0014710950891995934
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5174567821820417,
+              "ev_calibration_error_bps": 1.2944376324102942,
+              "ev_mae_bps": 18.199883846405672,
+              "decision_regret_bps": 7.943733712617859,
+              "utility_calibration_error": 0.00029463092291727986,
+              "utility_mae": 0.0033960323099957485,
+              "decision_regret_log_utility": 0.001237022615933584
+            },
+            "direct": {
+              "brier": 0.5174567821820417,
+              "ev_calibration_error_bps": 3.0642099220558396,
+              "ev_mae_bps": 18.321438807798643,
+              "decision_regret_bps": 10.283626933697043,
+              "utility_calibration_error": 0.00039203366422129284,
+              "utility_mae": 0.0034097867058038383,
+              "decision_regret_log_utility": 0.0012754091392088726
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5174567821820417,
+            "ev_calibration_error_bps": 1.2944376324102942,
+            "ev_mae_bps": 18.199883846405672,
+            "decision_regret_bps": 7.943733712617859,
+            "utility_calibration_error": 0.00029463092291727986,
+            "utility_mae": 0.0033960323099957485,
+            "decision_regret_log_utility": 0.001237022615933584
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5184416811125604,
+              "ev_calibration_error_bps": 1.8735341324339427,
+              "ev_mae_bps": 18.186347446100847,
+              "decision_regret_bps": 7.090997889560384,
+              "utility_calibration_error": 0.00032634681353494084,
+              "utility_mae": 0.0033916565637967192,
+              "decision_regret_log_utility": 0.0012439521120368462
+            },
+            "direct": {
+              "brier": 0.5184416811125604,
+              "ev_calibration_error_bps": 1.3020948478274075,
+              "ev_mae_bps": 18.221909190587475,
+              "decision_regret_bps": 7.121725956731658,
+              "utility_calibration_error": 0.00031251622677411694,
+              "utility_mae": 0.0033863106934235534,
+              "decision_regret_log_utility": 0.0012280721100835518
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5184416811125604,
+            "ev_calibration_error_bps": 1.8735341324339427,
+            "ev_mae_bps": 18.186347446100847,
+            "decision_regret_bps": 7.090997889560384,
+            "utility_calibration_error": 0.00032634681353494084,
+            "utility_mae": 0.0033916565637967192,
+            "decision_regret_log_utility": 0.0012439521120368462
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5271242713105334,
+              "ev_calibration_error_bps": 1.9728796217949256,
+              "ev_mae_bps": 15.896047351315659,
+              "decision_regret_bps": 6.490888316389614,
+              "utility_calibration_error": 0.00029913606121530044,
+              "utility_mae": 0.0034890760933680956,
+              "decision_regret_log_utility": 0.0013498524702539383
+            },
+            "direct": {
+              "brier": 0.5271242713105334,
+              "ev_calibration_error_bps": 1.6264404144264233,
+              "ev_mae_bps": 15.761179676020157,
+              "decision_regret_bps": 6.501543137597015,
+              "utility_calibration_error": 0.000312405749488418,
+              "utility_mae": 0.003493263416691353,
+              "decision_regret_log_utility": 0.001352553761267683
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5271242713105334,
+            "ev_calibration_error_bps": 1.9728796217949256,
+            "ev_mae_bps": 15.896047351315659,
+            "decision_regret_bps": 6.490888316389614,
+            "utility_calibration_error": 0.00029913606121530044,
+            "utility_mae": 0.0034890760933680956,
+            "decision_regret_log_utility": 0.0013498524702539383
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.5264105156288462,
+              "ev_calibration_error_bps": 1.878954976764548,
+              "ev_mae_bps": 15.860628632119768,
+              "decision_regret_bps": 6.528786777439717,
+              "utility_calibration_error": 0.0002973608608076937,
+              "utility_mae": 0.0034803498689477243,
+              "decision_regret_log_utility": 0.0013526511537111888
+            },
+            "direct": {
+              "brier": 0.5264105156288462,
+              "ev_calibration_error_bps": 1.4617612252385248,
+              "ev_mae_bps": 15.725010010909825,
+              "decision_regret_bps": 6.466710075554784,
+              "utility_calibration_error": 0.00029959332591048937,
+              "utility_mae": 0.0034823286821410834,
+              "decision_regret_log_utility": 0.0013539512004823544
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.5264105156288462,
+            "ev_calibration_error_bps": 1.878954976764548,
+            "ev_mae_bps": 15.860628632119768,
+            "decision_regret_bps": 6.528786777439717,
+            "utility_calibration_error": 0.0002973608608076937,
+            "utility_mae": 0.0034803498689477243,
+            "decision_regret_log_utility": 0.0013526511537111888
+          }
+        }
+      }
+    },
+    {
+      "LONG": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4959411896428727,
+              "ev_calibration_error_bps": 1.5704251650956556,
+              "ev_mae_bps": 14.404717133954344,
+              "decision_regret_bps": 5.582442168069285,
+              "utility_calibration_error": 0.00030833360485723406,
+              "utility_mae": 0.003153690403967983,
+              "decision_regret_log_utility": 0.001259783856922326
+            },
+            "direct": {
+              "brier": 0.4959411896428727,
+              "ev_calibration_error_bps": 1.3310818762440706,
+              "ev_mae_bps": 14.455357244207828,
+              "decision_regret_bps": 5.582442168069285,
+              "utility_calibration_error": 0.00032857951028177616,
+              "utility_mae": 0.003149176572380276,
+              "decision_regret_log_utility": 0.0014147604234573477
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4959411896428727,
+            "ev_calibration_error_bps": 1.5704251650956556,
+            "ev_mae_bps": 14.404717133954344,
+            "decision_regret_bps": 5.582442168069285,
+            "utility_calibration_error": 0.00030833360485723406,
+            "utility_mae": 0.003153690403967983,
+            "decision_regret_log_utility": 0.001259783856922326
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4957358381826941,
+              "ev_calibration_error_bps": 0.8484422424042338,
+              "ev_mae_bps": 14.360188855984758,
+              "decision_regret_bps": 5.582442168069285,
+              "utility_calibration_error": 0.00022616262810894275,
+              "utility_mae": 0.0031335995678405475,
+              "decision_regret_log_utility": 0.00108501007330635
+            },
+            "direct": {
+              "brier": 0.4957358381826941,
+              "ev_calibration_error_bps": 1.1861468882684545,
+              "ev_mae_bps": 14.305512943678272,
+              "decision_regret_bps": 5.551354737305263,
+              "utility_calibration_error": 0.00020357350090686102,
+              "utility_mae": 0.0031293517253572238,
+              "decision_regret_log_utility": 0.001088142217228158
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.4957358381826941,
+            "ev_calibration_error_bps": 0.8484422424042338,
+            "ev_mae_bps": 14.360188855984758,
+            "decision_regret_bps": 5.582442168069285,
+            "utility_calibration_error": 0.00022616262810894275,
+            "utility_mae": 0.0031335995678405475,
+            "decision_regret_log_utility": 0.00108501007330635
+          }
+        }
+      },
+      "SHORT": {
+        "ridge": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.4844764885865824,
+              "ev_calibration_error_bps": 2.0723159665197057,
+              "ev_mae_bps": 13.661460841053431,
+              "decision_regret_bps": 4.972281477910286,
+              "utility_calibration_error": 0.00043249044434301453,
+              "utility_mae": 0.0032048232840252945,
+              "decision_regret_log_utility": 0.0011449055121014156
+            },
+            "direct": {
+              "brier": 0.4844764885865824,
+              "ev_calibration_error_bps": 1.4306143115520962,
+              "ev_mae_bps": 13.647373324296211,
+              "decision_regret_bps": 4.758843087284985,
+              "utility_calibration_error": 0.00035757392666054027,
+              "utility_mae": 0.0031924089412245864,
+              "decision_regret_log_utility": 0.0010451367964128809
+            }
+          },
+          "selected_value_head": "direct",
+          "selected_metrics": {
+            "brier": 0.4844764885865824,
+            "ev_calibration_error_bps": 1.4306143115520962,
+            "ev_mae_bps": 13.647373324296211,
+            "decision_regret_bps": 4.758843087284985,
+            "utility_calibration_error": 0.00035757392666054027,
+            "utility_mae": 0.0031924089412245864,
+            "decision_regret_log_utility": 0.0010451367964128809
+          }
+        },
+        "xgboost_cuda": {
+          "value_heads": {
+            "decomposed": {
+              "brier": 0.48052684899359394,
+              "ev_calibration_error_bps": 0.7948354491939543,
+              "ev_mae_bps": 13.51222283801505,
+              "decision_regret_bps": 4.631002199353917,
+              "utility_calibration_error": 0.00026883561599006786,
+              "utility_mae": 0.0031909118994500663,
+              "decision_regret_log_utility": 0.0010461256158712086
+            },
+            "direct": {
+              "brier": 0.48052684899359394,
+              "ev_calibration_error_bps": 0.3335312203125853,
+              "ev_mae_bps": 13.46760275654735,
+              "decision_regret_bps": 4.631150286876527,
+              "utility_calibration_error": 0.00015072505580564092,
+              "utility_mae": 0.0031712135417024515,
+              "decision_regret_log_utility": 0.001050273138844174
+            }
+          },
+          "selected_value_head": "decomposed",
+          "selected_metrics": {
+            "brier": 0.48052684899359394,
+            "ev_calibration_error_bps": 0.7948354491939543,
+            "ev_mae_bps": 13.51222283801505,
+            "decision_regret_bps": 4.631002199353917,
+            "utility_calibration_error": 0.00026883561599006786,
+            "utility_mae": 0.0031909118994500663,
+            "decision_regret_log_utility": 0.0010461256158712086
+          }
+        }
+      }
+    }
+  ],
+  "economic_calibration": [
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 720584,
+          "predicted_ev_bps": -8.059966296090948,
+          "realized_ev_bps": -8.14641203672252,
+          "predicted_log_utility": -0.0020126557556707585,
+          "realized_log_utility": -0.0019951569210086835,
+          "expected_holding_seconds": 1005.2081429456508,
+          "expected_ev_bps_per_minute": -1.9770808178749137,
+          "expected_log_utility_per_hour": -0.0335346061313377,
+          "first_timestamp": "2025-10-14 00:00:01.290000+00:00",
+          "last_timestamp": "2025-11-10 23:51:02.338000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 1714,
+          "predicted_ev_bps": 1.341470712307564,
+          "realized_ev_bps": -18.95344724102547,
+          "predicted_log_utility": -0.0003101970523662457,
+          "realized_log_utility": -0.002282751279822375,
+          "expected_holding_seconds": 2219.3347655110488,
+          "expected_ev_bps_per_minute": 0.1203151991895632,
+          "expected_log_utility_per_hour": -0.005279858597492238,
+          "first_timestamp": "2025-10-14 03:04:01.041000+00:00",
+          "last_timestamp": "2025-11-10 16:09:01.224000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 510,
+          "predicted_ev_bps": 6.763781197741463,
+          "realized_ev_bps": -4.142486054152475,
+          "predicted_log_utility": -0.00021316803540110974,
+          "realized_log_utility": -0.0008705377939595474,
+          "expected_holding_seconds": 3553.753223853018,
+          "expected_ev_bps_per_minute": 0.351872172279609,
+          "expected_log_utility_per_hour": -0.0016869551626084581,
+          "first_timestamp": "2025-10-14 10:33:01.051000+00:00",
+          "last_timestamp": "2025-11-10 14:58:01.017000+00:00"
+        },
+        {
+          "ev_bucket": "8-12",
+          "candidates": 1804,
+          "predicted_ev_bps": 9.610746438350336,
+          "realized_ev_bps": 8.871782120205712,
+          "predicted_log_utility": -0.00021021160506298393,
+          "realized_log_utility": 0.0002943695177793185,
+          "expected_holding_seconds": 3330.664119695084,
+          "expected_ev_bps_per_minute": 8.704479334360753,
+          "expected_log_utility_per_hour": -0.03506116804339923,
+          "first_timestamp": "2025-10-14 10:32:01.043000+00:00",
+          "last_timestamp": "2025-11-10 14:55:01.001000+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 17,
+          "predicted_ev_bps": 16.721470206496473,
+          "realized_ev_bps": 48.16792419987397,
+          "predicted_log_utility": 0.000978772768490355,
+          "realized_log_utility": 0.003866975684177207,
+          "expected_holding_seconds": 4378.916907815372,
+          "expected_ev_bps_per_minute": 1.5518083852079054,
+          "expected_log_utility_per_hour": -0.002378553942394914,
+          "first_timestamp": "2025-10-21 22:32:01+00:00",
+          "last_timestamp": "2025-11-05 00:45:01+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 194,
+          "predicted_ev_bps": 25.754508069653127,
+          "realized_ev_bps": 49.48199728243614,
+          "predicted_log_utility": 0.0010546913231438968,
+          "realized_log_utility": 0.0032068348357007044,
+          "expected_holding_seconds": 4859.444707496879,
+          "expected_ev_bps_per_minute": 67.30719697627222,
+          "expected_log_utility_per_hour": -0.10386492036431715,
+          "first_timestamp": "2025-10-16 09:35:01.015000+00:00",
+          "last_timestamp": "2025-11-06 16:43:01.068000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 724468,
+          "predicted_ev_bps": -7.906777278331307,
+          "realized_ev_bps": -8.073598429365788,
+          "predicted_log_utility": -0.001776051645133331,
+          "realized_log_utility": -0.0017319233504266647,
+          "expected_holding_seconds": 1071.3097889744765,
+          "expected_ev_bps_per_minute": -3.797938833569563,
+          "expected_log_utility_per_hour": -0.07009113858619063,
+          "first_timestamp": "2025-11-11 00:00:01.214000+00:00",
+          "last_timestamp": "2025-12-08 23:48:01.202000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 2,
+          "predicted_ev_bps": 4.925588631853615,
+          "realized_ev_bps": 109.96839221842195,
+          "predicted_log_utility": -0.0008202854276892864,
+          "realized_log_utility": 0.005319825059621841,
+          "expected_holding_seconds": 12414.76953125,
+          "expected_ev_bps_per_minute": 0.025976600693956943,
+          "expected_log_utility_per_hour": -0.00025956159073890214,
+          "first_timestamp": "2025-11-14 05:02:01.049000+00:00",
+          "last_timestamp": "2025-11-21 07:36:01.002000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 105,
+          "predicted_ev_bps": 61.69057403593037,
+          "realized_ev_bps": -63.545437016517845,
+          "predicted_log_utility": 0.0016404309066265362,
+          "realized_log_utility": -0.003327591187054678,
+          "expected_holding_seconds": 17508.167857142857,
+          "expected_ev_bps_per_minute": 0.21296125935601484,
+          "expected_log_utility_per_hour": 0.00033722489706522956,
+          "first_timestamp": "2025-11-14 14:39:01.006000+00:00",
+          "last_timestamp": "2025-11-21 19:12:01.098000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 718243,
+          "predicted_ev_bps": -8.116912716117687,
+          "realized_ev_bps": -8.06857630911407,
+          "predicted_log_utility": -0.0021975587741176112,
+          "realized_log_utility": -0.0022450785072488217,
+          "expected_holding_seconds": 164860.38625113328,
+          "expected_ev_bps_per_minute": -2.0179835751224697,
+          "expected_log_utility_per_hour": -0.02910622856995553,
+          "first_timestamp": "2025-12-09 00:00:02.019000+00:00",
+          "last_timestamp": "2026-01-05 23:49:01.038000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 54,
+          "predicted_ev_bps": 0.8788629526059389,
+          "realized_ev_bps": -9.904112152302709,
+          "predicted_log_utility": -0.0020998904323212323,
+          "realized_log_utility": -0.0022239059059069844,
+          "expected_holding_seconds": 328828.40625,
+          "expected_ev_bps_per_minute": 0.00016036259688667433,
+          "expected_log_utility_per_hour": -2.2989514934452035e-05,
+          "first_timestamp": "2025-12-15 11:38:01.013000+00:00",
+          "last_timestamp": "2026-01-05 11:41:01.150000+00:00"
+        },
+        {
+          "ev_bucket": "2-4",
+          "candidates": 27,
+          "predicted_ev_bps": 3.4594788969376236,
+          "realized_ev_bps": -2.2249242518672787,
+          "predicted_log_utility": -0.0019108847470987974,
+          "realized_log_utility": -0.0003976887353243594,
+          "expected_holding_seconds": 328828.40625,
+          "expected_ev_bps_per_minute": 0.0006312372345911262,
+          "expected_log_utility_per_hour": -2.092028838994402e-05,
+          "first_timestamp": "2025-12-16 11:54:01.201000+00:00",
+          "last_timestamp": "2026-01-01 11:29:01.567000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 1,
+          "predicted_ev_bps": 4.907129391032333,
+          "realized_ev_bps": -12.24261050831043,
+          "predicted_log_utility": -0.0019778013584472705,
+          "realized_log_utility": -0.0028668382286223667,
+          "expected_holding_seconds": 328828.40625,
+          "expected_ev_bps_per_minute": 0.0008953842121476997,
+          "expected_log_utility_per_hour": -2.1652888725790167e-05,
+          "first_timestamp": "2025-12-22 10:57:01.104000+00:00",
+          "last_timestamp": "2025-12-22 10:57:01.104000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 721920,
+          "predicted_ev_bps": -8.00931949532337,
+          "realized_ev_bps": -7.8421925390188765,
+          "predicted_log_utility": -0.002032383369724638,
+          "realized_log_utility": -0.002153320558954051,
+          "expected_holding_seconds": 1012.8109250371338,
+          "expected_ev_bps_per_minute": -2.7957805643733065,
+          "expected_log_utility_per_hour": -0.04154516754433233,
+          "first_timestamp": "2026-01-06 00:00:01.307000+00:00",
+          "last_timestamp": "2026-02-02 23:47:01.023000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 390,
+          "predicted_ev_bps": 0.7770232766875239,
+          "realized_ev_bps": 3.5772991634544904,
+          "predicted_log_utility": -0.00044031303775521276,
+          "realized_log_utility": 0.0002840376362317817,
+          "expected_holding_seconds": 1881.9971961388221,
+          "expected_ev_bps_per_minute": 0.16825428836598486,
+          "expected_log_utility_per_hour": -0.008367817308147684,
+          "first_timestamp": "2026-01-06 17:41:01.031000+00:00",
+          "last_timestamp": "2026-02-02 07:12:01.071000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 52,
+          "predicted_ev_bps": 4.619432613042921,
+          "realized_ev_bps": -14.096478256662733,
+          "predicted_log_utility": -0.0002918342255582252,
+          "realized_log_utility": -0.00048012539194200677,
+          "expected_holding_seconds": 2845.2949500450723,
+          "expected_ev_bps_per_minute": 0.30876489939475776,
+          "expected_log_utility_per_hour": -0.00215986108351951,
+          "first_timestamp": "2026-01-06 17:41:01.031000+00:00",
+          "last_timestamp": "2026-02-02 07:06:01.064000+00:00"
+        },
+        {
+          "ev_bucket": "8-12",
+          "candidates": 1806,
+          "predicted_ev_bps": 8.211733699495449,
+          "realized_ev_bps": -5.738334438362136,
+          "predicted_log_utility": 0.0006492385108460003,
+          "realized_log_utility": -0.0005511747195731939,
+          "expected_holding_seconds": 3780.653104526524,
+          "expected_ev_bps_per_minute": 15.60436352654091,
+          "expected_log_utility_per_hour": 0.19305305270083892,
+          "first_timestamp": "2026-01-06 17:41:01.031000+00:00",
+          "last_timestamp": "2026-02-02 07:11:01.117000+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 1,
+          "predicted_ev_bps": 14.100682734134498,
+          "realized_ev_bps": -9.540266414747915,
+          "predicted_log_utility": 0.0008124298943607383,
+          "realized_log_utility": -0.0005970451008644707,
+          "expected_holding_seconds": 285.75872802734375,
+          "expected_ev_bps_per_minute": 2.9606828455896324,
+          "expected_log_utility_per_hour": 0.010235024630354576,
+          "first_timestamp": "2026-01-31 18:46:01.007000+00:00",
+          "last_timestamp": "2026-01-31 18:46:01.007000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 437,
+          "predicted_ev_bps": 101.75346010601058,
+          "realized_ev_bps": 2.1539838114166154,
+          "predicted_log_utility": 0.005969436632530522,
+          "realized_log_utility": 0.0003409949183652978,
+          "expected_holding_seconds": 12093.842009450533,
+          "expected_ev_bps_per_minute": 1.3854382693318736,
+          "expected_log_utility_per_hour": 0.006608722577140724,
+          "first_timestamp": "2026-01-13 22:11:01.007000+00:00",
+          "last_timestamp": "2026-02-01 23:33:01.075000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 719972,
+          "predicted_ev_bps": -8.392236965729902,
+          "realized_ev_bps": -7.578096110510919,
+          "predicted_log_utility": -0.0016217380070568778,
+          "realized_log_utility": -0.0015224541129229936,
+          "expected_holding_seconds": 1165.3408651386314,
+          "expected_ev_bps_per_minute": -7.104969923996278,
+          "expected_log_utility_per_hour": -0.09284082831411576,
+          "first_timestamp": "2026-02-03 00:00:01.723000+00:00",
+          "last_timestamp": "2026-03-02 23:48:01.206000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 3,
+          "predicted_ev_bps": 1.0342323855106352,
+          "realized_ev_bps": -70.6224184688591,
+          "predicted_log_utility": 0.0009463065606101304,
+          "realized_log_utility": -0.003927880174901674,
+          "expected_holding_seconds": 4471.6059163411455,
+          "expected_ev_bps_per_minute": 0.02827817066858734,
+          "expected_log_utility_per_hour": 0.003468816381549202,
+          "first_timestamp": "2026-02-06 01:58:01.067000+00:00",
+          "last_timestamp": "2026-02-25 17:46:01+00:00"
+        },
+        {
+          "ev_bucket": "2-4",
+          "candidates": 2559,
+          "predicted_ev_bps": 2.534086963463337,
+          "realized_ev_bps": 40.19868934278204,
+          "predicted_log_utility": 0.0011186901873522172,
+          "realized_log_utility": 0.0017787469932197923,
+          "expected_holding_seconds": 7133.439819669854,
+          "expected_ev_bps_per_minute": 0.6749366842638717,
+          "expected_log_utility_per_hour": 0.015999479798710463,
+          "first_timestamp": "2026-02-03 14:36:01.109000+00:00",
+          "last_timestamp": "2026-03-02 17:05:01.014000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 15,
+          "predicted_ev_bps": 5.9450302815525005,
+          "realized_ev_bps": -4.813563763821539,
+          "predicted_log_utility": 0.002570775209211582,
+          "realized_log_utility": 0.00010150822351644069,
+          "expected_holding_seconds": 2424.178747558594,
+          "expected_ev_bps_per_minute": 0.19324549185668738,
+          "expected_log_utility_per_hour": 0.004077556783283953,
+          "first_timestamp": "2026-02-03 15:18:01.010000+00:00",
+          "last_timestamp": "2026-02-28 14:00:01.066000+00:00"
+        },
+        {
+          "ev_bucket": "8-12",
+          "candidates": 14,
+          "predicted_ev_bps": 10.00524809316723,
+          "realized_ev_bps": -5.956931313927067,
+          "predicted_log_utility": 0.0018979405061951124,
+          "realized_log_utility": -0.0005926195283216518,
+          "expected_holding_seconds": 2579.31689453125,
+          "expected_ev_bps_per_minute": 42.14321587704624,
+          "expected_log_utility_per_hour": 0.2855977450292614,
+          "first_timestamp": "2026-02-03 19:28:01.035000+00:00",
+          "last_timestamp": "2026-02-25 17:45:00+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 266,
+          "predicted_ev_bps": 15.337963033482419,
+          "realized_ev_bps": -12.421016094936846,
+          "predicted_log_utility": 0.0017869027303820887,
+          "realized_log_utility": -0.0008125502295836346,
+          "expected_holding_seconds": 3605.898252788343,
+          "expected_ev_bps_per_minute": 3.919746602552449,
+          "expected_log_utility_per_hour": -0.004401951180258658,
+          "first_timestamp": "2026-02-03 15:27:01.004000+00:00",
+          "last_timestamp": "2026-03-02 15:32:01.065000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 1176,
+          "predicted_ev_bps": 65.36359673062772,
+          "realized_ev_bps": -7.672594074957341,
+          "predicted_log_utility": 0.0028964457958622885,
+          "realized_log_utility": -0.0004684111266186266,
+          "expected_holding_seconds": 6106.984568978653,
+          "expected_ev_bps_per_minute": 34.363657333793725,
+          "expected_log_utility_per_hour": 0.0866818846646681,
+          "first_timestamp": "2026-02-03 14:56:01.059000+00:00",
+          "last_timestamp": "2026-03-02 17:05:01.014000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 723538,
+          "predicted_ev_bps": -7.830188965289769,
+          "realized_ev_bps": -8.005522383421592,
+          "predicted_log_utility": -0.0017403829388289412,
+          "realized_log_utility": -0.0017587646479517987,
+          "expected_holding_seconds": 1006.4310442559544,
+          "expected_ev_bps_per_minute": -1.0579907046062758,
+          "expected_log_utility_per_hour": -0.013556331546249545,
+          "first_timestamp": "2026-03-03 00:00:03.049000+00:00",
+          "last_timestamp": "2026-03-30 23:45:01.439000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 283,
+          "predicted_ev_bps": 0.9506926324621675,
+          "realized_ev_bps": -4.133195361862006,
+          "predicted_log_utility": -0.00042027739249726005,
+          "realized_log_utility": -0.0005771219936075602,
+          "expected_holding_seconds": 2039.1317423358823,
+          "expected_ev_bps_per_minute": 0.043136447290647285,
+          "expected_log_utility_per_hour": -0.0011605089349112506,
+          "first_timestamp": "2026-03-03 15:32:01.032000+00:00",
+          "last_timestamp": "2026-03-30 11:27:01.010000+00:00"
+        },
+        {
+          "ev_bucket": "2-4",
+          "candidates": 995,
+          "predicted_ev_bps": 3.1052428853505547,
+          "realized_ev_bps": 5.196372571830922,
+          "predicted_log_utility": -0.00029627056159379795,
+          "realized_log_utility": 0.00024977853972481137,
+          "expected_holding_seconds": 3925.9653465079305,
+          "expected_ev_bps_per_minute": 0.1214963130704388,
+          "expected_log_utility_per_hour": -0.0006770609208046492,
+          "first_timestamp": "2026-03-03 15:32:01.032000+00:00",
+          "last_timestamp": "2026-03-30 11:27:01.010000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 11,
+          "predicted_ev_bps": 85.5412476629862,
+          "realized_ev_bps": 64.34829264093177,
+          "predicted_log_utility": 0.0011080481051641636,
+          "realized_log_utility": 0.0030706595648011606,
+          "expected_holding_seconds": 10429.24471768466,
+          "expected_ev_bps_per_minute": 0.5121343307030366,
+          "expected_log_utility_per_hour": 0.00043755183128498887,
+          "first_timestamp": "2026-03-04 09:48:01.057000+00:00",
+          "last_timestamp": "2026-03-23 11:21:01.007000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": true
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 724946,
+          "predicted_ev_bps": -7.380487216673011,
+          "realized_ev_bps": -7.858521048798369,
+          "predicted_log_utility": -0.0019421546701310927,
+          "realized_log_utility": -0.0020256207828467853,
+          "expected_holding_seconds": 951.5500124206786,
+          "expected_ev_bps_per_minute": -0.7510477752443988,
+          "expected_log_utility_per_hour": -0.012652023878265648,
+          "first_timestamp": "2026-03-31 00:00:01.197000+00:00",
+          "last_timestamp": "2026-04-27 23:49:01.474000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": true
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 724902,
+          "predicted_ev_bps": -8.166501468347876,
+          "realized_ev_bps": -7.869990299914497,
+          "predicted_log_utility": -0.002301698506310865,
+          "realized_log_utility": -0.002259035122837259,
+          "expected_holding_seconds": 948.2645446501512,
+          "expected_ev_bps_per_minute": -0.6748022298544772,
+          "expected_log_utility_per_hour": -0.011312189509849626,
+          "first_timestamp": "2026-04-28 00:00:02.535000+00:00",
+          "last_timestamp": "2026-05-25 23:45:01.072000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 6,
+          "predicted_ev_bps": 5.353088374262257,
+          "realized_ev_bps": 14.138564264957047,
+          "predicted_log_utility": 0.00021090605560943474,
+          "realized_log_utility": 0.0013864411809187778,
+          "expected_holding_seconds": 2583.055948893229,
+          "expected_ev_bps_per_minute": 0.14913889752918896,
+          "expected_log_utility_per_hour": 0.0005967524106017959,
+          "first_timestamp": "2026-05-04 10:08:01.012000+00:00",
+          "last_timestamp": "2026-05-04 10:50:01.027000+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 19,
+          "predicted_ev_bps": 14.846205876851977,
+          "realized_ev_bps": 12.896364877722258,
+          "predicted_log_utility": 0.0036024439875598523,
+          "realized_log_utility": 0.0020047780958341492,
+          "expected_holding_seconds": 419.9185341282895,
+          "expected_ev_bps_per_minute": 378.49744886596204,
+          "expected_log_utility_per_hour": 6.6006117971862555,
+          "first_timestamp": "2026-05-04 10:08:01.012000+00:00",
+          "last_timestamp": "2026-05-24 10:28:01.026000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 2,
+          "predicted_ev_bps": 40.56460803726567,
+          "realized_ev_bps": -5.274833965538177,
+          "predicted_log_utility": 0.005725651934470249,
+          "realized_log_utility": -0.0007402716097532699,
+          "expected_holding_seconds": 657.5999755859375,
+          "expected_ev_bps_per_minute": 4.344202286135491,
+          "expected_log_utility_per_hour": 0.03679077613740214,
+          "first_timestamp": "2026-05-24 10:28:01.026000+00:00",
+          "last_timestamp": "2026-05-24 10:28:01.026000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 712051,
+          "predicted_ev_bps": -7.851952417153359,
+          "realized_ev_bps": -8.641320190384134,
+          "predicted_log_utility": -0.001912275876209913,
+          "realized_log_utility": -0.001962184221510803,
+          "expected_holding_seconds": 992.7739092822802,
+          "expected_ev_bps_per_minute": -1.2802485992370565,
+          "expected_log_utility_per_hour": -0.022700802449236918,
+          "first_timestamp": "2026-05-26 00:00:01.422000+00:00",
+          "last_timestamp": "2026-06-22 23:45:01.732000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 10,
+          "predicted_ev_bps": 1.038499901740963,
+          "realized_ev_bps": 6.909704867882785,
+          "predicted_log_utility": 8.406291749469535e-05,
+          "realized_log_utility": 0.0006174188888229924,
+          "expected_holding_seconds": 1629.5841796875,
+          "expected_ev_bps_per_minute": 0.05430898959918466,
+          "expected_log_utility_per_hour": -0.0008903248422883533,
+          "first_timestamp": "2026-05-27 14:28:01.050000+00:00",
+          "last_timestamp": "2026-06-17 19:41:01.109000+00:00"
+        },
+        {
+          "ev_bucket": "2-4",
+          "candidates": 3041,
+          "predicted_ev_bps": 2.6229486066375167,
+          "realized_ev_bps": -11.2508391891293,
+          "predicted_log_utility": 0.0001498204274400315,
+          "realized_log_utility": -0.0011156910118348493,
+          "expected_holding_seconds": 2014.9516984311738,
+          "expected_ev_bps_per_minute": 6.233449161619794,
+          "expected_log_utility_per_hour": -0.170780504638538,
+          "first_timestamp": "2026-05-27 14:21:01.077000+00:00",
+          "last_timestamp": "2026-06-22 14:39:01.079000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 4507,
+          "predicted_ev_bps": 5.699909771338306,
+          "realized_ev_bps": -12.076638421792406,
+          "predicted_log_utility": 0.0006912400170361756,
+          "realized_log_utility": -0.001033280113063734,
+          "expected_holding_seconds": 2654.934395210532,
+          "expected_ev_bps_per_minute": 14.501702844783734,
+          "expected_log_utility_per_hour": -0.14619796606382765,
+          "first_timestamp": "2026-05-27 14:33:01+00:00",
+          "last_timestamp": "2026-06-22 14:38:01.059000+00:00"
+        },
+        {
+          "ev_bucket": "8-12",
+          "candidates": 3,
+          "predicted_ev_bps": 11.019810594429964,
+          "realized_ev_bps": 42.308462211588704,
+          "predicted_log_utility": -0.0001688924981014307,
+          "realized_log_utility": 0.003352667242921542,
+          "expected_holding_seconds": 1312.688212076823,
+          "expected_ev_bps_per_minute": 201.41208780170098,
+          "expected_log_utility_per_hour": -0.8259766186124574,
+          "first_timestamp": "2026-06-05 16:57:01.045000+00:00",
+          "last_timestamp": "2026-06-05 23:17:01.136000+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 647,
+          "predicted_ev_bps": 15.378670637138681,
+          "realized_ev_bps": -15.123965688557021,
+          "predicted_log_utility": 0.0018455253639298368,
+          "realized_log_utility": -0.0012986897334779084,
+          "expected_holding_seconds": 3004.6876079199674,
+          "expected_ev_bps_per_minute": 25.45820108252698,
+          "expected_log_utility_per_hour": -0.058944967628039295,
+          "first_timestamp": "2026-06-02 16:16:01.079000+00:00",
+          "last_timestamp": "2026-06-14 22:15:01.106000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 4181,
+          "predicted_ev_bps": 39.50844451857521,
+          "realized_ev_bps": -21.34373249397619,
+          "predicted_log_utility": 0.0030632857527958467,
+          "realized_log_utility": -0.0014339176597452873,
+          "expected_holding_seconds": 4544.9929391769265,
+          "expected_ev_bps_per_minute": 28.161342129978784,
+          "expected_log_utility_per_hour": -0.016548488022220562,
+          "first_timestamp": "2026-05-28 14:39:01.067000+00:00",
+          "last_timestamp": "2026-06-17 20:43:01.008000+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    },
+    {
+      "buckets": [
+        {
+          "ev_bucket": "<0",
+          "candidates": 723232,
+          "predicted_ev_bps": -7.847630406285213,
+          "realized_ev_bps": -7.932524087284125,
+          "predicted_log_utility": -0.0020726175353604254,
+          "realized_log_utility": -0.0020659708693300818,
+          "expected_holding_seconds": 968.9822547032471,
+          "expected_ev_bps_per_minute": -0.7312510832695178,
+          "expected_log_utility_per_hour": -0.011254341024818443,
+          "first_timestamp": "2026-06-23 00:00:01.061000+00:00",
+          "last_timestamp": "2026-07-20 23:48:01.048000+00:00"
+        },
+        {
+          "ev_bucket": "0-2",
+          "candidates": 9,
+          "predicted_ev_bps": 1.1320911605198942,
+          "realized_ev_bps": -6.82057277126282,
+          "predicted_log_utility": -7.946251634008749e-05,
+          "realized_log_utility": -0.0005688057478699057,
+          "expected_holding_seconds": 1729.0606960720486,
+          "expected_ev_bps_per_minute": 0.03652245237843759,
+          "expected_log_utility_per_hour": -0.0005857734531388737,
+          "first_timestamp": "2026-06-24 17:34:01.002000+00:00",
+          "last_timestamp": "2026-07-08 13:52:01.287000+00:00"
+        },
+        {
+          "ev_bucket": "2-4",
+          "candidates": 284,
+          "predicted_ev_bps": 2.3550900804646107,
+          "realized_ev_bps": 0.14076320147759344,
+          "predicted_log_utility": -0.0002645111051269241,
+          "realized_log_utility": -0.00011581086664472809,
+          "expected_holding_seconds": 2145.3135904661367,
+          "expected_ev_bps_per_minute": 1.0073060412284334,
+          "expected_log_utility_per_hour": -0.016119604903005513,
+          "first_timestamp": "2026-06-24 13:45:01.086000+00:00",
+          "last_timestamp": "2026-07-17 14:40:01.010000+00:00"
+        },
+        {
+          "ev_bucket": "4-8",
+          "candidates": 469,
+          "predicted_ev_bps": 6.289016839562505,
+          "realized_ev_bps": 3.5860917268337715,
+          "predicted_log_utility": 0.00011201635383007926,
+          "realized_log_utility": 0.00016658161818874025,
+          "expected_holding_seconds": 2335.588149991879,
+          "expected_ev_bps_per_minute": 0.25193968970516195,
+          "expected_log_utility_per_hour": -4.28615220347211e-05,
+          "first_timestamp": "2026-06-24 13:46:01.032000+00:00",
+          "last_timestamp": "2026-07-15 14:49:01.074000+00:00"
+        },
+        {
+          "ev_bucket": "8-12",
+          "candidates": 186,
+          "predicted_ev_bps": 10.330592019125488,
+          "realized_ev_bps": 1.8801388671758346,
+          "predicted_log_utility": 0.00011678592351514447,
+          "realized_log_utility": 0.00027637740846236567,
+          "expected_holding_seconds": 2493.095467188025,
+          "expected_ev_bps_per_minute": 0.30688412060092196,
+          "expected_log_utility_per_hour": 8.551902757584199e-05,
+          "first_timestamp": "2026-06-24 13:53:01.090000+00:00",
+          "last_timestamp": "2026-07-13 14:18:01.043000+00:00"
+        },
+        {
+          "ev_bucket": "12-20",
+          "candidates": 227,
+          "predicted_ev_bps": 15.160003143843463,
+          "realized_ev_bps": -13.047371094590101,
+          "predicted_log_utility": 0.0007154993471514976,
+          "realized_log_utility": 8.582239115458311e-05,
+          "expected_holding_seconds": 3171.187391911309,
+          "expected_ev_bps_per_minute": 0.3683313424478328,
+          "expected_log_utility_per_hour": 0.000878765622793554,
+          "first_timestamp": "2026-06-24 13:53:01.090000+00:00",
+          "last_timestamp": "2026-07-10 14:33:01.004000+00:00"
+        },
+        {
+          "ev_bucket": ">20",
+          "candidates": 339,
+          "predicted_ev_bps": 47.63643303771039,
+          "realized_ev_bps": 13.96683508990577,
+          "predicted_log_utility": 0.0004442717140667219,
+          "realized_log_utility": 0.0004940654975868761,
+          "expected_holding_seconds": 3970.091435345225,
+          "expected_ev_bps_per_minute": 1.1805051323972255,
+          "expected_log_utility_per_hour": 0.0006890619316757897,
+          "first_timestamp": "2026-06-24 17:31:01.048000+00:00",
+          "last_timestamp": "2026-07-15 14:35:01+00:00"
+        }
+      ],
+      "realized_utility_monotone_non_decreasing": false
+    }
+  ]
+}

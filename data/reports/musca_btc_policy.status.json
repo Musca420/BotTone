@@ -1,0 +1,17 @@
+{
+  "phase": "critic_crossfit",
+  "detail": "fold 1 block 3: past-only critic encoding",
+  "percent": 42.0,
+  "updated_at": "2026-08-12T10:23:48.558208+00:00",
+  "protocol_hash": "e149e2cc97c22d5af2f95e34df49112577de4d958fc7e8b97af4cd6e59d188dc",
+  "pid": 12952,
+  "cpu_seconds": 19.47,
+  "ram_gb": 0.559,
+  "elapsed_seconds": 16.1,
+  "eta_seconds": null,
+  "fold": "1",
+  "crossfit_block": 3,
+  "history_rows": 224,
+  "held_out_rows": 56,
+  "strictly_past_only": true
+}
