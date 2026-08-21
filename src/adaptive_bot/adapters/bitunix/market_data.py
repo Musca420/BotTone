@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,6 +14,7 @@ from adaptive_bot.domain.events import MarketEvent
 from adaptive_bot.domain.models import Candle
 
 JsonGetter = Callable[[str], dict[str, Any]]
+ProgressCallback = Callable[[int, float], None]
 
 
 class BitunixMarketData:
@@ -23,12 +25,16 @@ class BitunixMarketData:
         market: Literal["spot", "futures"],
         *,
         timeframe_minutes: int = 15,
+        futures_price_type: Literal["LAST_PRICE", "MARK_PRICE"] = "LAST_PRICE",
+        progress_callback: ProgressCallback | None = None,
         get_json: JsonGetter | None = None,
     ) -> None:
         if timeframe_minutes not in {1, 5, 15, 30, 60, 120, 240}:
             raise ValueError("unsupported Bitunix timeframe")
         self.market = market
         self.timeframe_minutes = timeframe_minutes
+        self.futures_price_type = futures_price_type
+        self._progress_callback = progress_callback
         self._get_json = get_json or _get_json
 
     async def historical(
@@ -70,8 +76,28 @@ class BitunixMarketData:
             if next_cursor >= cursor_ms:
                 raise RuntimeError("Bitunix history pagination did not advance")
             cursor_ms = next_cursor
+            if self._progress_callback is not None:
+                fraction = (end_ms - max(cursor_ms, start_ms)) / (end_ms - start_ms)
+                self._progress_callback(len(rows), min(1.0, max(0.0, fraction)))
             if min(timestamps) <= start_ms:
                 break
+        interval_ms = self.timeframe_minutes * 60_000
+        for missing_ms in _missing_timestamps(rows, interval_ms):
+            payload = self._get_json(self._history_url(instrument, missing_ms + interval_ms))
+            batch = payload.get("data")
+            if isinstance(batch, dict):
+                batch = batch.get("list", batch.get("items", [batch]))
+            if not isinstance(batch, list):
+                continue
+            for raw in batch:
+                if not isinstance(raw, dict):
+                    continue
+                candle, timestamp_ms = _candle(raw, instrument, self.market, self.timeframe_minutes)
+                if start_ms <= timestamp_ms < end_ms:
+                    rows[timestamp_ms] = candle
+            time.sleep(0.11)
+        if self._progress_callback is not None:
+            self._progress_callback(len(rows), 1.0)
         return tuple(rows[key] for key in sorted(rows))
 
     def _history_url(self, instrument: str, end_ms: int) -> str:
@@ -81,7 +107,7 @@ class BitunixMarketData:
                 "endTime": end_ms,
                 "interval": f"{self.timeframe_minutes}m",
                 "limit": 200,
-                "type": "LAST_PRICE",
+                "type": self.futures_price_type,
             }
             base = "https://fapi.bitunix.com/api/v1/futures/market/kline"
         else:
@@ -111,17 +137,36 @@ def _candle(
 ) -> tuple[Candle, int]:
     timestamp_ms = _timestamp_ms(raw.get("time", raw.get("ts")))
     exchange_timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=UTC)
-    volume = raw.get("baseVol", raw.get("volume", "0"))
+    volume = (
+        raw.get("quoteVol", raw.get("baseVol", raw.get("volume", "0")))
+        if market == "futures"
+        else raw.get("baseVol", raw.get("volume", "0"))
+    )
+    open_price = Decimal(str(raw["open"]))
+    high_price = Decimal(str(raw["high"]))
+    low_price = Decimal(str(raw["low"]))
+    close_price = Decimal(str(raw["close"]))
+    envelope_high = max(open_price, high_price, close_price)
+    envelope_low = min(open_price, low_price, close_price)
+    deviation_bps = (
+        ((envelope_high - high_price) + (low_price - envelope_low)) / close_price * Decimal("10000")
+    )
+    if deviation_bps > Decimal("100"):
+        raise ValueError(
+            "Bitunix OHLC envelope deviation exceeds 100 bps: "
+            f"time={timestamp_ms} open={open_price} high={high_price} "
+            f"low={low_price} close={close_price} deviation_bps={deviation_bps}"
+        )
     return (
         Candle(
             exchange_timestamp=exchange_timestamp,
             received_timestamp=max(datetime.now(UTC), exchange_timestamp),
             source=f"bitunix-{market}",
             instrument=instrument,
-            open=Decimal(str(raw["open"])),
-            high=Decimal(str(raw["high"])),
-            low=Decimal(str(raw["low"])),
-            close=Decimal(str(raw["close"])),
+            open=open_price,
+            high=envelope_high,
+            low=envelope_low,
+            close=close_price,
             volume=Decimal(str(volume)),
             timeframe_minutes=timeframe_minutes,
         ),
@@ -139,3 +184,12 @@ def _timestamp_ms(value: object) -> int:
             raise ValueError("Bitunix candle timestamp must include a timezone")
         return int(parsed.timestamp() * 1000)
     raise ValueError("Bitunix candle timestamp is missing")
+
+
+def _missing_timestamps(rows: dict[int, Candle], interval_ms: int) -> tuple[int, ...]:
+    if len(rows) < 2:
+        return ()
+    first, last = min(rows), max(rows)
+    return tuple(
+        timestamp for timestamp in range(first, last, interval_ms) if timestamp not in rows
+    )

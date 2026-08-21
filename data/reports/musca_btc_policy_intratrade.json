@@ -1,0 +1,10 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "entry_policy_gate_passed": false,
+  "activated": false,
+  "reason": "ENTRY_POLICY_PREREQUISITE_NOT_PASSED",
+  "deterministic_management_retained": true,
+  "fake_learned_actions_forbidden": true
+}

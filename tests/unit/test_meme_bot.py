@@ -13,6 +13,7 @@ from adaptive_bot.domain.exceptions import LiveTradingDisabled
 from adaptive_bot.meme.collector import (
     MemeCollectorState,
     SymbolStreamState,
+    _select_adaptive_range,
     adaptive_range_metrics,
     apply_ws_message,
 )
@@ -33,10 +34,39 @@ from adaptive_bot.meme.strategy import (
 )
 from adaptive_bot.meme.universe import (
     MarketQuality,
+    MemeContract,
     choose_leverage,
     intersect_meme_contracts,
     rank_candidates,
 )
+
+
+async def test_range_selector_prioritizes_liquid_symbols(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    liquid = MemeContract("LIQUIDUSDT", "LIQUID", *(Decimal("1"),) * 5)
+    illiquid = MemeContract("ILLIQUIDUSDT", "ILLIQUID", *(Decimal("1"),) * 5)
+    volumes = {liquid.symbol: Decimal("6000000"), illiquid.symbol: Decimal("100000")}
+    config = MemeBotConfig(universe={"detailed_symbols": 1}, storage={"raw_directory": tmp_path})
+
+    monkeypatch.setattr(
+        "adaptive_bot.meme.collector._select_liquid",
+        lambda *_: ((liquid, illiquid), volumes),
+    )
+    monkeypatch.setattr(
+        "adaptive_bot.meme.collector._latest_candles", lambda symbol: [{"symbol": symbol}]
+    )
+    monkeypatch.setattr(
+        "adaptive_bot.meme.collector.adaptive_range_metrics",
+        lambda candles, _: {
+            "range_favorable": True,
+            "adx": "10",
+            "z": "1",
+            "score": "100" if candles[0]["symbol"] == illiquid.symbol else "1",
+            "reason": "range_favorable",
+        },
+    )
+    selected, _, _ = await _select_adaptive_range(config, (liquid, illiquid))
+
+    assert selected == (liquid,)
 
 
 def test_meme_config_is_isolated_and_live_locked() -> None:

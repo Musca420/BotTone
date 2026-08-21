@@ -1,0 +1,32 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "target": "log1p(risk-sized portfolio return)",
+  "oos_metrics": {
+    "trades": 8,
+    "trades_per_day": 0.02857142857142857,
+    "expectancy_bps": -13.840423258236862,
+    "equity_expectancy": -0.002401490775485088,
+    "mean_log_growth": -0.002417587548612297,
+    "total_log_growth": -0.019340700388898378,
+    "profit_factor": 0.31377546431835424,
+    "notional_profit_factor": 0.4538398377512741,
+    "win_rate": 0.375,
+    "maximum_drawdown": 0.020828673038403966,
+    "positive_active_days": 0.2,
+    "mean_daily_return": -6.86404789236408e-05,
+    "daily_lcb_95": -0.00016452264548724648,
+    "weekly_lcb_95": -0.0009371449878486648,
+    "stress_1_5x_expectancy_bps": -17.84042325823686,
+    "stress_2x_expectancy_bps": -21.84042325823686,
+    "risk_violations": 0,
+    "long_trades": 8,
+    "short_trades": 0
+  },
+  "accounting_units_separated": [
+    "notional_bps",
+    "portfolio_return",
+    "log_growth"
+  ]
+}

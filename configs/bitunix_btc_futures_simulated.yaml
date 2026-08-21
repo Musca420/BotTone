@@ -21,9 +21,69 @@ bitunix:
   margin_coin: USDT
   margin_mode: isolated
   leverage: "10"
+research:
+  enabled: true
+  history_months: 12
+  broad_candidates: 200
+  random_seed: 20260802
+  database_path: data/research/research.duckdb
+  report_path: data/reports/research.json
+  history_path: data/processed/bitunix_btcusdt_observed_5m.parquet
+  top_shadow_candidates: 10
+  gpu_enabled: true
+  parallel_workers: 4
+machine_learning:
+  enabled: true
+  protocol_version: scientific_v2
+  history_path: data/processed/bitunix_btcusdt_observed_5m.parquet
+  archive_directory: data/ml/raw
+  manifest_path: data/ml/dataset_manifest.json
+  report_path: data/reports/ml_research.json
+  status_path: data/reports/ml_research.status.json
+  model_path: data/models/adaptive_range_ml.joblib
+  candidate_directory: data/models/candidates
+  model_card_path: data/reports/ml_model_card.md
+  optuna_path: data/research/ml_optuna.db
+  trials: 25
+  n_splits: 5
+  max_holding_bars: 12
+  stop_atr: 2.5
+  probability_threshold: 0.67
+  taker_fee_bps: 6.0
+  symbols: [BTCUSDT, ETHUSDT]
+  timeframes: [5, 15, 30, 60]
+  strategy_candidates: 3000
+  full_candidates: 120
+  meta_candidates: 12
+  model_trials_per_side: 40
+  gpu_required: true
+  download_workers: 4
+  parallel_workers: 8
+  holdout_weeks: 12
+  minimum_oos_trades: 300
+  minimum_holdout_trades: 30
+  minimum_side_trades: 100
+  minimum_profit_factor: 1.15
+  maximum_pbo: 0.20
+  minimum_dsr_probability: 0.95
+  maximum_reality_check_pvalue: 0.05
+  outer_train_weeks: 52
+  outer_calibration_weeks: 4
+  outer_test_weeks: 4
+  outer_step_weeks: 4
+  v6_microstructure_directory: data/raw/bitunix_microstructure
+  v6_report_path: data/reports/ml_expert_research_v6.json
+  v6_status_path: data/reports/ml_expert_research_v6.status.json
+  maker_fee_bps: 2.0
+  maker_taker_fee_bps: 6.0
+  maker_fit_weeks: 6
+  maker_calibration_weeks: 2
+  maker_holdout_weeks: 4
 strategy:
   timeframe_minutes: 5
   crypto_vwap_window: 288
+  range_adx_threshold: 20
+  trend_adx_threshold: 25
   short_enabled: true
   session_flatten_enabled: false
   fixed_stop_fraction: "0.01"
@@ -48,3 +108,5 @@ backtest:
   spread_bps: "3"
   slippage_bps: "2"
   commission_per_unit: "0"
+  maker_fee_bps: "2"
+  taker_fee_bps: "6"

@@ -4,195 +4,226 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <meta name="description" content="Local operational dashboard for Adaptive Range Bot">
-    <title>Adaptive Range Bot — Operations</title>
-    <link rel="stylesheet" href="/styles.css">
-    <script src="/app.js" defer></script>
+    <meta name="description" content="MUSCA BTC Binance paper-trading terminal">
+    <title>MUSCA BTC | Binance Paper Terminal</title>
+    <link rel="stylesheet" href="/styles-v5.css?v=6">
+    <script src="/app-v5.js?v=6" defer></script>
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark" aria-hidden="true">AR</span>
-        <div>
-          <p class="eyebrow">OPERATIONS CONSOLE</p>
-          <h1>Adaptive Range Bot</h1>
-        </div>
-      </div>
-      <div class="topbar-status">
-        <span class="pill danger">LIVE DISABLED</span>
-        <span class="connection"><span class="status-dot"></span>Local dashboard</span>
-        <span id="last-updated" class="muted">Waiting for data</span>
+      <a class="brand" href="#market" aria-label="MUSCA BTC home">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span><strong>MUSCA BTC</strong><small>Binance USD-M Paper Terminal</small></span>
+      </a>
+      <nav aria-label="Dashboard sections">
+        <a href="#market">Market</a>
+        <a href="#decision">Decision</a>
+        <a href="#orders">Orders</a>
+        <a href="#strategy-section">Strategy</a>
+        <a href="#validation">Validation</a>
+      </nav>
+      <div class="top-status">
+        <span id="system-status" class="badge waiting"><i></i>CONNECTING</span>
+        <span id="last-updated">Waiting for data</span>
       </div>
     </header>
 
     <main>
-      <section id="empty-state" class="empty-state hidden" aria-live="polite">
-        <p class="eyebrow">NO REPORT LOADED</p>
-        <h2>The dashboard is ready.</h2>
-        <p id="empty-message">Run a backtest to populate calculations, decisions and fills.</p>
-        <code>uv run adaptive-bot backtest --config configs/backtest.yaml</code>
+      <section id="error-state" class="error-state hidden" aria-live="polite">
+        <strong>Dashboard unavailable</strong>
+        <p id="error-message">The local service is not responding.</p>
       </section>
 
-      <div id="dashboard" class="dashboard hidden">
-        <section class="context-strip" aria-label="Run context">
-          <div><span>Mode</span><strong id="mode">—</strong></div>
-          <div><span>Report instrument</span><strong id="instrument">—</strong></div>
-          <div><span>Active profile</span><strong>BTCUSDT FUTURES · 5M · 10×</strong></div>
-          <div><span>Timeframe</span><strong id="timeframe">—</strong></div>
-          <div><span>Latest bar</span><strong id="latest-bar">—</strong></div>
-          <div><span>Engine</span><strong class="safe">Deterministic</strong></div>
+      <div id="dashboard" class="hidden">
+        <section class="paper-banner" aria-label="Trading mode warning">
+          <div><span class="badge paper">PAPER</span><strong>Real capital is disabled</strong></div>
+          <p>Market observations are live Binance data. Orders, fills and account balance are simulated.</p>
         </section>
 
-        <section class="kpi-grid" aria-label="Performance summary">
-          <article class="kpi-card primary">
-            <span>Account equity</span><strong id="equity">—</strong><small id="equity-change">—</small>
-          </article>
-          <article class="kpi-card">
-            <span>Net P&amp;L</span><strong id="net-pnl">—</strong><small>After modeled costs</small>
-          </article>
-          <article class="kpi-card">
-            <span>Max drawdown</span><strong id="drawdown">—</strong><small>Limit: 8.00%</small>
-          </article>
-          <article class="kpi-card">
-            <span>Signals</span><strong id="signals">—</strong><small id="rejected">—</small>
-          </article>
-          <article class="kpi-card">
-            <span>Current position</span><strong id="position-status">—</strong><small id="position-quantity">—</small>
-          </article>
-          <article class="kpi-card">
-            <span>Modeled costs</span><strong id="costs">—</strong><small>Fees + slippage</small>
-          </article>
+        <section class="instrument-bar" aria-label="Instrument context">
+          <div><span>Instrument</span><strong>BTCUSDT Perpetual</strong></div>
+          <div><span>Venue</span><strong>Binance USD-M</strong></div>
+          <div><span>Decision cycle</span><strong>Every closed 1m candle</strong></div>
+          <div><span>Execution</span><strong>Next valid Binance book</strong></div>
+          <div><span>Policy</span><strong>Auto-MoE + VWAP</strong></div>
         </section>
 
-        <section class="main-grid">
-          <article class="panel live-panel">
-            <div class="panel-heading">
-              <div><p class="eyebrow">BITUNIX PUBLIC FEED</p><h2>BTCUSDT 5-minute market monitor</h2></div>
-              <span id="live-status" class="pill">WAITING</span>
+        <section class="kpi-grid" aria-label="Paper account summary">
+          <article class="kpi primary"><span>Paper equity</span><strong id="equity">--</strong><small id="available-balance">-- available</small></article>
+          <article class="kpi"><span>Net P&amp;L</span><strong id="net-pnl">--</strong><small>After fees, slippage and funding</small></article>
+          <article class="kpi"><span>Current position</span><strong id="position-status">--</strong><small id="position-summary">No exposure</small></article>
+          <article class="kpi"><span>Closed trades</span><strong id="trade-count">--</strong><small id="signal-count">-- signals</small></article>
+          <article class="kpi"><span>Costs paid</span><strong id="costs-paid">--</strong><small id="fee-model">--</small></article>
+          <article class="kpi"><span>Max drawdown</span><strong id="drawdown">--</strong><small>Research limit: 8.00%</small></article>
+        </section>
+
+        <section class="terminal-grid">
+          <article id="market" class="panel market-panel">
+            <header class="panel-header">
+              <div><p class="eyebrow">LIVE MARKET</p><h1>BTCUSDT price and VWAP</h1></div>
+              <span id="market-status" class="badge waiting">WAITING</span>
+            </header>
+            <div class="quote-line">
+              <div><span>Mark price</span><strong id="mark-price">--</strong><small id="market-time">--</small></div>
+              <dl>
+                <div><dt>Best bid</dt><dd id="best-bid">--</dd></div>
+                <div><dt>Best ask</dt><dd id="best-ask">--</dd></div>
+                <div><dt>Spread</dt><dd id="spread">--</dd></div>
+                <div><dt>Index</dt><dd id="index-price">--</dd></div>
+                <div><dt>Funding</dt><dd id="funding-rate">--</dd></div>
+                <div><dt>Next funding</dt><dd id="next-funding">--</dd></div>
+              </dl>
             </div>
-            <p id="live-activity" class="decision-copy">Waiting for closed candles.</p>
-            <dl class="live-stats">
-              <div><dt>Last close</dt><dd id="live-close">—</dd></div>
-              <div><dt>Candle timestamp</dt><dd id="live-time">—</dd></div>
-              <div><dt>Feed age</dt><dd id="live-age">—</dd></div>
-              <div><dt>Warm-up</dt><dd id="live-warmup">—</dd></div>
-              <div><dt>Open</dt><dd id="live-open">—</dd></div>
-              <div><dt>High</dt><dd id="live-high">—</dd></div>
-              <div><dt>Low</dt><dd id="live-low">—</dd></div>
-              <div><dt>Volume</dt><dd id="live-volume">—</dd></div>
-              <div><dt>Best bid</dt><dd id="live-bid">—</dd></div>
-              <div><dt>Best ask</dt><dd id="live-ask">—</dd></div>
-              <div><dt>Spread</dt><dd id="live-spread">—</dd></div>
+            <div class="chart-shell">
+              <canvas id="market-chart" role="img" aria-label="BTCUSDT one-minute candlesticks with VWAP, entry plan, target and stop"></canvas>
+              <p id="chart-empty" class="chart-empty hidden">No closed Binance candles are available.</p>
+            </div>
+            <div class="legend" aria-label="Chart legend">
+              <span><i class="candle-up"></i>Up candle</span>
+              <span><i class="candle-down"></i>Down candle</span>
+              <span><i class="vwap-line"></i>Rolling VWAP</span>
+              <span id="target-legend" class="hidden"><i class="target-line"></i>Target</span>
+              <span id="stop-legend" class="hidden"><i class="stop-line"></i>Dynamic stop</span>
+              <span id="breakeven-legend" class="hidden"><i class="breakeven-line"></i>Break-even</span>
+            </div>
+            <div class="market-metrics">
+              <div><span>1m return</span><strong id="return-1m">--</strong></div>
+              <div><span>5m return</span><strong id="return-5m">--</strong></div>
+              <div><span>15m return</span><strong id="return-15m">--</strong></div>
+              <div><span>30m return</span><strong id="return-30m">--</strong></div>
+              <div><span>VWAP</span><strong id="rolling-vwap">--</strong></div>
+              <div><span>VWAP distance</span><strong id="vwap-distance">--</strong></div>
+              <div><span>Taker imbalance</span><strong id="taker-imbalance">--</strong></div>
+              <div><span>Open interest 1h</span><strong id="oi-change">--</strong></div>
+            </div>
+          </article>
+
+          <article id="decision" class="panel decision-panel">
+            <header class="panel-header">
+              <div><p class="eyebrow">CURRENT DECISION</p><h2>What the policy is doing</h2></div>
+              <span id="decision-badge" class="badge waiting">WAIT</span>
+            </header>
+            <div class="decision-hero">
+              <strong id="decision-title">Waiting for the first assessment</strong>
+              <p id="decision-reason">The policy has not evaluated a closed candle yet.</p>
+            </div>
+            <dl class="detail-list">
+              <div><dt>Model state</dt><dd id="model-state">--</dd></div>
+              <div><dt>Active experts</dt><dd id="expert-count">--</dd></div>
+              <div><dt>Best action</dt><dd id="best-action">--</dd></div>
+              <div><dt>Expected net EV</dt><dd id="expected-ev">--</dd></div>
+              <div><dt>Positive-return probability</dt><dd id="target-probability">--</dd></div>
+              <div><dt>Forecast horizon</dt><dd id="forecast-horizon">--</dd></div>
+              <div><dt>Risk check</dt><dd id="risk-check">Not evaluated</dd></div>
+              <div><dt>Execution check</dt><dd id="execution-check">Not evaluated</dd></div>
             </dl>
-            <div class="market-charts">
-              <section class="chart-box">
-                <div class="chart-title"><strong>5-minute candlesticks</strong><span>Bitunix mark price</span></div>
-                <canvas id="live-candle-chart" role="img" aria-label="Live BTCUSDT five-minute candlestick chart"></canvas>
-              </section>
-              <section class="chart-box realtime-box">
-                <div class="chart-title"><strong>Real-time market</strong><span id="ws-status" class="pill">CONNECTING</span></div>
-                <strong id="realtime-price" class="realtime-price">—</strong>
-                <small id="realtime-time" class="muted">Waiting for WebSocket data</small>
-                <canvas id="realtime-chart" role="img" aria-label="Real-time BTCUSDT mark-price chart"></canvas>
-                <dl class="stream-stats">
-                  <div><dt>Index</dt><dd id="index-price">—</dd></div>
-                  <div><dt>Funding</dt><dd id="funding-rate">—</dd></div>
-                </dl>
-              </section>
-            </div>
+            <div class="next-event"><span>NEXT EVENT</span><p id="next-event">Waiting for synchronized Binance data.</p></div>
           </article>
 
-          <article class="panel chart-panel wide">
-            <div class="panel-heading">
-              <div><p class="eyebrow">ACCOUNT</p><h2>Equity curve</h2></div>
-              <span class="legend"><i class="equity-line"></i>Equity</span>
-            </div>
-            <canvas id="equity-chart" role="img" aria-label="Equity curve over time"></canvas>
-          </article>
-
-          <article class="panel decision-panel">
-            <div class="panel-heading">
-              <div><p class="eyebrow">LATEST DECISION</p><h2>What the bot sees</h2></div>
-              <span id="regime" class="pill">UNKNOWN</span>
-            </div>
-            <p id="activity" class="decision-copy">Waiting for calculations.</p>
-            <dl class="calculation-grid">
-              <div><dt>Close</dt><dd id="calc-close">—</dd></div>
-              <div><dt>VWAP center</dt><dd id="calc-center">—</dd></div>
-              <div><dt>ATR (14)</dt><dd id="calc-atr">—</dd></div>
-              <div><dt>ADX (14)</dt><dd id="calc-adx">—</dd></div>
-              <div><dt>Normalized z</dt><dd id="calc-z">—</dd></div>
-              <div><dt>ATR percentile</dt><dd id="calc-atr-pct">—</dd></div>
-              <div><dt>EMA50 slope</dt><dd id="calc-slope">—</dd></div>
-              <div><dt>Spread</dt><dd id="calc-spread">—</dd></div>
-              <div><dt>Lower band</dt><dd id="calc-lower">—</dd></div>
-              <div><dt>Upper band</dt><dd id="calc-upper">—</dd></div>
+          <article class="panel order-panel">
+            <header class="panel-header">
+              <div><p class="eyebrow">ORDER PLAN</p><h2>Position and exits</h2></div>
+              <span id="order-status" class="badge flat">FLAT</span>
+            </header>
+            <p id="order-summary" class="section-copy">No position or pending order.</p>
+            <dl class="detail-list two-columns">
+              <div><dt>Side</dt><dd id="order-side">--</dd></div>
+              <div><dt>Quantity</dt><dd id="order-quantity">--</dd></div>
+              <div><dt>Entry</dt><dd id="entry-price">--</dd></div>
+              <div><dt>Notional</dt><dd id="order-notional">--</dd></div>
+              <div><dt>Target 1</dt><dd id="target-one">--</dd></div>
+              <div><dt>Target 2</dt><dd id="target-two">--</dd></div>
+              <div><dt>Dynamic stop</dt><dd id="stop-price">--</dd></div>
+              <div><dt>Break-even</dt><dd id="break-even">--</dd></div>
+              <div><dt>Unrealized P&amp;L</dt><dd id="unrealized-pnl">--</dd></div>
+              <div><dt>Maximum hold</dt><dd id="max-hold">--</dd></div>
             </dl>
           </article>
 
-          <article class="panel chart-panel wide">
-            <div class="panel-heading">
-              <div><p class="eyebrow">STRATEGY</p><h2>Price, center and adaptive range</h2></div>
-              <div class="legend-group">
-                <span class="legend"><i class="price-line"></i>Price</span>
-                <span class="legend"><i class="center-line"></i>VWAP</span>
-                <span class="legend"><i class="band-line"></i>Bands</span>
-              </div>
+          <article class="panel feeds-panel">
+            <header class="panel-header"><div><p class="eyebrow">DATA INTEGRITY</p><h2>Official Binance feeds</h2></div><span id="feed-status" class="badge waiting">CHECKING</span></header>
+            <div id="feed-list" class="feed-list"></div>
+            <div class="readiness">
+              <div><span>Closed minutes loaded</span><strong id="loaded-minutes">--</strong></div>
+              <div><span>Valid model rows</span><strong id="model-rows">--</strong></div>
+              <div><span>L2 observations</span><strong id="l2-rows">--</strong></div>
+              <div><span>L2 UTC days</span><strong id="l2-days">--</strong></div>
             </div>
-            <canvas id="range-chart" role="img" aria-label="Price, VWAP center and adaptive bands"></canvas>
           </article>
 
           <article class="panel risk-panel">
-            <div class="panel-heading">
-              <div><p class="eyebrow">SAFETY</p><h2>Risk guardrails</h2></div>
-              <span id="kill-status" class="pill safe-pill">CLEAR</span>
-            </div>
-            <div class="risk-meter-label"><span>Drawdown usage</span><strong id="risk-usage">—</strong></div>
+            <header class="panel-header"><div><p class="eyebrow">RISK</p><h2>Account guardrails</h2></div><span id="risk-status" class="badge good">CLEAR</span></header>
             <div class="risk-meter"><span id="risk-meter-fill"></span></div>
-            <ul class="guardrail-list">
-              <li><span>Risk per trade</span><strong id="risk-per-trade">1.00%</strong></li>
-              <li><span>Daily loss limit</span><strong id="daily-loss-limit">2.00%</strong></li>
-              <li><span>Weekly loss limit</span><strong id="weekly-loss-limit">10.00%</strong></li>
-              <li><span>Max open positions</span><strong>1</strong></li>
-              <li><span>Market</span><strong>BTCUSDT perpetual</strong></li>
-              <li><span>Margin</span><strong>USDT isolated</strong></li>
-              <li><span>Leverage</span><strong>10×</strong></li>
-              <li><span>Target exposure</span><strong>20%</strong></li>
-              <li><span>Expected margin</span><strong>2% · max 10%</strong></li>
-              <li><span>Stop / target</span><strong>−10% / +10% ROE</strong></li>
-              <li><span>Manual reset after breach</span><strong>Required</strong></li>
-            </ul>
+            <dl class="rule-list">
+              <div><dt>Risk per trade</dt><dd id="risk-per-trade">1.00%</dd></div>
+              <div><dt>Maximum leverage</dt><dd id="max-leverage">10x</dd></div>
+              <div><dt>Maximum margin</dt><dd id="max-margin">10.00%</dd></div>
+              <div><dt>Maximum positions</dt><dd>1</dd></div>
+              <div><dt>Daily loss limit</dt><dd id="daily-loss">2.00%</dd></div>
+              <div><dt>Strategy drawdown limit</dt><dd id="drawdown-limit">8.00%</dd></div>
+              <div><dt>Real orders</dt><dd class="negative">DISABLED</dd></div>
+            </dl>
           </article>
 
-          <article class="panel fills-panel wide">
-            <div class="panel-heading">
-              <div><p class="eyebrow">EXECUTION</p><h2>Operation history</h2></div>
-              <span id="fill-count" class="muted">0 operations</span>
-            </div>
+          <article id="orders" class="panel orders-panel full-width">
+            <header class="panel-header">
+              <div><p class="eyebrow">PAPER LEDGER</p><h2>Orders and completed trades</h2></div>
+              <span id="ledger-count">0 records</span>
+            </header>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Time</th><th>Event</th><th>Side</th><th>Quantity</th><th>Price</th><th>Position after</th><th>Details</th></tr></thead>
-                <tbody id="fills-body"><tr><td colspan="7" class="empty-cell">No operations recorded.</td></tr></tbody>
+                <thead><tr><th>Signal time</th><th>Status</th><th>Side</th><th>Entry</th><th>Exit / mark</th><th>Size</th><th>Costs</th><th>Net P&amp;L</th><th>Balance</th><th>Exit reason</th></tr></thead>
+                <tbody id="trade-ledger"><tr><td colspan="10" class="empty-cell">No paper trades yet.</td></tr></tbody>
               </table>
             </div>
           </article>
 
-          <article class="panel timeline-panel">
-            <div class="panel-heading"><div><p class="eyebrow">AUDIT TRAIL</p><h2>Decision timeline</h2></div></div>
-            <ol id="timeline" class="timeline"></ol>
+          <article id="strategy-section" class="panel strategy-panel full-width">
+            <header class="panel-header">
+              <div><p class="eyebrow">STRATEGY</p><h2>How MUSCA BTC makes a trade</h2></div>
+              <span id="protocol-hash" class="mono">Protocol --</span>
+            </header>
+            <p class="section-copy">MUSCA is a two-stage mixture of experts. VWAP is the market-location benchmark; it is not a standalone buy or sell signal.</p>
+            <ol class="strategy-steps">
+              <li><span>01</span><div><strong>Observe the market</strong><p>Use completed Binance USD-M candles, trades, order flow, volume, volatility, open interest, basis and funding. Every input must be available before the decision timestamp.</p></div></li>
+              <li><span>02</span><div><strong>Measure location around VWAP</strong><p>Track distance, velocity, slope, tests and rejections around rolling VWAP across several horizons. This describes where price is and how it arrived there.</p></div></li>
+              <li><span>03</span><div><strong>Activate learned experts</strong><p>Each frozen expert represents a learned LONG or SHORT market condition and a 1-hour or 6-hour management horizon. An expert activates only when its complete causal rule matches.</p></div></li>
+              <li><span>04</span><div><strong>Select the action</strong><p>The gating model compares calibrated net EV after Binance costs. It chooses the highest positive action. If no expert has positive EV, FLAT is the neutral and correct decision.</p></div></li>
+              <li><span>05</span><div><strong>Execute after the signal</strong><p>A paper market order is evaluated on the first valid Binance order-book snapshot after the completed decision candle. The signal candle cannot fill its own order.</p></div></li>
+              <li><span>06</span><div><strong>Size by risk</strong><p>Planned loss, estimated fees and book impact must fit inside 1% of equity. Margin is capped at 10%, leverage at 10x, and only one position may be open.</p></div></li>
+              <li><span>07</span><div><strong>Manage the exit</strong><p>Take half at the median favorable excursion, manage the remainder toward the upper target, protect costs, and use a non-widening dynamic trail. The adverse stop always wins when path order is ambiguous.</p></div></li>
+              <li><span>08</span><div><strong>Close or time out</strong><p>The position closes at target, dynamic stop, trailing stop, invalidation, or the expert's maximum horizon. A new entry is allowed only after the prior position is actually closed.</p></div></li>
+              <li><span>09</span><div><strong>Remain fail-closed</strong><p>Stale market data, an unsynchronized book, incomplete model inputs or a failed risk check produce WAIT, never a simulated fill.</p></div></li>
+              <li><span>10</span><div><strong>Keep paper and real capital separate</strong><p>Historical results permit research paper trading only. Real capital remains disabled until the future holdout and all trade-count, stability and execution gates pass.</p></div></li>
+            </ol>
           </article>
 
-          <article class="panel milestones-panel">
-            <div class="panel-heading"><div><p class="eyebrow">PROJECT</p><h2>Delivery progress</h2></div></div>
-            <ol id="milestones" class="milestones"></ol>
+          <article id="validation" class="panel validation-panel full-width">
+            <header class="panel-header"><div><p class="eyebrow">VALIDATION</p><h2>What has actually been demonstrated</h2></div><span id="validation-status" class="badge paper">RESEARCH PAPER</span></header>
+            <div class="validation-grid">
+              <section><h3>Historical audit</h3><dl class="metric-list">
+                <div><dt>OOS trades</dt><dd id="audit-trades">--</dd></div>
+                <div><dt>Average trades/day</dt><dd id="audit-frequency">--</dd></div>
+                <div><dt>Net expectancy</dt><dd id="audit-expectancy">--</dd></div>
+                <div><dt>Profit factor</dt><dd id="audit-pf">--</dd></div>
+                <div><dt>Win rate</dt><dd id="audit-win-rate">--</dd></div>
+                <div><dt>Max drawdown</dt><dd id="audit-drawdown">--</dd></div>
+              </dl></section>
+              <section><h3>Forward paper gate</h3><dl class="metric-list">
+                <div><dt>Observed paper trades</dt><dd id="paper-trade-progress">--</dd></div>
+                <div><dt>Observed execution days</dt><dd id="paper-day-progress">--</dd></div>
+                <div><dt>Minimum required</dt><dd id="paper-minimum">--</dd></div>
+                <div><dt>Holdout opened</dt><dd id="holdout-opened">NO</dd></div>
+                <div><dt>Real capital allowed</dt><dd class="negative">NO</dd></div>
+              </dl></section>
+            </div>
+            <div id="gate-list" class="gate-list"></div>
+            <p class="validation-note">Historical performance is not a promise of future performance. The interface reports failed gates explicitly and never upgrades paper results to live approval.</p>
           </article>
         </section>
       </div>
     </main>
 
-    <footer>
-      <span>Read-only local interface</span>
-      <span>Backtest and paper results are not guarantees of future performance.</span>
-    </footer>
+    <footer><span>MUSCA BTC read-only paper terminal</span><span>Binance observations are real; account activity is simulated.</span></footer>
   </body>
 </html>

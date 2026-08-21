@@ -1,0 +1,88 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "folds": [
+    {
+      "scope": "b3391344305bf40ba468",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\b3391344305bf40ba468.crossfit.parquet",
+      "rows": 160431,
+      "blocks": 2,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "6b0e70930659e8b7347e",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\6b0e70930659e8b7347e.crossfit.parquet",
+      "rows": 241067,
+      "blocks": 3,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "8869ec6cf8abb0f3bc77",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\8869ec6cf8abb0f3bc77.crossfit.parquet",
+      "rows": 321665,
+      "blocks": 4,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "33811b2aa17ef98fe426",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\33811b2aa17ef98fe426.crossfit.parquet",
+      "rows": 401580,
+      "blocks": 5,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "909b4b96a830f9ce01bf",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\909b4b96a830f9ce01bf.crossfit.parquet",
+      "rows": 482220,
+      "blocks": 6,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "9b337244365330b8cbfd",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\9b337244365330b8cbfd.crossfit.parquet",
+      "rows": 562846,
+      "blocks": 7,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "8b9a6e8339edde39a13c",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\8b9a6e8339edde39a13c.crossfit.parquet",
+      "rows": 642775,
+      "blocks": 8,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "1c3b9f107858926e242e",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\1c3b9f107858926e242e.crossfit.parquet",
+      "rows": 723411,
+      "blocks": 9,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "41bb449007df49107b6d",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\41bb449007df49107b6d.crossfit.parquet",
+      "rows": 804051,
+      "blocks": 10,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    },
+    {
+      "scope": "0559a8359f3c315d839c",
+      "cache": "data\\ml\\musca_btc_policy\\fold_experts\\0559a8359f3c315d839c.crossfit.parquet",
+      "rows": 884697,
+      "blocks": 11,
+      "strictly_past_only": true,
+      "warmup_rows_excluded": 161190
+    }
+  ],
+  "strictly_past_only": true
+}

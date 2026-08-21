@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp/
 .pytest-tmp-*/
+.pytest-*/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
@@ -14,9 +15,18 @@ __pycache__/
 data/raw/*
 data/processed/*
 data/reports/*
+data/logs/*
+data/ml/*
+data/models/*
+data/research/*
+data/pytest-*/
+data/freshness-*/
+data/runtime-*/
+data/test-temp/
 data/meme/raw/*
 data/meme/processed/*
 data/meme/reports/*
 data/meme/luna/*
 .test-run-*/
+.tmp-pytest-*/
 !data/**/.gitkeep

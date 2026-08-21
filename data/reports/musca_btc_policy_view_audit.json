@@ -1,0 +1,1107 @@
+{
+  "created_at": "2026-08-11T14:54:41.555315+00:00",
+  "protocol_hash": "c474e38c5466047df44e840431c01329e3cd4946e8fe9644fa8deb4be7b4e497",
+  "outer_folds": 10,
+  "folds": [
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.3448086241789795,
+          "view_trend_prediction_bps": 0.2441994479856284,
+          "view_flow_prediction_bps": 0.19428119156235235,
+          "view_regime_prediction_bps": 0.9261063822217233
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.3448086241789795,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.3934376414170128,
+          "view_flow_prediction_bps": 0.2203923874844273,
+          "view_regime_prediction_bps": 0.2947985029409951
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.2441994479856284,
+          "view_vwap_prediction_bps": 0.3934376414170128,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.39838843075238417,
+          "view_regime_prediction_bps": 0.25118961052757227
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.19428119156235235,
+          "view_vwap_prediction_bps": 0.2203923874844273,
+          "view_trend_prediction_bps": 0.39838843075238417,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.20413477091309265
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9261063822217233,
+          "view_vwap_prediction_bps": 0.2947985029409951,
+          "view_trend_prediction_bps": 0.25118961052757227,
+          "view_flow_prediction_bps": 0.20413477091309265,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9835460959890605,
+          "view_trend_prediction_bps": 0.98192972929532,
+          "view_flow_prediction_bps": 0.9819474102180058,
+          "view_regime_prediction_bps": 0.9970107382256218
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9835460959890605,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9919182902977953,
+          "view_flow_prediction_bps": 0.9908163689989273,
+          "view_regime_prediction_bps": 0.9790823466979179
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.98192972929532,
+          "view_vwap_prediction_bps": 0.9919182902977953,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9934957989439731,
+          "view_regime_prediction_bps": 0.9785363231925592
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9819474102180058,
+          "view_vwap_prediction_bps": 0.9908163689989273,
+          "view_trend_prediction_bps": 0.9934957989439731,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9783981858676561
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9970107382256218,
+          "view_vwap_prediction_bps": 0.9790823466979179,
+          "view_trend_prediction_bps": 0.9785363231925592,
+          "view_flow_prediction_bps": 0.9783981858676561,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.1847919803982897,
+        "vwap": -0.05881828804667043,
+        "trend": -0.018143849837855986,
+        "flow": 0.0038339624563334465,
+        "regime": -0.15039328676835817
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 17.733589817192236,
+          "calibration_error_bps": 8.626832323568072
+        },
+        "vwap": {
+          "mae_bps": 17.73759656124402,
+          "calibration_error_bps": 8.652229121483312
+        },
+        "trend": {
+          "mae_bps": 17.75249082992989,
+          "calibration_error_bps": 8.6805184515125
+        },
+        "flow": {
+          "mae_bps": 17.748359027035274,
+          "calibration_error_bps": 8.680150187802601
+        },
+        "regime": {
+          "mae_bps": 17.736447898715173,
+          "calibration_error_bps": 8.63393946415561
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.3814070494791675,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.5275611646136004,
+          "view_trend_prediction_bps": 0.4464649426624227,
+          "view_flow_prediction_bps": 0.40143777669554004,
+          "view_regime_prediction_bps": 0.9501282294896404
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.5275611646136004,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.6013242567675886,
+          "view_flow_prediction_bps": 0.4567643188090311,
+          "view_regime_prediction_bps": 0.46451975454724376
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.4464649426624227,
+          "view_vwap_prediction_bps": 0.6013242567675886,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.5213152009907572,
+          "view_regime_prediction_bps": 0.4253253408374033
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.40143777669554004,
+          "view_vwap_prediction_bps": 0.4567643188090311,
+          "view_trend_prediction_bps": 0.5213152009907572,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.41185084296068764
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9501282294896404,
+          "view_vwap_prediction_bps": 0.46451975454724376,
+          "view_trend_prediction_bps": 0.4253253408374033,
+          "view_flow_prediction_bps": 0.41185084296068764,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9732647547610025,
+          "view_trend_prediction_bps": 0.9714025994635155,
+          "view_flow_prediction_bps": 0.9700571928105447,
+          "view_regime_prediction_bps": 0.9963138714984595
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9732647547610025,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9885406766918033,
+          "view_flow_prediction_bps": 0.9855967858236534,
+          "view_regime_prediction_bps": 0.9682347411181819
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9714025994635155,
+          "view_vwap_prediction_bps": 0.9885406766918033,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9929462624011536,
+          "view_regime_prediction_bps": 0.9683573193632989
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9700571928105447,
+          "view_vwap_prediction_bps": 0.9855967858236534,
+          "view_trend_prediction_bps": 0.9929462624011536,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9679357319886198
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9963138714984595,
+          "view_vwap_prediction_bps": 0.9682347411181819,
+          "view_trend_prediction_bps": 0.9683573193632989,
+          "view_flow_prediction_bps": 0.9679357319886198,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.3100737973126009,
+        "vwap": -0.24442263186669796,
+        "trend": -0.16680123684284365,
+        "flow": -0.13701964956395993,
+        "regime": -0.2740268074474353
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 20.88115430490084,
+          "calibration_error_bps": 8.898293816515038
+        },
+        "vwap": {
+          "mae_bps": 20.892750782627616,
+          "calibration_error_bps": 8.925654830701168
+        },
+        "trend": {
+          "mae_bps": 20.907981193830725,
+          "calibration_error_bps": 8.978845281975682
+        },
+        "flow": {
+          "mae_bps": 20.909908834609954,
+          "calibration_error_bps": 8.968950108141803
+        },
+        "regime": {
+          "mae_bps": 20.88624860488875,
+          "calibration_error_bps": 8.90865935487435
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.47356210466953164,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.39105244023214286,
+          "view_trend_prediction_bps": 0.29453027097208007,
+          "view_flow_prediction_bps": 0.15396242101968327,
+          "view_regime_prediction_bps": 0.9286199781069981
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.39105244023214286,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.5477704134413528,
+          "view_flow_prediction_bps": 0.3248009669905521,
+          "view_regime_prediction_bps": 0.3080647948193113
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.29453027097208007,
+          "view_vwap_prediction_bps": 0.5477704134413528,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.45750066724293637,
+          "view_regime_prediction_bps": 0.2450586713925889
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.15396242101968327,
+          "view_vwap_prediction_bps": 0.3248009669905521,
+          "view_trend_prediction_bps": 0.45750066724293637,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.12742427491919342
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9286199781069981,
+          "view_vwap_prediction_bps": 0.3080647948193113,
+          "view_trend_prediction_bps": 0.2450586713925889,
+          "view_flow_prediction_bps": 0.12742427491919342,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9756237528283183,
+          "view_trend_prediction_bps": 0.9762462512294187,
+          "view_flow_prediction_bps": 0.9742258341540707,
+          "view_regime_prediction_bps": 0.9965748028027893
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9756237528283183,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9899169827807233,
+          "view_flow_prediction_bps": 0.9868138252810376,
+          "view_regime_prediction_bps": 0.9743081180598949
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9762462512294187,
+          "view_vwap_prediction_bps": 0.9899169827807233,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9947664700114156,
+          "view_regime_prediction_bps": 0.9771031796082421
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9742258341540707,
+          "view_vwap_prediction_bps": 0.9868138252810376,
+          "view_trend_prediction_bps": 0.9947664700114156,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9759164953392131
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9965748028027893,
+          "view_vwap_prediction_bps": 0.9743081180598949,
+          "view_trend_prediction_bps": 0.9771031796082421,
+          "view_flow_prediction_bps": 0.9759164953392131,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.256143378440658,
+        "vwap": -0.1945525289454886,
+        "trend": -0.14376105233256656,
+        "flow": -0.09534923675916705,
+        "regime": -0.21986367638558546
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 14.694007227199274,
+          "calibration_error_bps": 8.446115523500826
+        },
+        "vwap": {
+          "mae_bps": 14.690811009812668,
+          "calibration_error_bps": 8.445179840610962
+        },
+        "trend": {
+          "mae_bps": 14.711245829432682,
+          "calibration_error_bps": 8.48838143237558
+        },
+        "flow": {
+          "mae_bps": 14.708922352842247,
+          "calibration_error_bps": 8.487892687547113
+        },
+        "regime": {
+          "mae_bps": 14.69332613212777,
+          "calibration_error_bps": 8.446027456797468
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.4308180006054981,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.5611452503376705,
+          "view_trend_prediction_bps": 0.4018725401320381,
+          "view_flow_prediction_bps": 0.3248577066906593,
+          "view_regime_prediction_bps": 0.9764798130526477
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.5611452503376705,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.5453648119133643,
+          "view_flow_prediction_bps": 0.31876315616801704,
+          "view_regime_prediction_bps": 0.5181127169217584
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.4018725401320381,
+          "view_vwap_prediction_bps": 0.5453648119133643,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.406297618530278,
+          "view_regime_prediction_bps": 0.364882326547062
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.3248577066906593,
+          "view_vwap_prediction_bps": 0.31876315616801704,
+          "view_trend_prediction_bps": 0.406297618530278,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.32125792562537125
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9764798130526477,
+          "view_vwap_prediction_bps": 0.5181127169217584,
+          "view_trend_prediction_bps": 0.364882326547062,
+          "view_flow_prediction_bps": 0.32125792562537125,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9735989359233611,
+          "view_trend_prediction_bps": 0.9675178891181694,
+          "view_flow_prediction_bps": 0.9655189864564844,
+          "view_regime_prediction_bps": 0.9981100819536682
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9735989359233611,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9889758121959168,
+          "view_flow_prediction_bps": 0.9855129800307442,
+          "view_regime_prediction_bps": 0.9697360494574391
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9675178891181694,
+          "view_vwap_prediction_bps": 0.9889758121959168,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9951797122179196,
+          "view_regime_prediction_bps": 0.9642531844315998
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9655189864564844,
+          "view_vwap_prediction_bps": 0.9855129800307442,
+          "view_trend_prediction_bps": 0.9951797122179196,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9630669012529722
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9981100819536682,
+          "view_vwap_prediction_bps": 0.9697360494574391,
+          "view_trend_prediction_bps": 0.9642531844315998,
+          "view_flow_prediction_bps": 0.9630669012529722,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.19699490929961033,
+        "vwap": -0.1391596912211498,
+        "trend": -0.06290858681586896,
+        "flow": -0.0684544580563067,
+        "regime": -0.19870210248720008
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 16.585804708588157,
+          "calibration_error_bps": 8.468365499933057
+        },
+        "vwap": {
+          "mae_bps": 16.593187127016936,
+          "calibration_error_bps": 8.472814126667851
+        },
+        "trend": {
+          "mae_bps": 16.616250671503302,
+          "calibration_error_bps": 8.564303549588246
+        },
+        "flow": {
+          "mae_bps": 16.603213735178837,
+          "calibration_error_bps": 8.551366728924032
+        },
+        "regime": {
+          "mae_bps": 16.588825224984266,
+          "calibration_error_bps": 8.470071840440683
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.4663427064711094,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.6595469086731645,
+          "view_trend_prediction_bps": 0.48141560977783354,
+          "view_flow_prediction_bps": 0.5638457079728523,
+          "view_regime_prediction_bps": 0.9724486047252778
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.6595469086731645,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.561987853994745,
+          "view_flow_prediction_bps": 0.5361290876052032,
+          "view_regime_prediction_bps": 0.6297118616301032
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.48141560977783354,
+          "view_vwap_prediction_bps": 0.561987853994745,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.5326091351968117,
+          "view_regime_prediction_bps": 0.4565119297750576
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.5638457079728523,
+          "view_vwap_prediction_bps": 0.5361290876052032,
+          "view_trend_prediction_bps": 0.5326091351968117,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.5389509669023286
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9724486047252778,
+          "view_vwap_prediction_bps": 0.6297118616301032,
+          "view_trend_prediction_bps": 0.4565119297750576,
+          "view_flow_prediction_bps": 0.5389509669023286,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9696548868617663,
+          "view_trend_prediction_bps": 0.9583994993156438,
+          "view_flow_prediction_bps": 0.9615398667842832,
+          "view_regime_prediction_bps": 0.996907419153708
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9696548868617663,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9863041861430492,
+          "view_flow_prediction_bps": 0.9854888632733244,
+          "view_regime_prediction_bps": 0.9653789687155507
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9583994993156438,
+          "view_vwap_prediction_bps": 0.9863041861430492,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.993946170380684,
+          "view_regime_prediction_bps": 0.9544372686947042
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9615398667842832,
+          "view_vwap_prediction_bps": 0.9854888632733244,
+          "view_trend_prediction_bps": 0.993946170380684,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9576136405807607
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.996907419153708,
+          "view_vwap_prediction_bps": 0.9653789687155507,
+          "view_trend_prediction_bps": 0.9544372686947042,
+          "view_flow_prediction_bps": 0.9576136405807607,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.1416388333699782,
+        "vwap": -0.05333509724972256,
+        "trend": -0.11815512144973757,
+        "flow": -0.07390140202349767,
+        "regime": -0.11944080349028302
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 26.159225212017667,
+          "calibration_error_bps": 9.128717232916085
+        },
+        "vwap": {
+          "mae_bps": 26.15820790961469,
+          "calibration_error_bps": 9.171404115091306
+        },
+        "trend": {
+          "mae_bps": 26.15450800021415,
+          "calibration_error_bps": 9.323336039929808
+        },
+        "flow": {
+          "mae_bps": 26.1589304586628,
+          "calibration_error_bps": 9.298804443060057
+        },
+        "regime": {
+          "mae_bps": 26.16167592908917,
+          "calibration_error_bps": 9.129098928948252
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.5384799895753944,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.4146637331405226,
+          "view_trend_prediction_bps": 0.24190647416762168,
+          "view_flow_prediction_bps": 0.2067363796411244,
+          "view_regime_prediction_bps": 0.9504345581101683
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.4146637331405226,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.472534485471664,
+          "view_flow_prediction_bps": 0.39442321020194826,
+          "view_regime_prediction_bps": 0.4018817556184819
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.24190647416762168,
+          "view_vwap_prediction_bps": 0.472534485471664,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.42398482939243165,
+          "view_regime_prediction_bps": 0.2373428076063614
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.2067363796411244,
+          "view_vwap_prediction_bps": 0.39442321020194826,
+          "view_trend_prediction_bps": 0.42398482939243165,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.19674640374885466
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9504345581101683,
+          "view_vwap_prediction_bps": 0.4018817556184819,
+          "view_trend_prediction_bps": 0.2373428076063614,
+          "view_flow_prediction_bps": 0.19674640374885466,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9828247330457318,
+          "view_trend_prediction_bps": 0.9828129348147496,
+          "view_flow_prediction_bps": 0.9822883681322305,
+          "view_regime_prediction_bps": 0.9979662315360142
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9828247330457318,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9914167663555997,
+          "view_flow_prediction_bps": 0.9905301567396105,
+          "view_regime_prediction_bps": 0.9802561598811927
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9828129348147496,
+          "view_vwap_prediction_bps": 0.9914167663555997,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9966622390064781,
+          "view_regime_prediction_bps": 0.9798704599340124
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9822883681322305,
+          "view_vwap_prediction_bps": 0.9905301567396105,
+          "view_trend_prediction_bps": 0.9966622390064781,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9792227655976634
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9979662315360142,
+          "view_vwap_prediction_bps": 0.9802561598811927,
+          "view_trend_prediction_bps": 0.9798704599340124,
+          "view_flow_prediction_bps": 0.9792227655976634,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.1177256296966209,
+        "vwap": 0.004994366682541415,
+        "trend": -0.002506028204839068,
+        "flow": -0.005148880250671739,
+        "regime": -0.09766993927656098
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 19.523029309527182,
+          "calibration_error_bps": 8.567287958498436
+        },
+        "vwap": {
+          "mae_bps": 19.52924948108823,
+          "calibration_error_bps": 8.569886154428335
+        },
+        "trend": {
+          "mae_bps": 19.530225060596866,
+          "calibration_error_bps": 8.619526254034476
+        },
+        "flow": {
+          "mae_bps": 19.531912135340598,
+          "calibration_error_bps": 8.621637749022884
+        },
+        "regime": {
+          "mae_bps": 19.525718515382742,
+          "calibration_error_bps": 8.564742544897799
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.35128532466476886,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.25570760784325935,
+          "view_trend_prediction_bps": 0.05816148991668895,
+          "view_flow_prediction_bps": 0.061626946644823884,
+          "view_regime_prediction_bps": 0.9406122684239624
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.25570760784325935,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.3909369868298874,
+          "view_flow_prediction_bps": 0.20755156115060006,
+          "view_regime_prediction_bps": 0.22401234522260094
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.05816148991668895,
+          "view_vwap_prediction_bps": 0.3909369868298874,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.28962495172207897,
+          "view_regime_prediction_bps": 0.07038534916023374
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.061626946644823884,
+          "view_vwap_prediction_bps": 0.20755156115060006,
+          "view_trend_prediction_bps": 0.28962495172207897,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.07713874368365198
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9406122684239624,
+          "view_vwap_prediction_bps": 0.22401234522260094,
+          "view_trend_prediction_bps": 0.07038534916023374,
+          "view_flow_prediction_bps": 0.07713874368365198,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9843730491112886,
+          "view_trend_prediction_bps": 0.9841004535006136,
+          "view_flow_prediction_bps": 0.9841272424793502,
+          "view_regime_prediction_bps": 0.9982925955962609
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9843730491112886,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9952801572547696,
+          "view_flow_prediction_bps": 0.9941590866185389,
+          "view_regime_prediction_bps": 0.9847033702263578
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9841004535006136,
+          "view_vwap_prediction_bps": 0.9952801572547696,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9975759778805383,
+          "view_regime_prediction_bps": 0.9852434587686969
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9841272424793502,
+          "view_vwap_prediction_bps": 0.9941590866185389,
+          "view_trend_prediction_bps": 0.9975759778805383,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9853006016386959
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9982925955962609,
+          "view_vwap_prediction_bps": 0.9847033702263578,
+          "view_trend_prediction_bps": 0.9852434587686969,
+          "view_flow_prediction_bps": 0.9853006016386959,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.11566620373514047,
+        "vwap": 0.031904141830748224,
+        "trend": -0.009794075982447406,
+        "flow": 0.0021395552660384482,
+        "regime": -0.10127793085684485
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 15.38202403709901,
+          "calibration_error_bps": 8.17860017053576
+        },
+        "vwap": {
+          "mae_bps": 15.383261093388917,
+          "calibration_error_bps": 8.181125510921735
+        },
+        "trend": {
+          "mae_bps": 15.3934857952125,
+          "calibration_error_bps": 8.227233243569094
+        },
+        "flow": {
+          "mae_bps": 15.388544455573404,
+          "calibration_error_bps": 8.22182844822198
+        },
+        "regime": {
+          "mae_bps": 15.383247922154558,
+          "calibration_error_bps": 8.176792183527185
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.28233247980605897,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.35821679247605837,
+          "view_trend_prediction_bps": 0.13434918663785378,
+          "view_flow_prediction_bps": 0.10148687217368299,
+          "view_regime_prediction_bps": 0.9585366155098044
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.35821679247605837,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.2924770186892464,
+          "view_flow_prediction_bps": 0.13988022240740738,
+          "view_regime_prediction_bps": 0.29210590463088937
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.13434918663785378,
+          "view_vwap_prediction_bps": 0.2924770186892464,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.18652040865620298,
+          "view_regime_prediction_bps": 0.10175744051815049
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.10148687217368299,
+          "view_vwap_prediction_bps": 0.13988022240740738,
+          "view_trend_prediction_bps": 0.18652040865620298,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.09336928852142327
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9585366155098044,
+          "view_vwap_prediction_bps": 0.29210590463088937,
+          "view_trend_prediction_bps": 0.10175744051815049,
+          "view_flow_prediction_bps": 0.09336928852142327,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9842039318656096,
+          "view_trend_prediction_bps": 0.9824210962034639,
+          "view_flow_prediction_bps": 0.9817371585027423,
+          "view_regime_prediction_bps": 0.9985695303670685
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9842039318656096,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9949924791645324,
+          "view_flow_prediction_bps": 0.9937467935276721,
+          "view_regime_prediction_bps": 0.9831216969714222
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9824210962034639,
+          "view_vwap_prediction_bps": 0.9949924791645324,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9971700901187062,
+          "view_regime_prediction_bps": 0.9822852200246417
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9817371585027423,
+          "view_vwap_prediction_bps": 0.9937467935276721,
+          "view_trend_prediction_bps": 0.9971700901187062,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9818316745402459
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9985695303670685,
+          "view_vwap_prediction_bps": 0.9831216969714222,
+          "view_trend_prediction_bps": 0.9822852200246417,
+          "view_flow_prediction_bps": 0.9818316745402459,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.15204041654860978,
+        "vwap": -0.046798044538880944,
+        "trend": -0.004101556713715019,
+        "flow": -0.020042081845881285,
+        "regime": -0.15160654270117943
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 12.854009858429057,
+          "calibration_error_bps": 8.116280214994779
+        },
+        "vwap": {
+          "mae_bps": 12.852975751292247,
+          "calibration_error_bps": 8.118125158682126
+        },
+        "trend": {
+          "mae_bps": 12.870905564369906,
+          "calibration_error_bps": 8.164612415010158
+        },
+        "flow": {
+          "mae_bps": 12.866688084549489,
+          "calibration_error_bps": 8.15367110576173
+        },
+        "regime": {
+          "mae_bps": 12.853057944261083,
+          "calibration_error_bps": 8.116820698514578
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.19673896577988892,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.4326389425879428,
+          "view_trend_prediction_bps": 0.27591526424374585,
+          "view_flow_prediction_bps": 0.31499133521057215,
+          "view_regime_prediction_bps": 0.9616872818455662
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.4326389425879428,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.5473482158402616,
+          "view_flow_prediction_bps": 0.37584821179764893,
+          "view_regime_prediction_bps": 0.41173577128554395
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.27591526424374585,
+          "view_vwap_prediction_bps": 0.5473482158402616,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.5183986534276035,
+          "view_regime_prediction_bps": 0.29994679593371193
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.31499133521057215,
+          "view_vwap_prediction_bps": 0.37584821179764893,
+          "view_trend_prediction_bps": 0.5183986534276035,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.35688378578656205
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9616872818455662,
+          "view_vwap_prediction_bps": 0.41173577128554395,
+          "view_trend_prediction_bps": 0.29994679593371193,
+          "view_flow_prediction_bps": 0.35688378578656205,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.978555472757265,
+          "view_trend_prediction_bps": 0.9766835536673621,
+          "view_flow_prediction_bps": 0.9773063168743601,
+          "view_regime_prediction_bps": 0.9976258253995268
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.978555472757265,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9926295034496537,
+          "view_flow_prediction_bps": 0.9903705098281249,
+          "view_regime_prediction_bps": 0.9738124338010673
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9766835536673621,
+          "view_vwap_prediction_bps": 0.9926295034496537,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9964316305455512,
+          "view_regime_prediction_bps": 0.9722314269149254
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9773063168743601,
+          "view_vwap_prediction_bps": 0.9903705098281249,
+          "view_trend_prediction_bps": 0.9964316305455512,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9734103888513905
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9976258253995268,
+          "view_vwap_prediction_bps": 0.9738124338010673,
+          "view_trend_prediction_bps": 0.9722314269149254,
+          "view_flow_prediction_bps": 0.9734103888513905,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.3066564704930095,
+        "vwap": -0.166267078638608,
+        "trend": -0.1213755823588776,
+        "flow": -0.1281210101311867,
+        "regime": -0.29743827093907527
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 18.98230870143426,
+          "calibration_error_bps": 9.439741080530977
+        },
+        "vwap": {
+          "mae_bps": 18.98145095739663,
+          "calibration_error_bps": 9.436783751576936
+        },
+        "trend": {
+          "mae_bps": 19.022402480170676,
+          "calibration_error_bps": 9.520684095380151
+        },
+        "flow": {
+          "mae_bps": 19.00824154017067,
+          "calibration_error_bps": 9.50981196068133
+        },
+        "regime": {
+          "mae_bps": 18.985932192166555,
+          "calibration_error_bps": 9.444506359859357
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.4592263631699238,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    },
+    {
+      "available": true,
+      "prediction_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.3652375340682891,
+          "view_trend_prediction_bps": 0.2530661249467519,
+          "view_flow_prediction_bps": 0.07670393450534559,
+          "view_regime_prediction_bps": 0.9527217585533526
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.3652375340682891,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.35786642672925384,
+          "view_flow_prediction_bps": 0.19256038089265134,
+          "view_regime_prediction_bps": 0.30130881363877027
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.2530661249467519,
+          "view_vwap_prediction_bps": 0.35786642672925384,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.32774805848565536,
+          "view_regime_prediction_bps": 0.25986875349885824
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.07670393450534559,
+          "view_vwap_prediction_bps": 0.19256038089265134,
+          "view_trend_prediction_bps": 0.32774805848565536,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.09222566424224297
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9527217585533526,
+          "view_vwap_prediction_bps": 0.30130881363877027,
+          "view_trend_prediction_bps": 0.25986875349885824,
+          "view_flow_prediction_bps": 0.09222566424224297,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "error_correlation": {
+        "view_full_prediction_bps": {
+          "view_full_prediction_bps": 1.0,
+          "view_vwap_prediction_bps": 0.9848166640110921,
+          "view_trend_prediction_bps": 0.9840175943262415,
+          "view_flow_prediction_bps": 0.9827730881891703,
+          "view_regime_prediction_bps": 0.9984969619006592
+        },
+        "view_vwap_prediction_bps": {
+          "view_full_prediction_bps": 0.9848166640110921,
+          "view_vwap_prediction_bps": 1.0,
+          "view_trend_prediction_bps": 0.9927762136299271,
+          "view_flow_prediction_bps": 0.9923683614316307,
+          "view_regime_prediction_bps": 0.9834667409251365
+        },
+        "view_trend_prediction_bps": {
+          "view_full_prediction_bps": 0.9840175943262415,
+          "view_vwap_prediction_bps": 0.9927762136299271,
+          "view_trend_prediction_bps": 1.0,
+          "view_flow_prediction_bps": 0.9957122091669953,
+          "view_regime_prediction_bps": 0.9841320799945693
+        },
+        "view_flow_prediction_bps": {
+          "view_full_prediction_bps": 0.9827730881891703,
+          "view_vwap_prediction_bps": 0.9923683614316307,
+          "view_trend_prediction_bps": 0.9957122091669953,
+          "view_flow_prediction_bps": 1.0,
+          "view_regime_prediction_bps": 0.9829548213315392
+        },
+        "view_regime_prediction_bps": {
+          "view_full_prediction_bps": 0.9984969619006592,
+          "view_vwap_prediction_bps": 0.9834667409251365,
+          "view_trend_prediction_bps": 0.9841320799945693,
+          "view_flow_prediction_bps": 0.9829548213315392,
+          "view_regime_prediction_bps": 1.0
+        }
+      },
+      "residual_information_correlation": {
+        "full": -0.20430824198362404,
+        "vwap": -0.02631819916750104,
+        "trend": -0.05589201362628726,
+        "flow": 0.028743988306551404,
+        "regime": -0.1882472744047415
+      },
+      "leave_one_view_out": {
+        "full": {
+          "mae_bps": 15.739100912410041,
+          "calibration_error_bps": 8.302908607848178
+        },
+        "vwap": {
+          "mae_bps": 15.741914337200045,
+          "calibration_error_bps": 8.306228485814428
+        },
+        "trend": {
+          "mae_bps": 15.757600731006827,
+          "calibration_error_bps": 8.358342527120982
+        },
+        "flow": {
+          "mae_bps": 15.757691002251326,
+          "calibration_error_bps": 8.355966160195537
+        },
+        "regime": {
+          "mae_bps": 15.736617194282402,
+          "calibration_error_bps": 8.301385627862231
+        }
+      },
+      "dispersion_vs_absolute_error_correlation": 0.35708457014543304,
+      "liquidity_view_historical": false,
+      "liquidity_view_status": "SHADOW_ONLY_INSUFFICIENT_L2_DAYS",
+      "derivatives_view_status": "NOT_PROMOTED_WITHOUT_COVERAGE_AND_PAIRED_ABLATION"
+    }
+  ]
+}

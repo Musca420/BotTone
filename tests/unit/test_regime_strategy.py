@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from adaptive_bot.config import StrategyConfig
-from adaptive_bot.domain.enums import MarketRegime, Side
+from adaptive_bot.domain.enums import MarketRegime, Side, SignalAction
 from adaptive_bot.domain.models import Position, StrategyState
 from adaptive_bot.strategy.adaptive_range import AdaptiveRangeStrategy
 from adaptive_bot.strategy.regime import RegimeClassifier, RegimeFeatures
@@ -39,6 +39,19 @@ def test_regime_hysteresis_and_immediate_shock() -> None:
     assert shock.regime is MarketRegime.SHOCK
 
 
+def test_range_adx_threshold_is_configurable() -> None:
+    assert (
+        RegimeClassifier(StrategyConfig(range_adx_threshold=23)).raw(features(adx=22.5))
+        is MarketRegime.RANGE
+    )
+    assert (
+        RegimeClassifier(StrategyConfig(range_adx_threshold=22)).raw(features(adx=22.5))
+        is MarketRegime.UNKNOWN
+    )
+    with pytest.raises(ValueError, match="must not exceed"):
+        StrategyConfig(range_adx_threshold=26, trend_adx_threshold=25)
+
+
 def test_strategy_entry_time_stop_and_stop_direction() -> None:
     strategy = AdaptiveRangeStrategy(StrategyConfig())
     bar = candle()
@@ -47,6 +60,7 @@ def test_strategy_entry_time_stop_and_stop_direction() -> None:
         atr=Decimal("2"),
         center=Decimal("103"),
         z_score=-1.6,
+        atr_percentile=50,
         spread_bps=1,
         regime=MarketRegime.RANGE,
         session_open=bar.exchange_timestamp - timedelta(hours=1),
@@ -86,6 +100,7 @@ def test_fixed_roe_levels_are_symmetric_and_do_not_exit_at_center() -> None:
         atr=Decimal("2"),
         center=Decimal("101"),
         z_score=-1.6,
+        atr_percentile=50,
         spread_bps=1,
         regime=MarketRegime.RANGE,
         session_open=bar.exchange_timestamp,
@@ -103,3 +118,114 @@ def test_fixed_roe_levels_are_symmetric_and_do_not_exit_at_center() -> None:
         opened_at=bar.exchange_timestamp,
     )
     assert strategy.evaluate(snapshot, StrategyState(), position) is None
+
+
+def test_weighted_reversion_waits_for_exhaustion_and_blocks_shock() -> None:
+    strategy = AdaptiveRangeStrategy(
+        StrategyConfig(
+            entry_mode="weighted_reversion",
+            short_enabled=True,
+            session_flatten_enabled=False,
+        )
+    )
+    bar = candle()
+    snapshot = MarketSnapshot(
+        candle=bar,
+        atr=Decimal("2"),
+        center=Decimal("97"),
+        z_score=2.0,
+        atr_percentile=20,
+        spread_bps=1,
+        regime=MarketRegime.TREND_UP,
+        session_open=bar.exchange_timestamp,
+        session_close=bar.exchange_timestamp,
+    )
+    assert strategy.evaluate(snapshot, StrategyState(last_z=1.8), None) is None
+    signal = strategy.evaluate(snapshot, StrategyState(last_z=2.6), None)
+    assert signal is not None and signal.action is SignalAction.ENTER_SHORT
+    shock = MarketSnapshot(**{**snapshot.__dict__, "regime": MarketRegime.SHOCK})
+    assert strategy.evaluate(shock, StrategyState(last_z=2.6), None) is None
+
+
+def test_weighted_reversion_v2_requires_confirmed_reentry_and_follows_trend() -> None:
+    strategy = AdaptiveRangeStrategy(
+        StrategyConfig(
+            entry_mode="weighted_reversion_v2",
+            weighted_entry_threshold=0.70,
+            short_enabled=True,
+            session_flatten_enabled=False,
+        )
+    )
+    bar = candle()
+    snapshot = MarketSnapshot(
+        candle=bar,
+        atr=Decimal("2"),
+        center=Decimal("97"),
+        z_score=2.2,
+        atr_percentile=45,
+        spread_bps=1,
+        regime=MarketRegime.UNKNOWN,
+        session_open=bar.exchange_timestamp,
+        session_close=bar.exchange_timestamp,
+    )
+    state = StrategyState(previous_z=3.0, last_z=2.7, last_close=Decimal("101"))
+    signal = strategy.evaluate(snapshot, state, None)
+    assert signal is not None and signal.action is SignalAction.ENTER_SHORT
+    assert (
+        strategy.evaluate(
+            MarketSnapshot(**{**snapshot.__dict__, "regime": MarketRegime.TREND_UP}), state, None
+        )
+        is None
+    )
+    assert (
+        strategy.evaluate(MarketSnapshot(**{**snapshot.__dict__, "z_score": 4.1}), state, None)
+        is None
+    )
+
+    position = Position(
+        instrument="BTCUSDT",
+        quantity=Decimal("0.01"),
+        side=Side.SELL,
+        average_entry_price=Decimal("100"),
+        opened_at=bar.exchange_timestamp,
+    )
+    invalidation = StrategyState(previous_z=1.8, last_z=2.0)
+    exit_signal = strategy.evaluate(snapshot, invalidation, position)
+    assert exit_signal is not None and exit_signal.reason == "mean reversion invalidated"
+
+
+def test_weighted_reversion_v11_keeps_fast_entry_but_blocks_countertrend() -> None:
+    strategy = AdaptiveRangeStrategy(
+        StrategyConfig(
+            entry_mode="weighted_reversion_v11",
+            short_enabled=True,
+            session_flatten_enabled=False,
+        )
+    )
+    bar = candle()
+    snapshot = MarketSnapshot(
+        candle=bar,
+        atr=Decimal("2"),
+        center=Decimal("97"),
+        z_score=2.0,
+        atr_percentile=20,
+        spread_bps=1,
+        regime=MarketRegime.UNKNOWN,
+        session_open=bar.exchange_timestamp,
+        session_close=bar.exchange_timestamp,
+    )
+    state = StrategyState(last_z=2.6)
+    assert strategy.evaluate(snapshot, state, None) is not None
+    trend_up = MarketSnapshot(**{**snapshot.__dict__, "regime": MarketRegime.TREND_UP})
+    assert strategy.evaluate(trend_up, state, None) is None
+
+    position = Position(
+        instrument="BTCUSDT",
+        quantity=Decimal("0.01"),
+        side=Side.SELL,
+        average_entry_price=Decimal("100"),
+        opened_at=bar.exchange_timestamp,
+    )
+    near_vwap = MarketSnapshot(**{**snapshot.__dict__, "z_score": 0.4})
+    exit_signal = strategy.evaluate(near_vwap, StrategyState(), position)
+    assert exit_signal is not None and exit_signal.reason == "VWAP approach"

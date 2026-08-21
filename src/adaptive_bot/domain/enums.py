@@ -29,6 +29,12 @@ class TimeInForce(StrEnum):
     GTC = "gtc"
 
 
+class LiquidityRole(StrEnum):
+    UNKNOWN = "unknown"
+    MAKER = "maker"
+    TAKER = "taker"
+
+
 class OrderStatus(StrEnum):
     CREATED = "created"
     VALIDATED = "validated"

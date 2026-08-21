@@ -1,0 +1,120 @@
+[  0.50%] registry: registering all prior protocols and experts
+[  1.00%] dataset_preflight: Binance taker 4.0000 bps/side; 1x RT 8.0000 bps
+[ 12.88%] state_action_labels: 2025-04 side 1/2: SHORT parameterized plans
+[ 13.75%] state_action_labels: 2025-04 side 2/2: LONG parameterized plans
+[ 13.75%] state_action_matrix: month 1/16 complete: 2025-04
+[ 14.62%] state_action_labels: 2025-05 side 1/2: SHORT parameterized plans
+[ 15.50%] state_action_labels: 2025-05 side 2/2: LONG parameterized plans
+[ 15.50%] state_action_matrix: month 2/16 complete: 2025-05
+[ 16.38%] state_action_labels: 2025-06 side 1/2: SHORT parameterized plans
+[ 17.25%] state_action_labels: 2025-06 side 2/2: LONG parameterized plans
+[ 17.25%] state_action_matrix: month 3/16 complete: 2025-06
+[ 18.12%] state_action_labels: 2025-07 side 1/2: SHORT parameterized plans
+[ 19.00%] state_action_labels: 2025-07 side 2/2: LONG parameterized plans
+[ 19.00%] state_action_matrix: month 4/16 complete: 2025-07
+[ 19.88%] state_action_labels: 2025-08 side 1/2: SHORT parameterized plans
+[ 20.75%] state_action_labels: 2025-08 side 2/2: LONG parameterized plans
+[ 20.75%] state_action_matrix: month 5/16 complete: 2025-08
+[ 21.62%] state_action_labels: 2025-09 side 1/2: SHORT parameterized plans
+[ 22.50%] state_action_labels: 2025-09 side 2/2: LONG parameterized plans
+[ 22.50%] state_action_matrix: month 6/16 complete: 2025-09
+[ 23.38%] state_action_labels: 2025-10 side 1/2: SHORT parameterized plans
+[ 24.25%] state_action_labels: 2025-10 side 2/2: LONG parameterized plans
+[ 24.25%] state_action_matrix: month 7/16 complete: 2025-10
+[ 25.12%] state_action_labels: 2025-11 side 1/2: SHORT parameterized plans
+[ 26.00%] state_action_labels: 2025-11 side 2/2: LONG parameterized plans
+[ 26.00%] state_action_matrix: month 8/16 complete: 2025-11
+[ 26.88%] state_action_labels: 2025-12 side 1/2: SHORT parameterized plans
+[ 27.75%] state_action_labels: 2025-12 side 2/2: LONG parameterized plans
+[ 27.75%] state_action_matrix: month 9/16 complete: 2025-12
+[ 28.62%] state_action_labels: 2026-01 side 1/2: SHORT parameterized plans
+[ 29.50%] state_action_labels: 2026-01 side 2/2: LONG parameterized plans
+[ 29.50%] state_action_matrix: month 10/16 complete: 2026-01
+[ 30.38%] state_action_labels: 2026-02 side 1/2: SHORT parameterized plans
+[ 31.25%] state_action_labels: 2026-02 side 2/2: LONG parameterized plans
+[ 31.25%] state_action_matrix: month 11/16 complete: 2026-02
+[ 32.12%] state_action_labels: 2026-03 side 1/2: SHORT parameterized plans
+[ 33.00%] state_action_labels: 2026-03 side 2/2: LONG parameterized plans
+[ 33.00%] state_action_matrix: month 12/16 complete: 2026-03
+[ 33.88%] state_action_labels: 2026-04 side 1/2: SHORT parameterized plans
+[ 34.75%] state_action_labels: 2026-04 side 2/2: LONG parameterized plans
+[ 34.75%] state_action_matrix: month 13/16 complete: 2026-04
+[ 35.62%] state_action_labels: 2026-05 side 1/2: SHORT parameterized plans
+[ 36.50%] state_action_labels: 2026-05 side 2/2: LONG parameterized plans
+[ 36.50%] state_action_matrix: month 14/16 complete: 2026-05
+[ 37.38%] state_action_labels: 2026-06 side 1/2: SHORT parameterized plans
+[ 38.25%] state_action_labels: 2026-06 side 2/2: LONG parameterized plans
+[ 38.25%] state_action_matrix: month 15/16 complete: 2026-06
+[ 39.12%] state_action_labels: 2026-07 side 1/2: SHORT parameterized plans
+[ 40.00%] state_action_labels: 2026-07 side 2/2: LONG parameterized plans
+[ 40.00%] state_action_matrix: month 16/16 complete: 2026-07
+[ 41.00%] economic_action_set: 1,399,440 exact managed state-actions; oracle is diagnostic only
+[ 43.00%] fold_expert_generation: fold 1 side 1/2: SHORT parameterized critic contexts
+[ 44.00%] fold_expert_generation: fold 1 side 2/2: LONG parameterized critic contexts
+[ 62.40%] model_fit: fold 1/10 LONG 1/4 ridge
+[ 62.80%] model_fit: fold 1/10 LONG 2/4 xgboost_cuda
+[ 63.20%] model_fit: fold 1/10 SHORT 3/4 ridge
+[ 63.60%] model_fit: fold 1/10 SHORT 4/4 xgboost_cuda
+[ 63.60%] policy_replay: fold 1/10 LONG=4.0 bps; SHORT=OFF bps
+[ 45.00%] fold_expert_generation: fold 2 side 1/2: SHORT parameterized critic contexts
+[ 46.00%] fold_expert_generation: fold 2 side 2/2: LONG parameterized critic contexts
+[ 64.00%] model_fit: fold 2/10 LONG 1/4 ridge
+[ 64.40%] model_fit: fold 2/10 LONG 2/4 xgboost_cuda
+[ 64.80%] model_fit: fold 2/10 SHORT 3/4 ridge
+[ 65.20%] model_fit: fold 2/10 SHORT 4/4 xgboost_cuda
+[ 65.20%] policy_replay: fold 2/10 LONG=OFF bps; SHORT=OFF bps
+[ 47.00%] fold_expert_generation: fold 3 side 1/2: SHORT parameterized critic contexts
+[ 48.00%] fold_expert_generation: fold 3 side 2/2: LONG parameterized critic contexts
+[ 65.60%] model_fit: fold 3/10 LONG 1/4 ridge
+[ 66.00%] model_fit: fold 3/10 LONG 2/4 xgboost_cuda
+[ 66.40%] model_fit: fold 3/10 SHORT 3/4 ridge
+[ 66.80%] model_fit: fold 3/10 SHORT 4/4 xgboost_cuda
+[ 66.80%] policy_replay: fold 3/10 LONG=OFF bps; SHORT=OFF bps
+[ 49.00%] fold_expert_generation: fold 4 side 1/2: SHORT parameterized critic contexts
+[ 50.00%] fold_expert_generation: fold 4 side 2/2: LONG parameterized critic contexts
+[ 67.20%] model_fit: fold 4/10 LONG 1/4 ridge
+[ 67.60%] model_fit: fold 4/10 LONG 2/4 xgboost_cuda
+[ 68.00%] model_fit: fold 4/10 SHORT 3/4 ridge
+[ 68.40%] model_fit: fold 4/10 SHORT 4/4 xgboost_cuda
+[ 68.40%] policy_replay: fold 4/10 LONG=OFF bps; SHORT=OFF bps
+[ 51.00%] fold_expert_generation: fold 5 side 1/2: SHORT parameterized critic contexts
+[ 52.00%] fold_expert_generation: fold 5 side 2/2: LONG parameterized critic contexts
+[ 68.80%] model_fit: fold 5/10 LONG 1/4 ridge
+[ 69.20%] model_fit: fold 5/10 LONG 2/4 xgboost_cuda
+[ 69.60%] model_fit: fold 5/10 SHORT 3/4 ridge
+[ 70.00%] model_fit: fold 5/10 SHORT 4/4 xgboost_cuda
+[ 70.00%] policy_replay: fold 5/10 LONG=OFF bps; SHORT=OFF bps
+[ 53.00%] fold_expert_generation: fold 6 side 1/2: SHORT parameterized critic contexts
+[ 54.00%] fold_expert_generation: fold 6 side 2/2: LONG parameterized critic contexts
+[ 70.40%] model_fit: fold 6/10 LONG 1/4 ridge
+[ 70.80%] model_fit: fold 6/10 LONG 2/4 xgboost_cuda
+[ 71.20%] model_fit: fold 6/10 SHORT 3/4 ridge
+[ 71.60%] model_fit: fold 6/10 SHORT 4/4 xgboost_cuda
+[ 71.60%] policy_replay: fold 6/10 LONG=OFF bps; SHORT=OFF bps
+[ 55.00%] fold_expert_generation: fold 7 side 1/2: SHORT parameterized critic contexts
+[ 56.00%] fold_expert_generation: fold 7 side 2/2: LONG parameterized critic contexts
+[ 72.00%] model_fit: fold 7/10 LONG 1/4 ridge
+[ 72.40%] model_fit: fold 7/10 LONG 2/4 xgboost_cuda
+[ 72.80%] model_fit: fold 7/10 SHORT 3/4 ridge
+[ 73.20%] model_fit: fold 7/10 SHORT 4/4 xgboost_cuda
+[ 73.20%] policy_replay: fold 7/10 LONG=OFF bps; SHORT=OFF bps
+[ 57.00%] fold_expert_generation: fold 8 side 1/2: SHORT parameterized critic contexts
+[ 58.00%] fold_expert_generation: fold 8 side 2/2: LONG parameterized critic contexts
+[ 73.60%] model_fit: fold 8/10 LONG 1/4 ridge
+[ 74.00%] model_fit: fold 8/10 LONG 2/4 xgboost_cuda
+[ 74.40%] model_fit: fold 8/10 SHORT 3/4 ridge
+[ 74.80%] model_fit: fold 8/10 SHORT 4/4 xgboost_cuda
+[ 74.80%] policy_replay: fold 8/10 LONG=OFF bps; SHORT=OFF bps
+[ 59.00%] fold_expert_generation: fold 9 side 1/2: SHORT parameterized critic contexts
+[ 60.00%] fold_expert_generation: fold 9 side 2/2: LONG parameterized critic contexts
+[ 75.20%] model_fit: fold 9/10 LONG 1/4 ridge
+[ 75.60%] model_fit: fold 9/10 LONG 2/4 xgboost_cuda
+[ 76.00%] model_fit: fold 9/10 SHORT 3/4 ridge
+[ 76.40%] model_fit: fold 9/10 SHORT 4/4 xgboost_cuda
+[ 76.40%] policy_replay: fold 9/10 LONG=12.0 bps; SHORT=OFF bps
+[ 61.00%] fold_expert_generation: fold 10 side 1/2: SHORT parameterized critic contexts
+[ 62.00%] fold_expert_generation: fold 10 side 2/2: LONG parameterized critic contexts
+[ 76.80%] model_fit: fold 10/10 LONG 1/4 ridge
+[ 77.20%] model_fit: fold 10/10 LONG 2/4 xgboost_cuda
+[ 77.60%] model_fit: fold 10/10 SHORT 3/4 ridge
+[ 78.00%] model_fit: fold 10/10 SHORT 4/4 xgboost_cuda

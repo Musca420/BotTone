@@ -75,21 +75,99 @@ class AdaptiveRangeStrategy:
 
         if not self._entry_window(snapshot) or state.cooldown_bars > 0:
             return None
-        if not snapshot.data_reliable or snapshot.regime is not MarketRegime.RANGE:
+        if not snapshot.data_reliable or snapshot.regime is MarketRegime.SHOCK:
             return None
         if snapshot.spread_bps > self.config.max_spread_bps:
+            return None
+        score = self.entry_score(snapshot, state)
+        if self.config.entry_mode == "range" and snapshot.regime is not MarketRegime.RANGE:
+            return None
+        if self.config.entry_mode == "weighted_reversion_v11" and (
+            (snapshot.z_score > 0 and snapshot.regime is MarketRegime.TREND_UP)
+            or (snapshot.z_score < 0 and snapshot.regime is MarketRegime.TREND_DOWN)
+        ):
+            return None
+        if self.config.entry_mode.startswith("weighted_reversion") and (
+            score is None or score < self.config.weighted_entry_threshold
+        ):
             return None
         if snapshot.z_score <= -self.config.entry_z:
             stop, target = self._entry_levels(snapshot, Side.BUY)
             return self._signal(
-                snapshot, SignalAction.ENTER_LONG, "range lower-band entry", stop, target
+                snapshot,
+                SignalAction.ENTER_LONG,
+                self._entry_reason("lower-band", score),
+                stop,
+                target,
             )
         if self.config.short_enabled and snapshot.z_score >= self.config.entry_z:
             stop, target = self._entry_levels(snapshot, Side.SELL)
             return self._signal(
-                snapshot, SignalAction.ENTER_SHORT, "range upper-band entry", stop, target
+                snapshot,
+                SignalAction.ENTER_SHORT,
+                self._entry_reason("upper-band", score),
+                stop,
+                target,
             )
         return None
+
+    def entry_score(self, snapshot: MarketSnapshot, state: StrategyState) -> float | None:
+        if self.config.entry_mode == "weighted_reversion_v2":
+            return self._v2_entry_score(snapshot, state)
+        if self.config.entry_mode not in {"weighted_reversion", "weighted_reversion_v11"}:
+            return None
+        if state.last_z is None:
+            return None
+        mean_reversion = min(abs(snapshot.z_score) / 3, 1)
+        momentum = min(max(abs(state.last_z) - abs(snapshot.z_score), 0) / 0.5, 1)
+        volatility = max(0.0, 1 - snapshot.atr_percentile / 90)
+        liquidity = max(0.0, 1 - snapshot.spread_bps / self.config.max_spread_bps)
+        return 0.35 * mean_reversion + 0.30 * momentum + 0.20 * volatility + 0.15 * liquidity
+
+    def _v2_entry_score(self, snapshot: MarketSnapshot, state: StrategyState) -> float | None:
+        if not self._v2_entry_ready(snapshot, state):
+            return None
+        distance = abs(snapshot.z_score)
+        extension = max(0.0, 1 - abs(distance - 2.5) / 1.5)
+        assert state.previous_z is not None
+        momentum = min((abs(state.previous_z) - distance) / 1.5, 1)
+        volatility = max(0.0, 1 - abs(snapshot.atr_percentile - 45) / 45)
+        liquidity = max(0.0, 1 - snapshot.spread_bps / self.config.max_spread_bps)
+        return 0.35 * extension + 0.30 * momentum + 0.20 * volatility + 0.15 * liquidity
+
+    def _v2_entry_ready(self, snapshot: MarketSnapshot, state: StrategyState) -> bool:
+        if (
+            state.previous_z is None
+            or state.last_z is None
+            or state.last_close is None
+            or not self.config.entry_z <= abs(snapshot.z_score) <= 4
+        ):
+            return False
+        if snapshot.z_score > 0:
+            return (
+                self.config.short_enabled
+                and snapshot.regime is not MarketRegime.TREND_UP
+                and state.previous_z > state.last_z > snapshot.z_score
+                and snapshot.candle.close < state.last_close
+            )
+        return (
+            snapshot.regime is not MarketRegime.TREND_DOWN
+            and state.previous_z < state.last_z < snapshot.z_score
+            and snapshot.candle.close > state.last_close
+        )
+
+    def _entry_reason(self, band: str, score: float | None) -> str:
+        if self.config.entry_mode.startswith("weighted_reversion"):
+            assert score is not None
+            version = (
+                " v1.1"
+                if self.config.entry_mode.endswith("_v11")
+                else " v2"
+                if self.config.entry_mode.endswith("_v2")
+                else ""
+            )
+            return f"weighted mean-reversion{version} {band} entry (score {score:.3f})"
+        return f"range {band} entry"
 
     def _entry_levels(self, snapshot: MarketSnapshot, side: Side) -> tuple[Decimal, Decimal]:
         entry = snapshot.candle.close
@@ -124,6 +202,23 @@ class AdaptiveRangeStrategy:
             return "data integrity compromised"
         if snapshot.regime is MarketRegime.SHOCK:
             return "shock regime"
+        if (
+            self.config.entry_mode in {"weighted_reversion_v11", "weighted_reversion_v2"}
+            and state.previous_z is not None
+            and state.last_z is not None
+            and (
+                (position.side is Side.SELL and state.previous_z < state.last_z < snapshot.z_score)
+                or (
+                    position.side is Side.BUY and state.previous_z > state.last_z > snapshot.z_score
+                )
+            )
+        ):
+            return "mean reversion invalidated"
+        if self.config.entry_mode == "weighted_reversion_v11" and (
+            (position.side is Side.SELL and snapshot.z_score <= self.config.v11_exit_z)
+            or (position.side is Side.BUY and snapshot.z_score >= -self.config.v11_exit_z)
+        ):
+            return "VWAP approach"
         if self.config.session_flatten_enabled and snapshot.candle.exchange_timestamp >= flatten:
             return "session flatten"
         if position.bars_held >= self.config.time_stop_bars:

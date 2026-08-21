@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from adaptive_bot.domain.enums import (
     AssetClass,
     HealthLevel,
+    LiquidityRole,
     MarketRegime,
     OrderStatus,
     OrderType,
@@ -113,6 +114,14 @@ class Signal(DomainEvent):
     z_score: float
     regime: MarketRegime
     reason: str
+    entry_limit_price: Decimal | None = Field(default=None, gt=0)
+    entry_post_only: bool = False
+
+    @model_validator(mode="after")
+    def post_only_entry_has_price(self) -> Signal:
+        if self.entry_post_only and self.entry_limit_price is None:
+            raise ValueError("post-only entry requires entry_limit_price")
+        return self
 
 
 class OrderRequest(DomainEvent):
@@ -125,6 +134,7 @@ class OrderRequest(DomainEvent):
     time_in_force: TimeInForce = TimeInForce.DAY
     reduce_only: bool = False
     protective: bool = False
+    post_only: bool = False
 
     @model_validator(mode="after")
     def required_price(self) -> OrderRequest:
@@ -132,6 +142,8 @@ class OrderRequest(DomainEvent):
             raise ValueError("limit order requires limit_price")
         if self.order_type is OrderType.STOP and self.stop_price is None:
             raise ValueError("stop order requires stop_price")
+        if self.post_only and self.order_type is not OrderType.LIMIT:
+            raise ValueError("post-only order must be a limit order")
         return self
 
 
@@ -147,6 +159,7 @@ class Order(DomainEvent):
     stop_price: Decimal | None = Field(default=None, gt=0)
     reduce_only: bool = False
     protective: bool = False
+    post_only: bool = False
 
     @model_validator(mode="after")
     def fill_not_above_order(self) -> Order:
@@ -162,6 +175,7 @@ class Fill(DomainEvent):
     quantity: Decimal = Field(gt=0)
     commission: Decimal = Field(ge=0)
     slippage: Decimal = Field(ge=0)
+    liquidity_role: LiquidityRole = LiquidityRole.UNKNOWN
 
 
 class Position(StrictModel):
@@ -207,7 +221,9 @@ class StrategyState(StrictModel):
     pending_regime: MarketRegime | None = None
     pending_regime_count: int = Field(default=0, ge=0)
     cooldown_bars: int = Field(default=0, ge=0)
+    previous_z: float | None = None
     last_z: float | None = None
+    last_close: Decimal | None = None
 
 
 class HealthStatus(StrictModel):

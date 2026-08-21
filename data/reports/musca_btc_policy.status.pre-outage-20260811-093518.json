@@ -1,0 +1,23 @@
+{
+  "phase": "model_fit",
+  "detail": "fold 10/10 SHORT 4/4 xgboost_cuda",
+  "percent": 78.0,
+  "updated_at": "2026-08-11T07:35:18.304635+00:00",
+  "protocol_hash": "b3bec96c5e3d662e9ab7a20e7ae240778cdc13116e864042fe52ab5d0c49cbac",
+  "pid": 13164,
+  "cpu_seconds": 3370.97,
+  "ram_gb": 4.962,
+  "elapsed_seconds": 2236.9,
+  "eta_seconds": 630.9,
+  "fold": "10/10",
+  "side": "SHORT",
+  "model": "xgboost_cuda",
+  "fit_rows": 522942,
+  "gpu": {
+    "available": true,
+    "device": 0,
+    "name": "NVIDIA GeForce RTX 4060 Ti",
+    "free_gb": 14.17,
+    "total_gb": 16.0
+  }
+}

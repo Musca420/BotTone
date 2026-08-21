@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -52,6 +53,7 @@ class TelemetryPoint(ResultModel):
     atr: float | None
     adx: float | None
     z_score: float | None
+    entry_score: float | None
     atr_percentile: float | None
     ema_slope: float | None
     spread_bps: float
@@ -65,6 +67,8 @@ class BacktestResult(ResultModel):
     mode: str = "backtest"
     instrument: str
     timeframe_minutes: int
+    range_adx_threshold: float
+    strategy_profile: str
     risk_per_trade: Decimal
     max_daily_loss: Decimal
     max_weekly_loss: Decimal
@@ -91,7 +95,7 @@ class BacktestResult(ResultModel):
 
 
 class BacktestEngine:
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, *, strategy: Any | None = None) -> None:
         self.config = config
         self.kill_switch = KillSwitch()
         self.broker = SimulatedBroker(
@@ -100,11 +104,13 @@ class BacktestEngine:
             spread_bps=config.backtest.spread_bps,
             slippage_bps=config.backtest.slippage_bps,
             commission_per_unit=config.backtest.commission_per_unit,
+            maker_fee_bps=config.backtest.maker_fee_bps,
+            taker_fee_bps=config.backtest.taker_fee_bps,
             max_volume_participation=config.backtest.max_volume_participation,
         )
         self.order_manager = OrderManager(self.broker, self.kill_switch)
         self.risk_engine = DefaultRiskEngine(config.risk, self.kill_switch)
-        self.strategy = AdaptiveRangeStrategy(config.strategy)
+        self.strategy = strategy or AdaptiveRangeStrategy(config.strategy)
         self.classifier = RegimeClassifier(config.strategy)
 
     async def run(
@@ -113,6 +119,7 @@ class BacktestEngine:
         *,
         trade_after: datetime | None = None,
         mode: str = "backtest",
+        precomputed_features: pd.DataFrame | None = None,
     ) -> BacktestResult:
         report = validate_candles(
             frame,
@@ -123,11 +130,15 @@ class BacktestEngine:
         )
         report.require(self.config.backtest.minimum_quality_score)
         data, sessions, opens, closes = self._prepare(frame, report)
-        features = build_features(
-            data,
-            sessions,
-            self.config.strategy,
-            self.config.instrument.asset_class,
+        features = (
+            build_features(
+                data,
+                sessions,
+                self.config.strategy,
+                self.config.instrument.asset_class,
+            )
+            if precomputed_features is None
+            else precomputed_features.loc[data.index]
         )
         strategy_state = StrategyState()
         initial = self.config.backtest.initial_equity
@@ -152,7 +163,18 @@ class BacktestEngine:
             consecutive = risk_state.consecutive_losses
             cooldown = max(0, risk_state.cooldown_bars - 1)
             if account.realized_pnl != last_realized:
-                consecutive = consecutive + 1 if account.realized_pnl < last_realized else 0
+                lost = account.realized_pnl < last_realized
+                consecutive = consecutive + 1 if lost else 0
+                if lost and self.config.strategy.entry_mode in {
+                    "weighted_reversion_v11",
+                    "weighted_reversion_v2",
+                }:
+                    weighted_cooldown = (
+                        self.config.strategy.v11_cooldown_bars
+                        if self.config.strategy.entry_mode == "weighted_reversion_v11"
+                        else 6
+                    )
+                    cooldown = max(cooldown, weighted_cooldown)
                 last_realized = account.realized_pnl
                 if consecutive >= self.config.risk.max_consecutive_losses:
                     cooldown = self.config.risk.cooldown_after_losses
@@ -194,9 +216,12 @@ class BacktestEngine:
                 pending_regime=classified.pending,
                 pending_regime_count=classified.pending_count,
                 cooldown_bars=cooldown,
+                previous_z=strategy_state.previous_z,
                 last_z=previous_z,
+                last_close=strategy_state.last_close,
             )
             activity = "Indicators warming up — no trading decision"
+            entry_score: float | None = None
             usable = self._usable(row)
             trading_enabled = trade_after is None or candle.exchange_timestamp > trade_after
             if usable and not trading_enabled:
@@ -207,6 +232,7 @@ class BacktestEngine:
                     atr=Decimal(str(row["atr"])),
                     center=Decimal(str(row["center"])),
                     z_score=float(row["z"]),
+                    atr_percentile=float(row["atr_percentile"]),
                     spread_bps=float(spread_bps),
                     regime=classified.regime,
                     session_open=opens.iloc[position_index],
@@ -214,14 +240,30 @@ class BacktestEngine:
                     data_reliable=report.passed,
                 )
                 signal = self.strategy.evaluate(snapshot, strategy_state, self.broker.position)
+                entry_score = self.strategy.entry_score(snapshot, strategy_state)
                 if signal is not None:
                     signal_count += 1
                     accepted, detail = await self._handle_signal(signal, risk_state, spread_bps)
                     rejected += int(not accepted)
+                    if (
+                        accepted
+                        and self.config.strategy.entry_mode
+                        in {"weighted_reversion_v11", "weighted_reversion_v2"}
+                        and signal.reason == "shock regime"
+                    ):
+                        weighted_cooldown = (
+                            self.config.strategy.v11_cooldown_bars
+                            if self.config.strategy.entry_mode == "weighted_reversion_v11"
+                            else 6
+                        )
+                        strategy_state = strategy_state.model_copy(
+                            update={"cooldown_bars": weighted_cooldown}
+                        )
+                        risk_state = replace(risk_state, cooldown_bars=weighted_cooldown)
                     action = signal.action.value.replace("_", " ").title()
                     activity = f"{action}: {signal.reason}. {detail}"
                 else:
-                    activity = self._waiting_reason(snapshot, risk_state)
+                    activity = self._waiting_reason(snapshot, risk_state, strategy_state)
             equity_curve.append(
                 EquityPoint(timestamp=candle.exchange_timestamp, equity=account.equity)
             )
@@ -252,6 +294,7 @@ class BacktestEngine:
                     atr=atr_value,
                     adx=self._finite(row["adx"]),
                     z_score=self._finite(row["z"]),
+                    entry_score=entry_score,
                     atr_percentile=self._finite(row["atr_percentile"]),
                     ema_slope=self._finite(row["ema_slope"]),
                     spread_bps=float(spread_bps),
@@ -266,7 +309,11 @@ class BacktestEngine:
                 )
             )
             strategy_state = strategy_state.model_copy(
-                update={"last_z": None if pd.isna(row["z"]) else float(row["z"])}
+                update={
+                    "previous_z": strategy_state.last_z,
+                    "last_z": None if pd.isna(row["z"]) else float(row["z"]),
+                    "last_close": candle.close,
+                }
             )
 
         final_account = await self.broker.get_account()
@@ -277,6 +324,8 @@ class BacktestEngine:
             mode=mode,
             instrument=self.config.instrument.symbol,
             timeframe_minutes=self.config.strategy.timeframe_minutes,
+            range_adx_threshold=self.config.strategy.range_adx_threshold,
+            strategy_profile=self.config.strategy.entry_mode,
             risk_per_trade=self.config.risk.risk_per_trade,
             max_daily_loss=self.config.risk.max_daily_loss,
             max_weekly_loss=self.config.risk.max_weekly_loss,
@@ -371,9 +420,19 @@ class BacktestEngine:
             account = await self.broker.get_account()
             costs = estimated_round_trip_cost_per_unit(
                 signal.reference_price,
-                spread_bps,
-                self.config.backtest.slippage_bps,
+                Decimal("0") if signal.entry_post_only else spread_bps,
+                (
+                    Decimal("0")
+                    if signal.entry_post_only
+                    else self.config.backtest.slippage_bps
+                ),
                 self.config.backtest.commission_per_unit,
+                (
+                    self.config.backtest.maker_fee_bps
+                    + self.config.backtest.taker_fee_bps
+                    if signal.entry_post_only
+                    else self.config.backtest.taker_fee_bps * 2
+                ),
             )
             decision = self.risk_engine.assess(
                 signal, self.config.instrument, account, risk_state, costs
@@ -381,7 +440,16 @@ class BacktestEngine:
             if not decision.approved:
                 return False, f"Risk rejected: {decision.reason}"
             side = Side.BUY if signal.action is SignalAction.ENTER_LONG else Side.SELL
-            await self._submit(signal, "entry", side, OrderType.MARKET, decision.quantity)
+            entry_type = OrderType.LIMIT if signal.entry_post_only else OrderType.MARKET
+            await self._submit(
+                signal,
+                "entry",
+                side,
+                entry_type,
+                decision.quantity,
+                limit_price=signal.entry_limit_price,
+                post_only=signal.entry_post_only,
+            )
             opposite = Side.SELL if side is Side.BUY else Side.BUY
             assert signal.stop_price is not None and signal.target_price is not None
             await self._submit(
@@ -402,6 +470,7 @@ class BacktestEngine:
                 decision.quantity,
                 limit_price=signal.target_price,
                 reduce_only=True,
+                post_only=True,
             )
             return True, f"Risk approved · quantity {decision.quantity}"
 
@@ -417,18 +486,31 @@ class BacktestEngine:
         await self._submit(signal, "exit", side, OrderType.MARKET, quantity, reduce_only=True)
         return True, f"Reduce-only order submitted · quantity {quantity}"
 
-    def _waiting_reason(self, snapshot: MarketSnapshot, state: RiskState) -> str:
+    def _waiting_reason(
+        self, snapshot: MarketSnapshot, state: RiskState, strategy_state: StrategyState
+    ) -> str:
         if self.kill_switch.active:
             return "Kill switch active — new entries blocked"
         if state.cooldown_bars > 0:
             return f"Cooldown active — {state.cooldown_bars} bars remaining"
-        if snapshot.regime.value != "range":
+        if snapshot.regime.value == "shock":
+            return "No entry — market regime is shock"
+        if self.config.strategy.entry_mode == "range" and snapshot.regime.value != "range":
             return f"No entry — market regime is {snapshot.regime.value.replace('_', ' ')}"
         if abs(snapshot.z_score) < self.config.strategy.entry_z:
             return (
                 f"No entry — |z| {abs(snapshot.z_score):.2f} is below "
                 f"{self.config.strategy.entry_z:.2f}"
             )
+        if self.config.strategy.entry_mode.startswith("weighted_reversion"):
+            score = self.strategy.entry_score(snapshot, strategy_state)
+            if score is None:
+                return "No entry — weighted score unavailable"
+            if score < self.config.strategy.weighted_entry_threshold:
+                return (
+                    f"No entry — weighted score {score:.3f} is below "
+                    f"{self.config.strategy.weighted_entry_threshold:.3f}"
+                )
         return "No order — position, session or direction constraints are not satisfied"
 
     @staticmethod
@@ -453,6 +535,7 @@ class BacktestEngine:
         stop_price: Decimal | None = None,
         reduce_only: bool = False,
         protective: bool = False,
+        post_only: bool = False,
     ) -> None:
         request = OrderRequest(
             exchange_timestamp=signal.exchange_timestamp,
@@ -469,6 +552,7 @@ class BacktestEngine:
             stop_price=stop_price,
             reduce_only=reduce_only,
             protective=protective,
+            post_only=post_only,
         )
         await self.order_manager.submit(request)
 

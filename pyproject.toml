@@ -6,23 +6,32 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "alpaca-py>=0.43.5",
+  "arch>=8,<9",
   "duckdb>=1.4",
   "numpy>=2.3",
+  "optuna>=4.5,<5",
   "pandas>=2.3",
   "pandas-market-calendars>=5.3",
   "pyarrow>=20",
   "pydantic>=2.11",
   "pydantic-settings>=2.10",
   "pyyaml>=6.0",
+  "scikit-learn>=1.7,<2",
   "websockets>=15.0",
 ]
 
 [project.scripts]
 adaptive-bot = "adaptive_bot.cli:main"
 
+[project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x[ctk]>=14.1.1",
+    "xgboost>=3.0,<4",
+]
+
 [dependency-groups]
 dev = [
-  "hypothesis>=6.135",
+  "hypothesis>=6.135,<6.150",
   "mypy>=1.16",
   "pandas-stubs>=2.3",
   "pytest>=8.4",
@@ -53,7 +62,17 @@ mypy_path = "src"
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pandas_market_calendars", "pandas_market_calendars.*"]
+module = [
+    "joblib",
+    "arch",
+    "arch.*",
+    "sklearn",
+    "sklearn.*",
+    "xgboost",
+    "xgboost.*",
+    "pandas_market_calendars",
+    "pandas_market_calendars.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
